@@ -1,20 +1,74 @@
 # aictx
 
-Run the official Claude Code and Codex CLIs under clear personal, work, or CI identities.
-
-`aictx` gives every profile its own vendor state directory. You can switch accounts without copying tokens into shell files or repository configuration.
+Switch between personal and work profiles in Codex, Claude Code and more.
 
 ## Quick start
 
-Install `aictx` with Homebrew on macOS or Linux:
+### 1. Install
 
 ```bash
 brew install mikigraf/tap/aictx
 ```
 
-You also need the official `claude` and/or `codex` CLI for the provider you use.
+You also need the official `claude` CLI.
 
-### Install or update from source
+### 2. Set up Claude
+
+```bash
+aictx init --guided
+```
+
+This initializes `aictx`, creates or reuses `claude:personal`, runs the official `claude setup-token` flow, and stores the pasted token in the OS credential store.
+
+### 3. Run Claude
+
+```bash
+aictx run --profile claude:personal claude -- \
+  -p "reply with exactly: Claude subscription works"
+```
+
+A successful reply confirms the token works.
+
+## Add Codex
+
+Install the official `codex` CLI, then run:
+
+```bash
+aictx init
+aictx profile add codex personal --auth subscription
+aictx login codex:personal
+aictx run --profile codex:personal codex -- exec "explain this repository"
+```
+
+Codex opens its browser login and keeps the OAuth session inside the profile's isolated `CODEX_HOME`.
+
+The compatibility spelling also works:
+
+```bash
+aictx profile add codex personal --auth subscription-token
+```
+
+For Codex, both spellings select its native `chatgpt-oauth` mode.
+
+## Switch both tools together
+
+Create one context after both profiles exist:
+
+```bash
+aictx context add personal \
+  --claude claude:personal \
+  --codex codex:personal
+aictx use personal
+
+aictx run claude -- -p "explain this repository"
+aictx run codex -- exec "run the tests"
+```
+
+After a context is active, you do not need `--profile` on every run.
+
+Run `aictx` with no subcommand to open the terminal context picker.
+
+## Install or update from source
 
 Source builds need Rust 1.89 or newer. From an existing checkout:
 
@@ -30,81 +84,6 @@ git clone https://github.com/mikigraf/aictx.git
 cd aictx
 cargo install --path . --locked
 ```
-
-### Claude subscription
-
-Run the guided setup:
-
-```bash
-aictx init --guided
-```
-
-This command:
-
-1. Initializes `aictx`.
-2. Creates or safely reuses `claude:personal`.
-3. Runs the official `claude setup-token` flow.
-4. Reads the pasted token through a hidden prompt.
-5. Stores it in the native OS credential store.
-
-Paste only the raw token. Wrapped lines are handled safely. Do not paste an `export` command or other shell text.
-
-Test the profile with a real model request:
-
-```bash
-aictx run --profile claude:personal claude -- \
-  -p "reply with exactly: Claude subscription works"
-```
-
-The local Claude status command can confirm the selected authentication route, but it cannot prove that the token is accepted remotely. The first successful model request is the remote check.
-
-If you previously stored an invalid Claude token, clear the local copy before running guided setup again:
-
-```bash
-aictx logout claude:personal
-aictx init --guided
-```
-
-Local logout does not revoke a remote Claude token. Revoke old tokens in your Claude account when needed.
-
-### Codex subscription
-
-For a clean Codex-only setup:
-
-```bash
-aictx init
-aictx profile add codex personal --auth subscription
-aictx login codex:personal
-aictx run --profile codex:personal codex -- exec "explain this repository"
-```
-
-`aictx login codex:personal` starts the official Codex browser login. If you already ran Claude guided setup, `aictx` is initialized and the first command is harmless but optional.
-
-The compatibility spelling below also works:
-
-```bash
-aictx profile add codex personal --auth subscription-token
-```
-
-For Codex, both `subscription` and `subscription-token` map to its native `chatgpt-oauth` mode. Use `subscription` in new commands because it describes both providers clearly.
-
-### Use Claude and Codex together
-
-Create one context after both profiles exist:
-
-```bash
-aictx context add personal \
-  --claude claude:personal \
-  --codex codex:personal
-aictx use personal
-
-aictx run claude -- -p "explain this repository"
-aictx run codex -- exec "run the tests"
-```
-
-After a context is active, you do not need `--profile` on every run. Everything after `--` is passed directly to the official vendor CLI as arguments, without a shell.
-
-Run `aictx` with no subcommand to open the terminal context picker.
 
 ## Why aictx is different
 
@@ -132,9 +111,6 @@ This is why the shared command uses `--auth subscription`, while the saved provi
 For API keys, WIF, managed access tokens, custom profile names, and other options, see [Authentication support](#authentication-support) and the [Command reference](docs/command-reference.md).
 
 Options that could change the selected identity, bypass isolated state, or load unsafe repository commands are refused.
-
-> [!IMPORTANT]
-> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These offline tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes. They do not contact Claude or Codex. Production rollout still requires live-account, WIF, native-keyring, billing, Windows, and release-signing qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
 
 ## Interactive mode
 
@@ -180,7 +156,7 @@ Bindings live in global user metadata. Repository `.aictx.toml` files are ignore
 
 ## Authentication support
 
-Use `--auth subscription` when creating either a Claude or Codex subscription profile. The compatibility spellings `subscription-token` and `chatgpt-oauth` remain accepted; configuration is normalized to the vendor-native mode shown below.
+Use `--auth subscription` when creating either a Claude or Codex subscription profile. The compatibility spellings `subscription-token` and `chatgpt-oauth` remain accepted. Configuration is normalized to the vendor-native mode shown below.
 
 | Provider | Mode | Billing path | Credential handling |
 | --- | --- | --- | --- |
@@ -197,7 +173,14 @@ Static secrets are stored in the native OS keyring. Configuration contains only 
 keyring://service/account
 ```
 
-The secret value is entered through a hidden prompt or standard input during login. For a Claude setup token, paste only the raw token, not an `export` command or other shell text. The prompt does not depend on an undocumented token prefix, length, or character set. It joins nonblank wrapped lines after removing ASCII space or tab indentation at each line edge, then rejects empty input, whitespace or controls inside a segment, and common labels or shell wrappers before storage. Pasted text is never executed as shell code. A secret is never accepted as an ordinary command-line argument.
+Paste only the raw Claude setup token. The hidden prompt accepts wrapped paste input, rejects shell commands and unsafe whitespace or control characters, and never executes pasted text. Secrets are never accepted as ordinary command-line arguments.
+
+If Claude rejects a stored token, replace the local copy:
+
+```bash
+aictx logout claude:personal
+aictx init --guided
+```
 
 If Claude creates a setup token but capture or keyring storage fails, revoke that remote token in your Claude account settings under **Settings > Claude Code** before retrying. Local replacement or logout does not revoke an already-created remote token.
 
@@ -222,9 +205,9 @@ Read [Configuration](docs/configuration.md) for every supported profile field an
 
 See the full [Command reference](docs/command-reference.md).
 
-Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative; use `aictx --help` and `aictx <command> --help` for current syntax and examples.
+Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative. Use `aictx --help` and `aictx <command> --help` for current syntax and examples.
 
-Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests; a successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array; every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
+Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests. A successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array. Every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
 
 ## Shell integration
 
@@ -287,6 +270,9 @@ Read the [Threat model](THREAT_MODEL.md) and [Security policy](SECURITY.md) befo
 
 ## Validation status
 
+> [!IMPORTANT]
+> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes without contacting Claude or Codex. Live accounts, WIF, native keyrings, billing, Windows deployments, and release signing still need deployment qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
+
 Local and CI checks are layered: unit tests, public CLI lifecycle tests, Unix runner contracts, native fake-vendor E2E tests, PTY tests, MSRV checks, and native Linux/macOS/Windows jobs. CI also checks formatting, Clippy, documentation, dependency policy, secret history, packaging, and coverage with region/function/line floors of 75%/60%/70%. A configured workflow is evidence only after it runs successfully on a committed revision.
 
 These checks still need real deployment evidence:
@@ -324,7 +310,7 @@ cargo test --doc --locked
 
 The committed lockfile is part of the application build. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change. Report security issues through [SECURITY.md](SECURITY.md), not a public issue.
 
-The full test architecture and focused commands are in [Testing](docs/testing.md). Automated tests use temporary state and synthetic vendor fixtures; they never need a real account or host keyring.
+The full test architecture and focused commands are in [Testing](docs/testing.md). Automated tests use temporary state and synthetic vendor fixtures. They never need a real account or host keyring.
 
 ## License
 
