@@ -93,6 +93,9 @@ pub enum Error {
 
     #[error("operation cancelled")]
     Cancelled,
+
+    #[error("operation interrupted")]
+    Interrupted(u8),
 }
 
 impl Error {
@@ -106,6 +109,7 @@ impl Error {
             Self::InteractionRequired(_) => 14,
             Self::PolicyRefused(_) => 15,
             Self::VendorIncompatible(_) | Self::Spawn { .. } => 16,
+            Self::Interrupted(exit_code) => *exit_code,
             Self::NotInitialized
             | Self::InvalidInput(_)
             | Self::InvalidConfig(_)
@@ -169,7 +173,7 @@ impl Error {
                 "Unlock the OS keyring and retry. If the error continues, run `aictx doctor`."
                     .to_owned()
             }
-            Self::Cancelled => return None,
+            Self::Cancelled | Self::Interrupted(_) => return None,
         };
         Some(hint)
     }

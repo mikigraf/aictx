@@ -26,6 +26,7 @@ fn exit_codes_remain_stable_by_error_category() {
         (Error::InteractionRequired("terminal needed".to_owned()), 14),
         (Error::PolicyRefused("unsafe setting".to_owned()), 15),
         (Error::VendorIncompatible("missing CLI".to_owned()), 16),
+        (Error::Interrupted(143), 143),
     ];
 
     for (error, expected) in cases {
@@ -243,6 +244,15 @@ fn every_public_help_surface_is_parseable_and_actionable() {
             "help surface {arguments:?} had no usage"
         );
     }
+
+    let init = aictx(&root)
+        .args(["init", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("run init help: {error}"));
+    let init = String::from_utf8_lossy(&init.stdout);
+    assert!(init.contains("--guided"));
+    assert!(init.contains("claude setup-token"));
+    assert!(init.contains("aictx run --profile claude:personal"));
 
     let login = aictx(&root)
         .args(["login", "--help"])

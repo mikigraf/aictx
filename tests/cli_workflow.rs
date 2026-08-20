@@ -13,12 +13,14 @@ fn aictx(root: &Path) -> Command {
 }
 
 fn run_ok(command: &mut Command) -> std::process::Output {
+    let description = format!("{command:?}");
     let output = command
         .output()
         .unwrap_or_else(|error| panic!("run aictx: {error}"));
     assert!(
         output.status.success(),
-        "command failed\nstdout: {}\nstderr: {}",
+        "command failed: {description}\nstatus: {}\nstdout: {}\nstderr: {}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -43,6 +45,28 @@ fn add_personal_context(root: &Path) {
     run_ok(aictx(root).arg("init"));
     run_ok(aictx(root).args(["profile", "add", "claude", "personal", "--auth", "api-key"]));
     run_ok(aictx(root).args(["context", "add", "personal", "--claude", "claude:personal"]));
+}
+
+#[test]
+fn guided_init_rejects_non_interactive_use_before_creating_state() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let output = aictx(&root)
+        .args(["--non-interactive", "init", "--guided"])
+        .output()
+        .unwrap_or_else(|error| panic!("run non-interactive guided init: {error}"));
+
+    assert_eq!(output.status.code(), Some(14));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(
+        "guided setup requires terminal input and output for the interactive `claude setup-token` flow"
+    ));
+    assert!(stderr.contains("without `--non-interactive`"));
+    assert!(
+        !root.exists(),
+        "a rejected guided flow must not create a partial layout"
+    );
 }
 
 #[test]

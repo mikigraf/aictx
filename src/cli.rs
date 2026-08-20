@@ -12,7 +12,7 @@ use crate::model::{AuthArg, CodexCredentialStore, Name, ProfileId, Provider};
     long_about = None,
     propagate_version = true,
     after_help = "Run `aictx` with no subcommand to open the interactive terminal dashboard.",
-    after_long_help = "Examples:\n  aictx init\n  aictx profile add claude personal --auth subscription-token\n  aictx context add personal --claude claude:personal\n  aictx use personal\n  aictx run claude -- -p \"explain this repository\""
+    after_long_help = "Examples:\n  aictx init --guided\n  aictx init\n  aictx profile add claude personal --auth subscription\n  aictx profile add codex personal --auth subscription\n  aictx context add personal --claude claude:personal --codex codex:personal\n  aictx use personal\n  aictx run claude -- -p \"explain this repository\""
 )]
 pub struct Cli {
     /// Use an explicit application root outside the current repository.
@@ -57,7 +57,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Initialize versioned metadata and secure application directories.
-    Init,
+    Init(InitArgs),
     /// Add, inspect, list, or remove provider profiles.
     Profile(ProfileArgs),
     /// Add, inspect, list, or remove user-facing contexts.
@@ -90,6 +90,16 @@ pub enum Command {
     ShellInit(ShellInitArgs),
     /// Generate static shell completion definitions.
     Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  aictx init\n  aictx init --guided\n\nGuided setup creates or reuses the Claude `personal` subscription-token profile, runs the official `claude setup-token` flow, and stores the pasted token in the OS keyring. On success, run:\n  aictx run --profile claude:personal claude -- -p \"explain this repository\""
+)]
+pub struct InitArgs {
+    /// Set up the Claude `personal` subscription profile and credential in one guided flow.
+    #[arg(long)]
+    pub guided: bool,
 }
 
 #[derive(Debug, Args)]

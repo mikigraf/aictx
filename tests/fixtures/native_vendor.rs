@@ -8,8 +8,12 @@ use std::{
     path::PathBuf,
 };
 
+use secrecy::ExposeSecret;
+
 const RECORD_FILE: &str = "native-vendor-record.json";
 const STATIC_SECRET_CANARY: &str = "aictx-native-fixture-static-secret-v1";
+const SYNTHETIC_SETUP_TOKEN: &str =
+    "opaque-fixture:Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~";
 
 fn main() {
     match run() {
@@ -23,6 +27,9 @@ fn main() {
 
 fn run() -> io::Result<i32> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == [OsStr::new("prompt-setup-token")] {
+        return Ok(prompt_setup_token());
+    }
     if arguments.as_slice() == [OsStr::new("--version")] {
         return version();
     }
@@ -63,6 +70,13 @@ fn run() -> io::Result<i32> {
     }
 
     write_record(&arguments)?;
+    if arguments.as_slice() == [OsStr::new("setup-token")]
+        && env::current_exe()?
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains("setup-token-exit-23"))
+    {
+        return Ok(23);
+    }
     Ok(
         if arguments
             .first()
@@ -73,6 +87,23 @@ fn run() -> io::Result<i32> {
             0
         },
     )
+}
+
+fn prompt_setup_token() -> i32 {
+    match aictx::secret::prompt_claude_setup_token("Synthetic Claude setup-token", false) {
+        Ok(secret) if secret.expose_secret() == SYNTHETIC_SETUP_TOKEN => {
+            println!("synthetic setup-token accepted");
+            0
+        }
+        Ok(_) => {
+            eprintln!("synthetic setup-token did not match");
+            3
+        }
+        Err(error) => {
+            eprintln!("{}", error.render_for_terminal());
+            i32::from(error.exit_code())
+        }
+    }
 }
 
 fn version() -> io::Result<i32> {

@@ -11,7 +11,8 @@ use crate::{
     Error, Result, activation,
     binary::is_in_current_repository,
     cli::{
-        Cli, Command, ContextCommand, CredentialCommand, LoginArgs, ProfileAddArgs, ProfileCommand,
+        Cli, Command, ContextCommand, CredentialCommand, InitArgs, LoginArgs, ProfileAddArgs,
+        ProfileCommand,
     },
     config::{AppPaths, MetadataStore, acquire_profile_lock, ensure_secure_directory},
     doctor,
@@ -28,7 +29,10 @@ use crate::{
         generate_claude_setup_token, login_codex, logout_codex, run_profile,
         validate_codex_settings,
     },
-    secret::{SecretManager, SecretRef, parse_profile_secret_ref, prompt_secret, secret_label},
+    secret::{
+        SecretManager, SecretRef, parse_profile_secret_ref, prompt_claude_setup_token,
+        prompt_secret, secret_label,
+    },
     shell, tui,
 };
 
@@ -36,26 +40,8 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
     let store = MetadataStore::new(paths.clone());
     match cli.command {
         None => tui::run(&store, cli.non_interactive),
-        Some(Command::Init) => {
-            let created = store.initialize()?;
-            if created {
-                store.update_config(|config| {
-                    anchor_binaries(config);
-                    Ok(())
-                })?;
-            }
-            if !cli.quiet {
-                if created {
-                    println!("Initialized aictx metadata.");
-                    println!("  config: {}", paths.config_file.display());
-                    println!("  state:  {}", paths.state_file.display());
-                    println!("No credentials were created or imported.");
-                    println!("Next: add a profile with `aictx profile add --help`.");
-                } else {
-                    println!("aictx is already initialized; existing metadata was left unchanged.");
-                }
-            }
-            Ok(0)
+        Some(Command::Init(args)) => {
+            execute_init(&store, paths, &args, cli.non_interactive, cli.quiet)
         }
         Some(Command::Profile(args)) => {
             execute_profile(&store, paths, args.command, cli.non_interactive)
@@ -73,7 +59,10 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
                     "This changes at least one provider's billing domain. New context: {}",
                     args.context
                 );
-                if !confirm("Continue? [y/N] ")? {
+                if !confirm(
+                    "Continue? [y/N] ",
+                    "billing-domain confirmation requires a terminal or `aictx use --yes`",
+                )? {
                     return Err(Error::Cancelled);
                 }
             }
@@ -96,7 +85,9 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             println!("{}", context.name);
             Ok(0)
         }
-        Some(Command::Login(args)) => execute_login(&store, paths, &args, cli.non_interactive),
+        Some(Command::Login(args)) => {
+            execute_login(&store, paths, &args, cli.non_interactive, false)
+        }
         Some(Command::Logout(args)) => {
             execute_logout(&store, paths, &args.profile, cli.non_interactive)
         }
@@ -249,6 +240,144 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn execute_init(
+    store: &MetadataStore,
+    paths: &AppPaths,
+    args: &InitArgs,
+    non_interactive: bool,
+    quiet: bool,
+) -> Result<i32> {
+    if args.guided {
+        return execute_guided_init(store, paths, non_interactive, quiet);
+    }
+
+    let created = initialize_store(store)?;
+    if !quiet {
+        if created {
+            print_initialized(paths);
+            println!("No credentials were created or imported.");
+            println!("Next: add a profile with `aictx profile add --help`.");
+        } else {
+            println!("aictx is already initialized; existing metadata was left unchanged.");
+        }
+    }
+    Ok(0)
+}
+
+fn execute_guided_init(
+    store: &MetadataStore,
+    paths: &AppPaths,
+    non_interactive: bool,
+    quiet: bool,
+) -> Result<i32> {
+    require_interactive_setup_token_terminal(non_interactive, "guided setup")?;
+
+    let created = initialize_store(store)?;
+    if !quiet {
+        if created {
+            print_initialized(paths);
+        } else {
+            println!("Validated existing aictx metadata; no metadata was overwritten.");
+        }
+    }
+
+    let (profile_id, secret_reference_is_new) = ensure_guided_claude_profile(store, paths, quiet)?;
+    let code = execute_login(
+        store,
+        paths,
+        &LoginArgs {
+            profile: profile_id.clone(),
+            device: false,
+            generate: true,
+            trusted_runner: false,
+        },
+        false,
+        secret_reference_is_new,
+    )?;
+    if code != 0 {
+        return Ok(code);
+    }
+
+    println!("Guided setup complete.");
+    println!("Next: aictx run --profile {profile_id} claude -- -p \"explain this repository\"");
+    Ok(0)
+}
+
+fn initialize_store(store: &MetadataStore) -> Result<bool> {
+    let created = store.initialize()?;
+    if created {
+        store.update_config(|config| {
+            anchor_binaries(config);
+            Ok(())
+        })?;
+    }
+    Ok(created)
+}
+
+fn print_initialized(paths: &AppPaths) {
+    println!("Initialized aictx metadata.");
+    println!("  config: {}", paths.config_file.display());
+    println!("  state:  {}", paths.state_file.display());
+}
+
+fn ensure_guided_claude_profile(
+    store: &MetadataStore,
+    paths: &AppPaths,
+    quiet: bool,
+) -> Result<(ProfileId, bool)> {
+    let profile_id: ProfileId = "claude:personal".parse()?;
+    let config = store.load_config()?;
+    if let Some((existing_id, profile)) = config.profiles.iter().find(|(existing_id, _)| {
+        existing_id.provider() == profile_id.provider()
+            && existing_id
+                .name()
+                .as_str()
+                .eq_ignore_ascii_case(profile_id.name().as_str())
+    }) {
+        if existing_id != &profile_id {
+            return Err(Error::InvalidInput(format!(
+                "guided setup requires profile `{profile_id}`, but existing `{existing_id}` conflicts on case-insensitive filesystems"
+            )));
+        }
+        if !matches!(
+            profile,
+            Profile::Claude {
+                auth: ClaudeAuth::SubscriptionToken,
+                ..
+            }
+        ) {
+            return Err(Error::InvalidInput(format!(
+                "guided setup requires `{profile_id}` to use subscription-token authentication; the existing profile was left unchanged"
+            )));
+        }
+        if !quiet {
+            println!("Using existing compatible profile {profile_id}.");
+        }
+        return Ok((profile_id, false));
+    }
+
+    execute_profile(
+        store,
+        paths,
+        ProfileCommand::Add(ProfileAddArgs {
+            provider: Provider::Claude,
+            name: profile_id.name().clone(),
+            auth: AuthArg::Subscription,
+            secret_ref: None,
+            account: None,
+            organization: None,
+            workspace: None,
+            organization_id: None,
+            federation_rule_id: None,
+            service_account_id: None,
+            identity_token_file: None,
+            codex_credential_store: CodexCredentialStore::default(),
+        }),
+        false,
+    )?;
+    Ok((profile_id, true))
 }
 
 fn terminal_safe(value: &str) -> String {
@@ -696,6 +825,7 @@ fn execute_login(
     paths: &AppPaths,
     args: &LoginArgs,
     non_interactive: bool,
+    secret_reference_is_new: bool,
 ) -> Result<i32> {
     require_initialized(store)?;
     let profile_id = &args.profile;
@@ -730,26 +860,41 @@ fn execute_login(
                 ));
             }
             if generate {
-                if non_interactive {
-                    return Err(Error::InteractionRequired(
-                        "claude setup-token requires an interactive vendor flow".to_owned(),
-                    ));
-                }
-                let code = generate_claude_setup_token(&config, &profile, &lifecycle)?;
-                if code != 0 {
-                    return Ok(code);
-                }
-                eprintln!("Paste the token printed by Claude Code. It will not be echoed.");
+                require_interactive_setup_token_terminal(non_interactive, "claude setup-token")?;
             }
-            store_or_validate_secret(
+            confirm_secret_replacement(
+                manager,
+                profile_id,
+                &profile,
+                non_interactive,
+                secret_reference_is_new,
+            )?;
+            if generate {
+                match generate_claude_setup_token(&config, &profile, &lifecycle) {
+                    Ok(0) => {}
+                    Ok(code) => {
+                        warn_unstored_claude_setup_token();
+                        return Ok(code);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let store_result = store_or_validate_secret(
                 manager,
                 profile_id,
                 &profile,
                 "Claude subscription setup-token",
                 non_interactive,
-            )?;
+                secret_reference_is_new,
+            );
+            if let Err(error) = store_result {
+                if generate {
+                    warn_unstored_claude_setup_token();
+                }
+                return Err(error);
+            }
             println!(
-                "Credential ready for {profile_id}. This mode supports model requests only; Remote Control, claude.ai connectors, and --bare are unavailable."
+                "Credential stored locally for {profile_id}. Claude checks remote validity on the first model request. This mode supports model requests only; Remote Control, claude.ai connectors, and --bare are unavailable."
             );
             Ok(0)
         }
@@ -762,15 +907,23 @@ fn execute_login(
                     "--device/--generate is not valid for API-key profiles".to_owned(),
                 ));
             }
+            confirm_secret_replacement(
+                manager,
+                profile_id,
+                &profile,
+                non_interactive,
+                secret_reference_is_new,
+            )?;
             store_or_validate_secret(
                 manager,
                 profile_id,
                 &profile,
                 secret_label(profile.provider()),
                 non_interactive,
+                secret_reference_is_new,
             )?;
             println!(
-                "Credential ready for {profile_id}; runs will use {} billing.",
+                "Credential stored locally for {profile_id}. Claude checks remote validity on the first model request; runs will use {} billing.",
                 profile.billing_domain()
             );
             Ok(0)
@@ -784,12 +937,20 @@ fn execute_login(
                     "--device/--generate is not valid for API-key profiles".to_owned(),
                 ));
             }
+            confirm_secret_replacement(
+                manager,
+                profile_id,
+                &profile,
+                non_interactive,
+                secret_reference_is_new,
+            )?;
             let secret = store_or_validate_secret(
                 manager,
                 profile_id,
                 &profile,
                 "OpenAI API key",
                 non_interactive,
+                secret_reference_is_new,
             )?;
             let code = codex_static_login(
                 &config,
@@ -853,12 +1014,20 @@ fn execute_login(
                     "--device/--generate is not valid for Codex access tokens".to_owned(),
                 ));
             }
+            confirm_secret_replacement(
+                manager,
+                profile_id,
+                &profile,
+                non_interactive,
+                secret_reference_is_new,
+            )?;
             let secret = store_or_validate_secret(
                 manager,
                 profile_id,
                 &profile,
                 "Codex access token",
                 non_interactive,
+                secret_reference_is_new,
             )?;
             codex_static_login(
                 &config,
@@ -1189,6 +1358,7 @@ fn store_or_validate_secret(
     profile: &Profile,
     label: &str,
     non_interactive: bool,
+    confirm_new_reference_before_write: bool,
 ) -> Result<SecretString> {
     let reference = parse_profile_secret_ref(profile_id, profile.secret_ref())?;
     if non_interactive {
@@ -1197,9 +1367,79 @@ fn store_or_validate_secret(
                 .to_owned(),
         ));
     }
-    let secret = prompt_secret(label, false)?;
+    let secret = if matches!(
+        profile,
+        Profile::Claude {
+            auth: ClaudeAuth::SubscriptionToken,
+            ..
+        }
+    ) {
+        prompt_claude_setup_token(label, false)?
+    } else {
+        prompt_secret(label, false)?
+    };
+    // Guided profile creation and login use separate metadata transactions. Recheck the new,
+    // generation-specific keyring reference while the login lifecycle lock is held so another
+    // aictx process cannot populate it in that gap and be overwritten without consent.
+    if confirm_new_reference_before_write
+        && manager.exists(&reference, false)?
+        && !confirm_secret_replacement_prompt(profile_id)?
+    {
+        return Err(Error::Cancelled);
+    }
     manager.put(&reference, &secret)?;
     Ok(secret)
+}
+
+fn warn_unstored_claude_setup_token() {
+    eprintln!(
+        "Warning: Claude Code may have created a remote setup token, but aictx did not store it. Revoke that token in your Claude account settings (Settings > Claude Code) before retrying."
+    );
+}
+
+fn confirm_secret_replacement(
+    manager: SecretManager,
+    profile_id: &ProfileId,
+    profile: &Profile,
+    non_interactive: bool,
+    secret_reference_is_new: bool,
+) -> Result<()> {
+    if non_interactive {
+        return Err(Error::InteractionRequired(
+            "writing an OS keyring may require a consent or unlock prompt; run interactively"
+                .to_owned(),
+        ));
+    }
+    if secret_reference_is_new {
+        return Ok(());
+    }
+    let reference = parse_profile_secret_ref(profile_id, profile.secret_ref())?;
+    if !manager.exists(&reference, false)? {
+        return Ok(());
+    }
+    if confirm_secret_replacement_prompt(profile_id)? {
+        Ok(())
+    } else {
+        Err(Error::Cancelled)
+    }
+}
+
+fn confirm_secret_replacement_prompt(profile_id: &ProfileId) -> Result<bool> {
+    confirm(
+        &format!(
+            "A local credential already exists for {profile_id}. Replacing it does not revoke the old remote credential. Replace it? [y/N] "
+        ),
+        "credential replacement confirmation requires a terminal; rerun login interactively",
+    )
+}
+
+fn require_interactive_setup_token_terminal(non_interactive: bool, operation: &str) -> Result<()> {
+    if non_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(Error::InteractionRequired(format!(
+            "{operation} requires terminal input and output for the interactive `claude setup-token` flow"
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_secret_ref(profile_id: &ProfileId, supplied: Option<&str>) -> Result<String> {
@@ -1394,11 +1634,9 @@ fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
     }
 }
 
-fn confirm(prompt: &str) -> Result<bool> {
+fn confirm(prompt: &str, non_terminal_error: &str) -> Result<bool> {
     if !io::stdin().is_terminal() {
-        return Err(Error::InteractionRequired(
-            "confirmation requires a terminal or --yes".to_owned(),
-        ));
+        return Err(Error::InteractionRequired(non_terminal_error.to_owned()));
     }
     eprint!("{prompt}");
     io::stderr()
