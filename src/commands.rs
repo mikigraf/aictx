@@ -1033,7 +1033,7 @@ fn build_profile(
     match args.provider {
         Provider::Claude => {
             let auth = match args.auth {
-                AuthArg::SubscriptionToken => ClaudeAuth::SubscriptionToken,
+                AuthArg::Subscription | AuthArg::SubscriptionToken => ClaudeAuth::SubscriptionToken,
                 AuthArg::ApiKey => ClaudeAuth::ApiKey,
                 AuthArg::Wif => ClaudeAuth::Wif,
                 AuthArg::ChatgptOauth | AuthArg::AccessToken => {
@@ -1112,10 +1112,12 @@ fn build_profile(
                 ));
             }
             let auth = match args.auth {
-                AuthArg::ChatgptOauth => CodexAuth::ChatgptOauth,
+                AuthArg::Subscription | AuthArg::SubscriptionToken | AuthArg::ChatgptOauth => {
+                    CodexAuth::ChatgptOauth
+                }
                 AuthArg::ApiKey => CodexAuth::ApiKey,
                 AuthArg::AccessToken => CodexAuth::AccessToken,
-                AuthArg::SubscriptionToken | AuthArg::Wif => {
+                AuthArg::Wif => {
                     return Err(Error::InvalidInput(format!(
                         "auth mode {:?} is not valid for Codex",
                         args.auth

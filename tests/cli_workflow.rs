@@ -244,6 +244,79 @@ fn provider_auth_combinations_and_access_token_pins_are_validated() {
 }
 
 #[test]
+fn subscription_auth_is_provider_neutral_and_persists_vendor_native_modes() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    run_ok(aictx(&root).arg("init"));
+
+    for (provider, name, auth) in [
+        ("claude", "canonical", "subscription"),
+        ("codex", "canonical", "subscription"),
+        ("codex", "personal", "subscription-token"),
+        ("codex", "chatgpt-oauth-alias", "chatgpt-oauth"),
+    ] {
+        run_ok(aictx(&root).args(["profile", "add", provider, name, "--auth", auth]));
+    }
+
+    let claude = run_ok(aictx(&root).args(["profile", "show", "claude:canonical"]));
+    let claude = String::from_utf8_lossy(&claude.stdout);
+    assert!(claude.contains("auth:           subscription-token"));
+    assert!(claude.contains("billing:        Claude subscription"));
+    assert!(claude.contains("credential:     keyring://"));
+
+    for profile in [
+        "codex:canonical",
+        "codex:personal",
+        "codex:chatgpt-oauth-alias",
+    ] {
+        let codex = run_ok(aictx(&root).args(["profile", "show", profile]));
+        let codex = String::from_utf8_lossy(&codex.stdout);
+        assert!(codex.contains("auth:           chatgpt-oauth"));
+        assert!(codex.contains("billing:        ChatGPT subscription/workspace"));
+        assert!(codex.contains("credential:     vendor/identity-provider managed"));
+        assert!(!codex.contains("keyring://"));
+    }
+
+    let config = fs::read_to_string(root.join("config/config.toml"))
+        .unwrap_or_else(|error| panic!("read provider-native auth config: {error}"));
+    assert_eq!(config.matches("auth = \"subscription-token\"").count(), 1);
+    assert_eq!(config.matches("auth = \"chatgpt-oauth\"").count(), 3);
+    assert!(!config.contains("auth = \"subscription\""));
+
+    let rejected = aictx(&root)
+        .args([
+            "profile",
+            "add",
+            "codex",
+            "secret-bearing",
+            "--auth",
+            "subscription-token",
+            "--secret-ref",
+            "keyring://aictx/must-not-be-used",
+        ])
+        .output()
+        .unwrap_or_else(|error| panic!("run Codex subscription with secret ref: {error}"));
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("credentials must remain vendor-managed")
+    );
+}
+
+#[test]
+fn profile_help_uses_the_provider_neutral_subscription_mode() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let help = run_ok(aictx(&root).args(["profile", "add", "--help"]));
+    let help = String::from_utf8_lossy(&help.stdout);
+
+    assert!(help.contains("profile add claude personal --auth subscription"));
+    assert!(help.contains("profile add codex work --auth subscription"));
+    assert!(help.contains("subscription-token"));
+    assert!(help.contains("chatgpt-oauth"));
+}
+
+#[test]
 fn case_folded_profile_add_is_rejected_without_disturbing_existing_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("aictx");

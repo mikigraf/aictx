@@ -117,7 +117,7 @@ pub enum ProfileCommand {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx profile add claude personal --auth subscription-token\n  aictx profile add codex work --auth chatgpt-oauth --workspace ws_work\n  aictx profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --identity-token-file /run/secrets/anthropic.jwt"
+    after_long_help = "Examples:\n  aictx profile add claude personal --auth subscription\n  aictx profile add codex work --auth subscription\n  aictx profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --identity-token-file /run/secrets/anthropic.jwt"
 )]
 pub struct ProfileAddArgs {
     /// Vendor that owns the profile: `claude` or `codex`.
@@ -126,7 +126,7 @@ pub struct ProfileAddArgs {
     /// Short local name used in the profile ID, for example `personal` or `work`.
     pub name: Name,
 
-    /// Authentication mechanism; only provider-compatible modes are accepted.
+    /// Authentication mechanism. Use `subscription` for either subscription provider.
     #[arg(long, value_enum)]
     pub auth: AuthArg,
 

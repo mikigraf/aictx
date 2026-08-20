@@ -174,6 +174,7 @@ impl<'de> Deserialize<'de> for ProfileId {
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 pub enum AuthArg {
+    Subscription,
     SubscriptionToken,
     ApiKey,
     Wif,
