@@ -5,7 +5,10 @@ use std::{
     fs,
     io::{ErrorKind, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, ChildStdout, Command, ExitStatus, Stdio},
+    sync::mpsc::{self, TryRecvError},
+    thread,
+    time::{Duration, Instant},
 };
 
 use secrecy::{ExposeSecret, SecretString};
@@ -184,6 +187,7 @@ const CODEX_ROUTING_KEYS: &[&str] = &[
 ];
 
 const MAX_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROJECT_DEFINITION_BYTES: u64 = 1024 * 1024;
 const MAX_PROJECT_DEFINITION_ENTRIES: usize = 1024;
 const MAX_PROJECT_DEFINITION_DEPTH: usize = 16;
@@ -522,6 +526,133 @@ fn terminate_and_reap(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn wait_for_preflight(
+    child: &mut Child,
+    program: &Path,
+    operation: &str,
+    timeout: Duration,
+) -> Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                terminate_and_reap(child);
+                return Err(Error::VendorIncompatible(format!(
+                    "{} {operation} exceeded the {timeout:?} preflight limit",
+                    program.display(),
+                )));
+            }
+            Err(source) => {
+                terminate_and_reap(child);
+                return Err(Error::Spawn {
+                    program: program.display().to_string(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
+fn capture_preflight_stdout(
+    child: &mut Child,
+    stdout: ChildStdout,
+    program: &Path,
+    operation: &str,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>)> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if let Err(source) = thread::Builder::new()
+        .name("aictx-preflight-output".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout
+                .take((MAX_VERSION_OUTPUT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes);
+            let _ = sender.send((result, bytes));
+        })
+    {
+        terminate_and_reap(child);
+        return Err(Error::Spawn {
+            program: program.display().to_string(),
+            source,
+        });
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut status = None;
+    let mut output = None;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(completed)) => status = Some(completed),
+                Ok(None) => {}
+                Err(source) => {
+                    terminate_and_reap(child);
+                    return Err(Error::Spawn {
+                        program: program.display().to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+
+        if output.is_none() {
+            match receiver.try_recv() {
+                Ok((read_result, bytes)) => {
+                    if let Err(source) = read_result {
+                        if status.is_none() {
+                            terminate_and_reap(child);
+                        }
+                        return Err(Error::Spawn {
+                            program: program.display().to_string(),
+                            source,
+                        });
+                    }
+                    if bytes.len() > MAX_VERSION_OUTPUT_BYTES {
+                        if status.is_none() {
+                            terminate_and_reap(child);
+                        }
+                        return Err(Error::VendorIncompatible(format!(
+                            "{} {operation} exceeded the 64 KiB output limit",
+                            program.display()
+                        )));
+                    }
+                    output = Some(bytes);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    if status.is_none() {
+                        terminate_and_reap(child);
+                    }
+                    return Err(Error::VendorIncompatible(format!(
+                        "{} {operation} output reader failed",
+                        program.display()
+                    )));
+                }
+            }
+        }
+
+        if let Some(completed) = status
+            && let Some(bytes) = output.take()
+        {
+            return Ok((completed, bytes));
+        }
+
+        if Instant::now() >= deadline {
+            if status.is_none() {
+                terminate_and_reap(child);
+            }
+            return Err(Error::VendorIncompatible(format!(
+                "{} {operation} exceeded the {timeout:?} preflight limit",
+                program.display(),
+            )));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub(crate) fn logout_codex(
     config: &Config,
     paths: &AppPaths,
@@ -687,36 +818,8 @@ pub fn vendor_version(config: &Config, provider: Provider) -> Result<String> {
             program: program.display().to_string(),
         });
     };
-    let mut bytes = Vec::new();
-    let read_result = stdout
-        .take((MAX_VERSION_OUTPUT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes);
-    if let Err(source) = read_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(Error::Spawn {
-            program: program.display().to_string(),
-            source,
-        });
-    }
-    if bytes.len() > MAX_VERSION_OUTPUT_BYTES {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(Error::VendorIncompatible(format!(
-            "{} --version exceeded the 64 KiB output limit",
-            program.display()
-        )));
-    }
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(source) => {
-            terminate_and_reap(&mut child);
-            return Err(Error::Spawn {
-                program: program.display().to_string(),
-                source,
-            });
-        }
-    };
+    let (status, bytes) =
+        capture_preflight_stdout(&mut child, stdout, &program, "--version", PREFLIGHT_TIMEOUT)?;
     if !status.success() {
         return Err(Error::VendorIncompatible(format!(
             "{} --version exited with {}",
@@ -832,19 +935,21 @@ fn codex_login_status(
     ensure_codex_config(paths, profile_id, profile, lifecycle)?;
     let program = resolve_vendor_binary(config, Provider::Codex)?;
     let environment = build_environment(profile, None, env::vars_os())?;
-    let status = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .arg("login")
         .arg("status")
         .env_clear()
         .envs(environment)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|source| Error::Spawn {
-            program: program.display().to_string(),
-            source,
-        })?;
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|source| Error::Spawn {
+        program: program.display().to_string(),
+        source,
+    })?;
+    drop(command);
+    let status = wait_for_preflight(&mut child, &program, "login status", PREFLIGHT_TIMEOUT)?;
     if status.success() {
         Ok(())
     } else {
@@ -911,36 +1016,13 @@ fn claude_auth_status(
             program: program.display().to_string(),
         });
     };
-    let mut bytes = Vec::new();
-    if let Err(source) = stdout
-        .take((MAX_VERSION_OUTPUT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(Error::Spawn {
-            program: program.display().to_string(),
-            source,
-        });
-    }
-    if bytes.len() > MAX_VERSION_OUTPUT_BYTES {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(Error::VendorIncompatible(format!(
-            "{} auth status exceeded the 64 KiB output limit",
-            program.display()
-        )));
-    }
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(source) => {
-            terminate_and_reap(&mut child);
-            return Err(Error::Spawn {
-                program: program.display().to_string(),
-                source,
-            });
-        }
-    };
+    let (status, bytes) = capture_preflight_stdout(
+        &mut child,
+        stdout,
+        &program,
+        "auth status",
+        PREFLIGHT_TIMEOUT,
+    )?;
     if !status.success() {
         return Err(Error::IdentityMismatch(format!(
             "`claude auth status --json` could not confirm {profile_id}"
@@ -1863,6 +1945,163 @@ mod tests {
 
     use super::*;
 
+    // This fixture deliberately leaves a finite-lived descendant holding stdout open so the
+    // caller can prove that output capture never waits for a process it does not own.
+    #[allow(clippy::zombie_processes)]
+    #[test]
+    fn preflight_sleep_fixture() {
+        if env::var_os("AICTX_TEST_PREFLIGHT_DESCENDANT").is_some() {
+            let program = env::current_exe()
+                .unwrap_or_else(|error| panic!("resolve descendant test executable: {error}"));
+            Command::new(program)
+                .arg("--exact")
+                .arg("runner::tests::preflight_sleep_fixture")
+                .env_remove("AICTX_TEST_PREFLIGHT_DESCENDANT")
+                .env("AICTX_TEST_PREFLIGHT_DESCENDANT_CHILD", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn descendant preflight fixture: {error}"));
+            if let Some(marker) = env::var_os("AICTX_TEST_PREFLIGHT_READY") {
+                fs::write(PathBuf::from(marker), b"ready")
+                    .unwrap_or_else(|error| panic!("write descendant readiness marker: {error}"));
+            }
+        } else if env::var_os("AICTX_TEST_PREFLIGHT_DESCENDANT_CHILD").is_some() {
+            thread::sleep(Duration::from_secs(2));
+            if let Some(marker) = env::var_os("AICTX_TEST_PREFLIGHT_READY") {
+                let marker = PathBuf::from(marker);
+                if marker.exists() {
+                    fs::remove_file(marker).unwrap_or_else(|error| {
+                        panic!("remove descendant readiness marker: {error}")
+                    });
+                }
+            }
+        } else if env::var_os("AICTX_TEST_PREFLIGHT_SLEEP").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn preflight_timeout_kills_reaps_and_unblocks_output_capture() {
+        let program = env::current_exe()
+            .unwrap_or_else(|error| panic!("resolve current test executable: {error}"));
+        let mut command = Command::new(&program);
+        command
+            .arg("--exact")
+            .arg("runner::tests::preflight_sleep_fixture")
+            .env("AICTX_TEST_PREFLIGHT_SLEEP", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn sleeping preflight fixture: {error}"));
+        let stdout = child
+            .stdout
+            .take()
+            .unwrap_or_else(|| panic!("sleeping fixture should have piped stdout"));
+        let started = Instant::now();
+        let result = capture_preflight_stdout(
+            &mut child,
+            stdout,
+            &program,
+            "test preflight",
+            Duration::from_millis(100),
+        );
+        let error = match result {
+            Ok((status, _)) => panic!("sleeping preflight unexpectedly exited with {status}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::VendorIncompatible(_)));
+        assert!(error.to_string().contains("100ms preflight limit"));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "preflight timeout did not return promptly"
+        );
+        assert!(
+            child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("inspect reaped child: {error}"))
+                .is_some(),
+            "timed-out preflight child was not reaped"
+        );
+    }
+
+    #[test]
+    fn preflight_timeout_does_not_wait_for_inherited_stdout() {
+        let temporary = TempDir::new()
+            .unwrap_or_else(|error| panic!("create preflight fixture tempdir: {error}"));
+        let ready = temporary.path().join("descendant-ready");
+        let program = env::current_exe()
+            .unwrap_or_else(|error| panic!("resolve current test executable: {error}"));
+        let mut command = Command::new(&program);
+        command
+            .arg("--exact")
+            .arg("runner::tests::preflight_sleep_fixture")
+            .env("AICTX_TEST_PREFLIGHT_DESCENDANT", "1")
+            .env("AICTX_TEST_PREFLIGHT_READY", &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn descendant preflight fixture: {error}"));
+        let stdout = child
+            .stdout
+            .take()
+            .unwrap_or_else(|| panic!("descendant fixture should have piped stdout"));
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        while !ready.exists() {
+            if child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("inspect descendant fixture startup: {error}"))
+                .is_some()
+            {
+                panic!("preflight fixture exited before spawning its descendant");
+            }
+            if Instant::now() >= ready_deadline {
+                terminate_and_reap(&mut child);
+                panic!("timed out waiting for descendant readiness marker");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        let result = capture_preflight_stdout(
+            &mut child,
+            stdout,
+            &program,
+            "test descendant preflight",
+            Duration::from_millis(100),
+        );
+        let error = match result {
+            Ok((status, _)) => panic!("inherited pipe unexpectedly closed with {status}"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::VendorIncompatible(_)));
+        assert!(error.to_string().contains("100ms preflight limit"));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "preflight waited for a descendant that inherited stdout"
+        );
+        assert!(
+            child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("inspect completed child: {error}"))
+                .is_some(),
+            "direct preflight child was not reaped"
+        );
+
+        let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+        while ready.exists() {
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "descendant fixture did not finish"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn claude_profile(auth: ClaudeAuth) -> Profile {
         Profile::Claude {
             billing_domain: if auth == ClaudeAuth::SubscriptionToken {
@@ -1902,7 +2141,7 @@ mod tests {
     fn subscription_profile_removes_competing_credentials_and_endpoints() {
         let profile = claude_profile(ClaudeAuth::SubscriptionToken);
         let base = [
-            ("PATH", "/bin"),
+            ("LANG", "C"),
             ("ANTHROPIC_API_KEY", "wrong-billing"),
             ("ANTHROPIC_AUTH_TOKEN", "wrong-gateway"),
             ("ANTHROPIC_IDENTITY_TOKEN", "wrong-wif-token"),
@@ -1930,8 +2169,8 @@ mod tests {
         let environment = build_environment(&profile, Some("selected"), base)
             .unwrap_or_else(|error| panic!("environment should build: {error}"));
         assert_eq!(
-            environment.get(OsStr::new("PATH")),
-            Some(&OsString::from("/bin"))
+            environment.get(OsStr::new("LANG")),
+            Some(&OsString::from("C"))
         );
         assert!(!environment.contains_key(OsStr::new("ANTHROPIC_API_KEY")));
         assert!(!environment.contains_key(OsStr::new("ANTHROPIC_AUTH_TOKEN")));
