@@ -46,7 +46,7 @@ aictx run codex -- exec "run the tests"
 Arguments after `--` are passed as an argument vector. A shell never parses them. Options that could change the selected identity, bypass isolated state, or load unsafe repository commands are refused.
 
 > [!IMPORTANT]
-> The local wrapper flow is tested end to end with fake vendor executables. The tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes. Production rollout still requires live-account tests for Claude, Codex, WIF, native keyrings, Windows, and the release-signing workflow. See [Compatibility and validation status](docs/compatibility.md).
+> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These offline tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes. They do not contact Claude or Codex. Production rollout still requires live-account, WIF, native-keyring, billing, Windows, and release-signing qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
 
 ## What aictx gives you
 
@@ -152,10 +152,14 @@ Read [Configuration](docs/configuration.md) for every supported profile field an
 | `aictx profile list` | List provider profiles |
 | `aictx context list` | List contexts |
 | `aictx credential check --all` | Check credential availability without printing values |
-| `aictx doctor` | Check metadata, permissions, binaries, the OS keyring, and unsafe settings |
+| `aictx doctor [--provider <provider>] [--json]` | Check metadata, permissions, binaries, unsafe settings, and per-profile authentication readiness |
 | `aictx logout <profile>` | Clear supported local authentication state |
 
 See the full [Command reference](docs/command-reference.md).
+
+Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative; use `aictx --help` and `aictx <command> --help` for current syntax and examples.
+
+Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. With `--non-interactive`, it skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array; every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
 
 ## Shell integration
 
@@ -218,7 +222,7 @@ Read the [Threat model](THREAT_MODEL.md) and [Security policy](SECURITY.md) befo
 
 ## Validation status
 
-Local automated checks cover Rust 1.89 and the pinned development toolchain, unit tests, CLI workflows, fake-vendor contracts, formatting, Clippy, documentation, dependency policy, packaging, and cross-target compilation. A configured GitHub workflow is evidence only after it runs successfully on a committed revision.
+Local and CI checks are layered: unit tests, public CLI lifecycle tests, Unix runner contracts, native fake-vendor E2E tests, PTY tests, MSRV checks, and native Linux/macOS/Windows jobs. CI also checks formatting, Clippy, documentation, dependency policy, secret history, packaging, and coverage with region/function/line floors of 75%/60%/70%. A configured workflow is evidence only after it runs successfully on a committed revision.
 
 These checks still need real deployment evidence:
 
@@ -230,13 +234,14 @@ These checks still need real deployment evidence:
 - Live GitHub OIDC, Sigstore, provenance, and release publishing
 - Authenticode, Apple code signing, and macOS notarization where required
 
-The detailed checklist is in [Compatibility and validation status](docs/compatibility.md).
+Read [Testing](docs/testing.md) for the exact automated layers, commands, coverage method, and evidence boundary. The deployment checklist is in [Compatibility and validation status](docs/compatibility.md).
 
 ## Project documentation
 
 - [Configuration](docs/configuration.md)
 - [Command reference](docs/command-reference.md)
 - [CI and automation](docs/ci.md)
+- [Testing](docs/testing.md)
 - [Compatibility and validation status](docs/compatibility.md)
 - [Threat model](THREAT_MODEL.md)
 - [Security policy](SECURITY.md)
@@ -253,6 +258,8 @@ cargo test --doc --locked
 ```
 
 The committed lockfile is part of the application build. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change. Report security issues through [SECURITY.md](SECURITY.md), not a public issue.
+
+The full test architecture and focused commands are in [Testing](docs/testing.md). Automated tests use temporary state and synthetic vendor fixtures; they never need a real account or host keyring.
 
 ## License
 

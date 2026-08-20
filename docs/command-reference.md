@@ -99,12 +99,14 @@ The selected profile must match the provider argument. Arguments after `--` are 
 aictx status [--context <name>] [--verbose]
 aictx credential check <provider:name>
 aictx credential check --all
-aictx doctor [--provider claude|codex]
+aictx doctor [--provider claude|codex] [--json]
 ```
 
 Normal status shows profiles, authentication, billing, masked account/identity pins, and setup-token limitations. `--verbose` additionally shows state directories, secret references (never values), and availability. In non-interactive mode, an OS-keyring-backed availability check fails with exit `14` instead of risking an unlock or consent prompt.
 
-`credential check` exits `11` when any requested credential is unavailable and `13` when the selected managed identity cannot be confirmed. Claude API-key and setup-token profiles invoke official `claude auth status --json` with only the selected credential and require the expected first-party auth method; an optional `--organization` pin must match the reported `orgId` or `orgName`. If the deployed Claude build omits both fields, a pinned profile fails closed and must not be treated as verified. This local routing preflight also gates `run`, but does not make a model API request or prove remote validity, expiry, or revocation. Codex API keys and WIF identity files remain availability checks; Codex subscription/access-token checks use official login status and forced configuration. `doctor` returns `1` when it reports failures (including malformed metadata), otherwise `0`; warnings alone do not fail it, and the diagnostic does not repair the layout.
+`credential check` exits `11` when any requested credential is unavailable and `13` when the selected managed identity cannot be confirmed. Claude API-key and setup-token profiles invoke official `claude auth status --json` with only the selected credential and require the expected first-party auth method; an optional `--organization` pin must match the reported `orgId` or `orgName`. If the deployed Claude build omits both fields, a pinned profile fails closed and must not be treated as verified. This local routing preflight also gates `run`, but does not make a model API request or prove remote validity, expiry, or revocation. Codex API keys and WIF identity files remain availability checks; Codex subscription/access-token checks use official login status and forced configuration.
+
+`doctor` checks the same per-profile authentication readiness in addition to metadata, permissions, binaries, keyring availability, and unsafe settings. A requested provider with no configured profile is not ready. Interactive checks may read configured static credentials through the OS keyring. With `--non-interactive`, static keyring reads are skipped and reported as warnings. `--json` emits an `ok` boolean and a `checks` array whose entries contain `level`, `name`, and `detail`; review paths and identifiers before sharing a report. The command exits `1` when it reports a failure, otherwise `0`; warnings alone do not fail it, and it never repairs the layout.
 
 ## Directory bindings
 

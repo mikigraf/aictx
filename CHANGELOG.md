@@ -19,7 +19,8 @@ No changes yet.
 - Billing-domain banners and confirmation on context changes.
 - Ratatui terminal dashboard for context selection, profile and binding inspection, and safe active-context changes.
 - Status, credential availability, doctor, shell shims, non-secret environment selectors, and shell completion generation.
-- Unit and fake-vendor contract tests plus cross-platform CI and release scaffolding.
+- Actionable error hints, close-name suggestions, command help examples, and machine-readable `doctor --json` readiness reports.
+- Unit, CLI lifecycle, native fake-vendor, Unix runner, and PTY contract tests plus coverage-gated cross-platform CI and release scaffolding.
 
 ### Security
 
@@ -27,3 +28,4 @@ No changes yet.
 - Reject insecure/symlinked sensitive paths on supported Unix checks, executable self-recursion, and repository-local bare executable resolution.
 - Refuse static-secret and cached Codex OAuth use when inherited GitHub event metadata identifies a pull-request workflow, and require an explicit trusted-runner assertion for long-lived subscription/OAuth/access-token automation in CI/non-interactive execution.
 - Produce keyless Sigstore bundles, checksums, an SBOM, and GitHub provenance for release assets, and scan repository history for committed secrets in CI.
+- Bound local vendor version and authentication-status preflights so a broken executable cannot block diagnostics or a run indefinitely.

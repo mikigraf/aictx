@@ -8,12 +8,21 @@ This document distinguishes implemented behavior from evidence still required in
 | --- | --- | --- |
 | Rust | MSRV 1.89; edition 2024 | CI compiles/tests 1.89 on Linux and pinned Rust 1.97.1 on Linux, macOS, and Windows |
 | Metadata | schema version 1 | unknown versions/fields and invalid relationships are rejected |
-| Linux | current GitHub-hosted Ubuntu image | unit and fake-vendor contract tests in CI |
-| macOS | current GitHub-hosted macOS image | unit and fake-vendor contract tests in CI |
-| Windows | current GitHub-hosted Windows image | unit/CLI workflow tests and compile coverage in CI; Unix-only fake-vendor contracts are not exercised |
-| Terminal UI | Ratatui with Crossterm | renderer, navigation, no-secret display, activation, and non-terminal refusal tests; native Windows terminal use still needs deployment validation |
+| Linux | current GitHub-hosted Ubuntu image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
+| macOS | current GitHub-hosted macOS image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
+| Windows | current GitHub-hosted Windows image | unit, CLI, native fake-vendor, and PTY tests in CI; Unix shell-fixture contracts are disabled |
+| Terminal UI | Ratatui with Crossterm | renderer/state tests plus native PTY resize, exit, refusal, and restoration checks; deployment terminals still need qualification |
+| Coverage | regions/functions/lines | CI floors are 75%/60%/70%; see [Testing](testing.md) for the measured baseline and interpretation |
 
-CI configuration is an intended validation matrix, not proof that a given commit has passed until its workflow run is green. Local development to date validates the host runtime plus compile checks for Linux and Windows targets.
+CI configuration is an intended validation matrix, not proof that a given commit has passed until its workflow run is green. The OS matrix uses native GitHub-hosted runners. It does not qualify every architecture, distribution, terminal host, or vendor release. See [Testing](testing.md) for exact commands and test-layer limits.
+
+## Evidence classes
+
+- **Automated contract evidence** uses temporary state, synthetic credentials, and fake vendor programs. It is safe for public CI.
+- **Revision evidence** is a green CI and release run for the exact commit or tag being evaluated.
+- **Deployment qualification** uses approved real accounts, native OS services, and release identities. Keep this evidence in a protected system.
+
+The compiled native fake-vendor suite is process-level E2E evidence for the wrapper. It is not a live Claude or Codex test.
 
 ## Vendor contracts
 
@@ -31,7 +40,7 @@ CI configuration is an intended validation matrix, not proof that a given commit
 | Codex forced login/workspace/credential-store config | config tests | managed workspace enforcement in the organization's current Codex CLI |
 | Codex API key stdin login and secret-free main child | runner contract tests | real API account, vendor credential-store behavior, and billing attribution |
 | Codex access-token stdin login and CI refusal policy | runner policy/contract tests | eligible managed workspace (currently documented for ChatGPT Enterprise) and private runner |
-| native OS keyring | library integration plus diagnostics | store/read/delete, locked-store behavior, consent UI, and ACLs on each OS |
+| native OS keyring | reference parsing, injected-secret routing, fail-before-access policy, and diagnostics | real store/read/delete, locked-store behavior, consent UI, and ACLs on each OS |
 
 On Windows, configured Claude and Codex executables must resolve to native `.exe` files. `.bat` and `.cmd` launchers are refused because Windows executes them through `cmd.exe`, which cannot preserve the wrapper's no-shell argument boundary.
 
@@ -64,7 +73,7 @@ Only schema `1` is supported. There is no downgrade or migration command yet. Ba
 Before enabling a new OS/vendor version combination:
 
 1. Install official vendor CLIs through your approved channel.
-2. Run `aictx doctor` and record version output without recording secrets.
+2. Run interactive `aictx doctor --json` and record the reviewed report without recording secrets. In `--non-interactive` mode, static OS-keyring reads are skipped with a warning; this is not static-credential readiness evidence.
 3. Exercise login, status, one harmless request, logout, and re-login for each supported auth mode.
 4. Confirm the expected vendor account/workspace and billing domain using vendor-supported status/account controls.
 5. Seed deliberately conflicting parent environment variables and verify the selected identity still wins.
@@ -72,6 +81,8 @@ Before enabling a new OS/vendor version combination:
 7. Run two distinct profiles concurrently and verify their state does not cross.
 8. Validate remote revocation and employee/offboarding procedures outside `aictx`.
 9. For CI, prove fork/untrusted triggers cannot enter the credential-bearing job.
+10. On Windows, test the installed native vendor `.exe`, user ACLs, console/PTY restoration, and process exit behavior.
+11. For a release, verify checksums, SBOM, Sigstore bundle, and provenance. Qualify Authenticode, Apple signing, and macOS notarization separately where required.
 
 Record the tested vendor version and date in deployment evidence rather than hard-coding a speculative compatibility range here.
 
