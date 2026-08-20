@@ -21,6 +21,7 @@ No changes yet.
 - Status, credential availability, doctor, shell shims, non-secret environment selectors, and shell completion generation.
 - Provider-neutral `--auth subscription` profile creation while preserving vendor-native configuration and compatibility auth spellings.
 - Guided first-run setup for the `claude:personal` subscription profile through `aictx init --guided`.
+- Homebrew installation through the `mikigraf/tap` third-party tap.
 - Actionable error hints, close-name suggestions, command help examples, and machine-readable `doctor --json` readiness reports.
 - Unit, CLI lifecycle, native fake-vendor, Unix runner, and PTY contract tests plus coverage-gated cross-platform CI and release scaffolding.
 

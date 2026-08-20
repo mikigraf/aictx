@@ -6,18 +6,24 @@ Run the official Claude Code and Codex CLIs under clear personal, work, or CI id
 
 ## Quick start
 
-You need Rust 1.89 or newer and the official `claude` and/or `codex` CLI.
+Install `aictx` with Homebrew on macOS or Linux:
 
-### Install or update
+```bash
+brew install mikigraf/tap/aictx
+```
 
-From an existing source checkout:
+You also need the official `claude` and/or `codex` CLI for the provider you use.
+
+### Install or update from source
+
+Source builds need Rust 1.89 or newer. From an existing checkout:
 
 ```bash
 git pull --ff-only
 cargo install --path . --locked --force
 ```
 
-For a new checkout:
+From a new checkout:
 
 ```bash
 git clone https://github.com/mikigraf/aictx.git
@@ -110,7 +116,7 @@ Claude Code and Codex normally reuse their default home directory and current lo
 - A context can select one Claude profile, one Codex profile, or both.
 - Static secrets stay out of project files, shell startup files, and command arguments.
 - The official Claude and Codex binaries still own API calls, browser login, refresh, and vendor state.
-- Repository settings and inherited environment values cannot silently replace the selected account or endpoint.
+- `aictx` removes known competing environment selectors and refuses inspected repository settings that can change the selected account or endpoint.
 
 `aictx` is a local launcher and profile manager. It is not an API proxy and does not replace either vendor CLI.
 
