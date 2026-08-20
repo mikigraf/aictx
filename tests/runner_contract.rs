@@ -15,7 +15,7 @@ use aictx::{
     Result,
     config::{AppPaths, MetadataStore},
     model::ProfileId,
-    runner::{RunOptions, credential_state, run_profile},
+    runner::{CredentialState, RunOptions, credential_state, run_profile},
     secret::{SecretProvider, SecretRef},
 };
 use secrecy::SecretString;
@@ -662,6 +662,10 @@ impl SecretProvider for FixedSecrets {
         let SecretRef::Keyring { account, .. } = reference;
         let secret = if account == "claude-api" {
             "claude-api-canary"
+        } else if account == "claude-subscription" {
+            "claude-subscription-canary"
+        } else if account == "claude-wrong-org" {
+            "claude-wrong-org-canary"
         } else if account == "codex-api" {
             "codex-api-canary"
         } else {
@@ -672,6 +676,93 @@ impl SecretProvider for FixedSecrets {
         };
         Ok(secret.to_owned().into())
     }
+}
+
+#[test]
+fn claude_static_credential_status_remains_unverified_after_local_route_confirmation() {
+    if rerun_as_trusted_push(
+        "claude_static_credential_status_remains_unverified_after_local_route_confirmation",
+    ) {
+        return;
+    }
+
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let fake_claude = temporary.path().join("claude");
+    // The helper's injected `auth status --json` response reports logged-in
+    // solely from the presence of the selected environment variable. It does
+    // not model a remote credential check.
+    executable(&fake_claude, "#!/bin/sh\nexit 0\n");
+    ok(aictx(&root).arg("init"));
+    for (name, auth) in [("api", "api-key"), ("subscription", "subscription-token")] {
+        ok(aictx(&root).args([
+            "profile",
+            "add",
+            "claude",
+            name,
+            "--auth",
+            auth,
+            "--secret-ref",
+            &format!("keyring://aictx/claude-{name}"),
+        ]));
+    }
+    ok(aictx(&root).args([
+        "profile",
+        "add",
+        "claude",
+        "wrong-org",
+        "--auth",
+        "api-key",
+        "--organization",
+        "organization-other",
+        "--secret-ref",
+        "keyring://aictx/claude-wrong-org",
+    ]));
+
+    let paths = AppPaths::for_root(&root);
+    let store = MetadataStore::new(paths.clone());
+    store
+        .update_config(|config| {
+            config.binaries.claude = fake_claude.clone();
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("configure fake Claude: {error}"));
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load config: {error}"));
+
+    for id in ["claude:api", "claude:subscription"] {
+        let profile_id: ProfileId = id
+            .parse()
+            .unwrap_or_else(|error| panic!("profile ID: {error}"));
+        let profile = config
+            .profiles
+            .get(&profile_id)
+            .unwrap_or_else(|| panic!("profile should exist"));
+        let state = credential_state(&config, &paths, &profile_id, profile, &FixedSecrets, true)
+            .unwrap_or_else(|error| panic!("check {id} credential: {error}"));
+        assert_eq!(state, CredentialState::Unverified, "profile {id}");
+    }
+
+    let wrong_org_id: ProfileId = "claude:wrong-org"
+        .parse()
+        .unwrap_or_else(|error| panic!("profile ID: {error}"));
+    let wrong_org = config
+        .profiles
+        .get(&wrong_org_id)
+        .unwrap_or_else(|| panic!("wrong-organization profile should exist"));
+    let error = match credential_state(
+        &config,
+        &paths,
+        &wrong_org_id,
+        wrong_org,
+        &FixedSecrets,
+        true,
+    ) {
+        Ok(state) => panic!("wrong organization unexpectedly returned {state:?}"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, aictx::Error::IdentityMismatch(_)));
 }
 
 #[test]

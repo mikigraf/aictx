@@ -404,7 +404,7 @@ pub fn run_profile(
         let selected = secret.as_ref().ok_or_else(|| {
             Error::InvalidConfig("Claude static profile resolved no credential".to_owned())
         })?;
-        claude_auth_status(config, profile_id, profile, *auth, selected, &lifecycle)?;
+        validate_claude_local_auth_route(config, profile_id, profile, *auth, selected, &lifecycle)?;
     }
 
     let environment = build_environment(
@@ -720,16 +720,16 @@ pub fn credential_state(
                 }
                 Err(error) => return Err(error),
             };
-            let status =
-                claude_auth_status(config, profile_id, profile, *auth, &secret, &lifecycle);
+            let status = validate_claude_local_auth_route(
+                config, profile_id, profile, *auth, &secret, &lifecycle,
+            );
             drop(secret);
-            match status {
-                Ok(()) => Ok(CredentialState::Available),
-                Err(Error::CredentialUnavailable { .. } | Error::IdentityMismatch(_)) => {
-                    Ok(CredentialState::Unverified)
-                }
-                Err(error) => Err(error),
-            }
+            status?;
+            // Claude derives this status from the selected local environment
+            // route. A successful response proves that the CLI recognized the
+            // intended auth method, but it does not prove that Anthropic will
+            // accept the credential.
+            Ok(CredentialState::Unverified)
         }
         Profile::Codex {
             auth: CodexAuth::ApiKey,
@@ -972,7 +972,7 @@ struct ClaudeAuthStatus {
     org_name: Option<String>,
 }
 
-fn claude_auth_status(
+fn validate_claude_local_auth_route(
     config: &Config,
     profile_id: &ProfileId,
     profile: &Profile,

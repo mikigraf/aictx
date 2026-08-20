@@ -302,6 +302,21 @@ fn append_credential_readiness(
                 name,
                 format!("authentication material is unavailable; run `aictx login {profile_id}`"),
             ),
+            Ok(CredentialState::Unverified)
+                if matches!(
+                    profile,
+                    Profile::Claude {
+                        auth: ClaudeAuth::SubscriptionToken | ClaudeAuth::ApiKey,
+                        ..
+                    }
+                ) =>
+            {
+                report.push(
+                    doctor::CheckLevel::Warning,
+                    name,
+                    "credential is stored and the local Claude auth route matches; remote validity is checked by the first model request",
+                );
+            }
             Ok(CredentialState::Unverified) => report.push(
                 doctor::CheckLevel::Failure,
                 name,
