@@ -75,13 +75,13 @@ CI=true GITHUB_EVENT_NAME=push cargo +1.97.1 llvm-cov \
   --fail-under-regions 75
 ```
 
-The pre-commit engineering baseline on 2026-08-20 used macOS on arm64, Rust 1.97.1, and `cargo-llvm-cov` 0.9.0 with all targets, all features, the lockfile, and `GITHUB_EVENT_NAME=pull_request`. It ran 95 tests:
+The pre-commit engineering baseline on 2026-08-20 used macOS on arm64, Rust 1.97.1, and `cargo-llvm-cov` 0.9.0 with all targets, all features, the lockfile, and `GITHUB_EVENT_NAME=push`. It ran 96 tests:
 
 | Metric | Measured | CI floor |
 | --- | ---: | ---: |
 | Regions | 77.79% | 75% |
 | Functions | 62.25% | 60% |
-| Lines | 74.98% | 70% |
+| Lines | 74.96% | 70% |
 
 This local measurement describes the reviewed pre-commit worktree, not an immutable revision. Use the green CI report for the committed revision as release evidence.
 

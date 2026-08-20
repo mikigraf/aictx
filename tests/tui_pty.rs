@@ -15,6 +15,51 @@ const DASHBOARD_FOOTER_MARKER: &str = "quit";
 const EVENT_LOOP_MARKER: &str = "Metadata";
 const SMALL_TERMINAL_MARKER: &str = "Terminal";
 const DRAW_COMPLETE_MARKER: &str = "\u{1b}[?25l";
+const MAX_TERMINAL_QUERY_LENGTH: usize = 5;
+
+type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+#[derive(Default)]
+struct TerminalQueryResponder {
+    tail: Vec<u8>,
+}
+
+impl TerminalQueryResponder {
+    fn observe(&mut self, bytes: &[u8]) -> Vec<u8> {
+        const RESPONSES: [(&[u8], &[u8]); 4] = [
+            (b"\x1b[5n", b"\x1b[0n"),
+            (b"\x1b[6n", b"\x1b[1;1R"),
+            (b"\x1b[?5n", b"\x1b[?0n"),
+            (b"\x1b[?6n", b"\x1b[?1;1R"),
+        ];
+
+        let previous_length = self.tail.len();
+        self.tail.extend_from_slice(bytes);
+        let mut replies = Vec::new();
+        for start in 0..self.tail.len() {
+            for (query, response) in RESPONSES {
+                let end = start.saturating_add(query.len());
+                if end > previous_length
+                    && self
+                        .tail
+                        .get(start..end)
+                        .is_some_and(|value| value == query)
+                {
+                    replies.extend_from_slice(response);
+                    break;
+                }
+            }
+        }
+
+        let retained_length = self
+            .tail
+            .len()
+            .min(MAX_TERMINAL_QUERY_LENGTH.saturating_sub(1));
+        self.tail.rotate_right(retained_length);
+        self.tail.truncate(retained_length);
+        replies
+    }
+}
 
 struct ChildGuard {
     child: Box<dyn Child + Send + Sync>,
@@ -115,6 +160,14 @@ impl PtyOutput {
     }
 }
 
+fn write_pty(writer: &SharedPtyWriter, bytes: &[u8]) -> std::io::Result<()> {
+    let mut writer = writer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    writer.write_all(bytes)?;
+    writer.flush()
+}
+
 fn wait_for_output(
     output: &PtyOutput,
     child: &mut ChildGuard,
@@ -164,19 +217,30 @@ fn run_in_pty(
         .master
         .try_clone_reader()
         .unwrap_or_else(|error| panic!("clone PTY reader: {error}"));
-    let mut writer = pair
-        .master
-        .take_writer()
-        .unwrap_or_else(|error| panic!("take PTY writer: {error}"));
+    let writer = Arc::new(Mutex::new(
+        pair.master
+            .take_writer()
+            .unwrap_or_else(|error| panic!("take PTY writer: {error}")),
+    ));
 
     let output = Arc::new(PtyOutput::default());
     let reader_output = Arc::clone(&output);
+    let responder_writer = Arc::clone(&writer);
     let output_reader = thread::spawn(move || {
         let mut chunk = [0_u8; 4_096];
+        let mut responder = TerminalQueryResponder::default();
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(count) => reader_output.append(&chunk[..count]),
+                Ok(count) => {
+                    let bytes = &chunk[..count];
+                    reader_output.append(bytes);
+                    let replies = responder.observe(bytes);
+                    if !replies.is_empty() {
+                        write_pty(&responder_writer, &replies)
+                            .unwrap_or_else(|error| panic!("answer PTY terminal query: {error}"));
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => panic!("read PTY output: {error}"),
             }
@@ -223,9 +287,7 @@ fn run_in_pty(
             "the completed initial dashboard draw",
         );
         if exercise_resize {
-            writer
-                .write_all(b"r")
-                .and_then(|()| writer.flush())
+            write_pty(&writer, b"r")
                 .unwrap_or_else(|error| panic!("write PTY readiness input: {error}"));
             let event_loop_marker = wait_for_output(
                 &output,
@@ -292,10 +354,7 @@ fn run_in_pty(
                 "the completed restored dashboard draw",
             );
         }
-        writer
-            .write_all(input)
-            .and_then(|()| writer.flush())
-            .unwrap_or_else(|error| panic!("write PTY input: {error}"));
+        write_pty(&writer, input).unwrap_or_else(|error| panic!("write PTY input: {error}"));
     }
 
     let status = loop {
@@ -346,6 +405,19 @@ fn dashboard_quits_after_resize_and_restores_terminal_state() {
         "alternate screen was not restored"
     );
     assert!(output.contains("\u{1b}[?25h"), "cursor was not restored");
+}
+
+#[test]
+fn terminal_query_responder_handles_fragmented_queries_once() {
+    let mut responder = TerminalQueryResponder::default();
+
+    assert!(responder.observe(b"prefix\x1b[").is_empty());
+    assert_eq!(responder.observe(b"6n"), b"\x1b[1;1R");
+    assert!(responder.observe(b"ordinary output").is_empty());
+    assert_eq!(
+        responder.observe(b"\x1b[5n\x1b[?6n\x1b[?5n"),
+        b"\x1b[0n\x1b[?1;1R\x1b[?0n"
+    );
 }
 
 #[test]
