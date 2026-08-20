@@ -4,43 +4,6 @@ Run the official Claude Code and Codex CLIs under clear personal, work, or CI id
 
 `aictx` keeps each provider profile in its own vendor state directory. Contexts group one Claude profile and one Codex profile, so you can switch both tools together without copying credentials into shell files or repository config.
 
-> [!IMPORTANT]
-> The local wrapper flow is tested end to end with fake vendor executables. The tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes. Production rollout still requires live-account tests for Claude, Codex, WIF, native keyrings, Windows, and the release-signing workflow. See [Compatibility and validation status](docs/compatibility.md).
-
-## See it in action
-
-![aictx terminal dashboard showing personal, work, and CI contexts](docs/images/aictx-dashboard.png)
-
-The dashboard makes the active context, directory binding, profiles, and billing paths visible in one place.
-
-## What aictx gives you
-
-- A terminal dashboard when you run `aictx` with no subcommand
-- Named contexts such as `personal`, `work`, and `ci`
-- Separate `CLAUDE_CONFIG_DIR` and `CODEX_HOME` state for every profile
-- Native OS-keyring storage for static secrets
-- Direct argument forwarding to official vendor CLIs without a shell
-- Clean child environments that remove competing credentials and routing settings
-- Directory bindings stored in user-owned metadata, outside the repository
-- Billing-change confirmation and CI guardrails for long-lived credentials
-
-`aictx` stays at the process boundary. Claude Code and Codex still own browser login, device login, API calls, token refresh, and their private state formats.
-
-## Install
-
-You need:
-
-- Rust 1.89 or newer
-- the official `claude` and/or `codex` CLI
-
-Install from a source checkout:
-
-```bash
-cargo install --path . --locked
-```
-
-When release archives are published, they include the binary, shell completions, license, and project documentation. Each archive and SBOM has a SHA-256 file. The release workflow also creates Sigstore bundles and GitHub build provenance. These files do not replace native Authenticode or Apple code signing, and macOS notarization remains a separate release step.
-
 ## Quick start
 
 Initialize the user-scoped configuration:
@@ -82,6 +45,37 @@ aictx run codex -- exec "run the tests"
 
 Arguments after `--` are passed as an argument vector. A shell never parses them. Options that could change the selected identity, bypass isolated state, or load unsafe repository commands are refused.
 
+> [!IMPORTANT]
+> The local wrapper flow is tested end to end with fake vendor executables. The tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes. Production rollout still requires live-account tests for Claude, Codex, WIF, native keyrings, Windows, and the release-signing workflow. See [Compatibility and validation status](docs/compatibility.md).
+
+## What aictx gives you
+
+- A terminal dashboard when you run `aictx` with no subcommand
+- Named contexts such as `personal`, `work`, and `ci`
+- Separate `CLAUDE_CONFIG_DIR` and `CODEX_HOME` state for every profile
+- Native OS-keyring storage for static secrets
+- Direct argument forwarding to official vendor CLIs without a shell
+- Clean child environments that remove competing credentials and routing settings
+- Directory bindings stored in user-owned metadata, outside the repository
+- Billing-change confirmation and CI guardrails for long-lived credentials
+
+`aictx` stays at the process boundary. Claude Code and Codex still own browser login, device login, API calls, token refresh, and their private state formats.
+
+## Install
+
+You need:
+
+- Rust 1.89 or newer
+- the official `claude` and/or `codex` CLI
+
+Install from a source checkout:
+
+```bash
+cargo install --path . --locked
+```
+
+When release archives are published, they include the binary, shell completions, license, and project documentation. Each archive and SBOM has a SHA-256 file. The release workflow also creates Sigstore bundles and GitHub build provenance. These files do not replace native Authenticode or Apple code signing, and macOS notarization remains a separate release step.
+
 ## Interactive mode
 
 After `aictx init`, run `aictx` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
@@ -93,8 +87,6 @@ aictx
 The dashboard shows contexts, active and default selection, directory resolution, profile IDs, authentication modes, and billing domains. It never reads secret values or starts a vendor login. Profile creation, login, logout, and vendor runs stay in the explicit CLI commands.
 
 Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. A billing-domain change opens a confirmation dialog before state is written.
-
-![aictx billing-domain confirmation before activating the work context](docs/images/aictx-billing-confirmation.png)
 
 The dashboard opens only when standard input and output are terminals. Bare `aictx --non-interactive` and redirected use fail instead of entering raw terminal mode. Every CLI subcommand remains available for scripts.
 
