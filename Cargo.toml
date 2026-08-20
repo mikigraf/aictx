@@ -7,6 +7,7 @@ license = "Apache-2.0"
 description = "Secure local profile and billing-context orchestration for Claude Code and Codex"
 documentation = "https://docs.rs/aictx"
 repository = "https://github.com/mikigraf/Coding-Agent-Profiles"
+readme = "README.md"
 keywords = ["claude", "codex", "cli", "credentials", "profiles"]
 categories = ["command-line-utilities", "authentication"]
 
