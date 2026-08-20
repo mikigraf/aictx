@@ -87,18 +87,22 @@ No environment-variable executable override is supported. Overrides must resolve
 ## OS keyring
 
 ```bash
-aictx profile add claude personal --auth api-key
+aictx init --guided
 ```
+
+Guided setup requires terminal input and output. It initializes the layout, creates or reuses the compatible `claude:personal` subscription-token profile, runs official `claude setup-token`, and stores the pasted token in the native OS keyring. It does not create or modify a context. An existing wrapper-held credential is replaced only after confirmation; this local replacement does not revoke the prior remote token. Use the separate `init`, `profile add`, and `login` commands for other authentication modes or profile names.
 
 With no explicit reference, a profile gets a generation-specific `keyring://aictx/...` account. Recreating a removed profile therefore cannot silently reconnect to an old wrapper-held secret. Login writes through the native keyring library. Because native stores may display unlock or consent UI, keyring reads and writes fail closed in `--non-interactive` mode.
 
-Static secret values are limited to 1 MiB and must be non-empty UTF-8. They are supplied through a hidden terminal prompt or standard input, then stored in the native OS keyring. No ordinary secret-valued command-line flag exists.
+Static secret values are limited to 1 MiB and must be non-empty UTF-8. They are supplied through a hidden terminal prompt or standard input, then stored in the native OS keyring. For a Claude setup token, supply the raw token without shell syntax or a label. The prompt normalizes line wrapping and ASCII indentation but rejects blank, ambiguous, or unsupported input before storage. Pasted text is handled as data and is never executed. No ordinary secret-valued command-line flag exists.
 
 ## Profiles
 
 Profile IDs always have the form `claude:name` or `codex:name`. Each profile receives a unique, absolute mutable state directory. Two profiles cannot share a state directory.
 
 Valid authentication/billing combinations are fixed:
+
+At profile creation, `--auth subscription` is the provider-neutral spelling for both vendors. The compatibility spellings `subscription-token` and `chatgpt-oauth` are also accepted as described in the command reference. Serialized profiles always retain the vendor-native values listed in this table.
 
 | Provider/auth | Required metadata | Static secret |
 | --- | --- | --- |
@@ -110,6 +114,8 @@ Valid authentication/billing combinations are fixed:
 | Codex `access-token` | required `--workspace`; optional `--account`; optional credential-store policy | yes; also materialized through official Codex login |
 
 The WIF identity-token file path is made absolute and must be a private regular file when used. `aictx` sets Anthropic's documented selector environment for the official client; it does not perform token exchange itself.
+
+For Claude static credentials, `claude auth status --json` checks the local authentication route and any configured organization evidence. It does not make a model request. Treat the first successful model request as the remote validity check; neither local status nor one request proves future expiry or revocation state.
 
 For Codex, `aictx` maintains these values in the isolated profile `config.toml`:
 

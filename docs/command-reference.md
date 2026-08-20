@@ -25,10 +25,20 @@ Interactive mode requires terminal input and output. Bare `aictx --non-interacti
 ## Initialization and OS keyring
 
 ```text
-aictx init
+aictx init [--guided]
 ```
 
 `init` creates versioned metadata and secure application directories. Re-running it does not replace existing metadata. Static secrets use the native OS keyring.
+
+`aictx init --guided` is the shortest setup path for a personal Claude subscription. It performs these steps in one invocation:
+
+1. Initialize or validate the existing metadata.
+2. Create `claude:personal` with `subscription-token` authentication, or reuse it only when it is already compatible.
+3. Run the official `claude setup-token` process.
+4. Read the pasted token and store it in the profile's OS-keyring item.
+5. Print an explicit `aictx run --profile claude:personal ...` command.
+
+Guided setup requires terminal input and output and does not create or change a context. It refuses malformed metadata, an incompatible or case-conflicting `claude:personal` profile, and redirected or `--non-interactive` use without overwriting existing state. If the vendor or credential step is interrupted, the compatible profile remains so the same command can be run again. When a wrapper-held credential already exists, `aictx` asks before replacing it and does not revoke the prior remote token.
 
 ## Profiles
 
@@ -48,7 +58,7 @@ Profile options:
 - Claude WIF: `--organization-id`, `--federation-rule-id`, `--service-account-id`, `--identity-token-file`
 - Codex: `--codex-credential-store <file|keyring|auto>`
 
-Valid auth names are `subscription-token`, `api-key`, and `wif` for Claude; `chatgpt-oauth`, `api-key`, and `access-token` for Codex. Cross-provider options and incomplete WIF/access-token metadata are rejected.
+Use the provider-neutral `subscription` auth name for either Claude or Codex. `subscription-token` remains accepted for both providers, including the equivalent Codex command, and `chatgpt-oauth` remains accepted for Codex. Profiles persist the vendor-native mode: `subscription-token` for Claude and `chatgpt-oauth` for Codex. `api-key` works for both providers; `wif` is Claude-only and `access-token` is Codex-only. Cross-provider options and incomplete WIF/access-token metadata are rejected.
 
 A profile still referenced by a context cannot be removed. Under a per-profile lock, removal drops its metadata and moves its managed vendor directory to a private `.retired-*` sibling so recreating the name starts with fresh state; profile creation also retires any orphaned active directory left by an interrupted removal. The archive remains available for deliberate recovery and may contain vendor-cached credentials, so protect or deliberately remove it when no longer needed. Remote credentials are not revoked. `--delete-secret` first deletes only that profile's wrapper-held keyring credential, so a keyring error leaves the profile metadata intact.
 
@@ -72,7 +82,7 @@ aictx login <provider:name> [--device] [--generate] [--trusted-runner]
 aictx logout <provider:name>
 ```
 
-- Claude subscription token: `--generate` first invokes official `claude setup-token`, then reads the displayed token through a hidden prompt/stdin. Without it, login only reads/stores the supplied secret.
+- Claude subscription token: `--generate` requires a terminal, invokes official `claude setup-token`, then reads the raw token through a hidden prompt. Paste only the token, not an `export` command, label, quoted value, or other shell text. The parser does not depend on an undocumented vendor prefix, length, or character set. For a line-wrapped paste, ASCII spaces and tabs at each line edge are removed and the nonblank lines are joined. Blank or ambiguous lines, interior whitespace or controls, common labels or shell wrappers, and extra queued input are rejected before keyring storage. Pasted text is never executed. Without `--generate`, login reads from the hidden prompt or standard input. If the keyring item already exists, interactive login asks before replacing it; replacement does not revoke the prior remote credential. If token generation succeeds but capture or keyring storage fails, revoke the generated token in your Claude account settings under **Settings > Claude Code** before retrying.
 - Claude API key: reads/stores the key through the selected secret reference.
 - Codex API key: reads/stores the key, then sends it to official `codex login --with-api-key` over stdin so both interactive and `exec` modes use the isolated vendor login state.
 - Claude WIF: validates that the configured identity-token file is available; there is no browser login or static secret.
@@ -104,9 +114,9 @@ aictx doctor [--provider claude|codex] [--json]
 
 Normal status shows profiles, authentication, billing, masked account/identity pins, and setup-token limitations. `--verbose` additionally shows state directories, secret references (never values), and availability. In non-interactive mode, an OS-keyring-backed availability check fails with exit `14` instead of risking an unlock or consent prompt.
 
-`credential check` exits `11` when any requested credential is unavailable and `13` when the selected managed identity cannot be confirmed. Claude API-key and setup-token profiles invoke official `claude auth status --json` with only the selected credential and require the expected first-party auth method; an optional `--organization` pin must match the reported `orgId` or `orgName`. If the deployed Claude build omits both fields, a pinned profile fails closed and must not be treated as verified. This local routing preflight also gates `run`, but does not make a model API request or prove remote validity, expiry, or revocation. Codex API keys and WIF identity files remain availability checks; Codex subscription/access-token checks use official login status and forced configuration.
+`credential check` exits `11` when a requested credential is unavailable. Claude API-key and setup-token profiles invoke official `claude auth status --json` with only the selected credential and require the expected first-party auth method; an optional `--organization` pin must match the reported `orgId` or `orgName`. If the deployed Claude build omits both fields, a pinned profile fails closed. Even when this local route check succeeds, the Claude credential remains `unverified` and `credential check` exits `13`, because no model request was made. The same local route check gates `run`; treat the first successful model request as remote validity evidence at that point in time. It does not prove future expiry or revocation state. Codex API keys and WIF identity files remain availability checks; Codex subscription/access-token checks use official login status and forced configuration.
 
-`doctor` checks the same per-profile authentication readiness in addition to metadata, permissions, binaries, keyring availability, and unsafe settings. A requested provider with no configured profile is not ready. Interactive checks may read configured static credentials through the OS keyring. With `--non-interactive`, static keyring reads are skipped and reported as warnings. `--json` emits an `ok` boolean and a `checks` array whose entries contain `level`, `name`, and `detail`; review paths and identifiers before sharing a report. The command exits `1` when it reports a failure, otherwise `0`; warnings alone do not fail it, and it never repairs the layout.
+`doctor` checks the same per-profile authentication readiness in addition to metadata, permissions, binaries, keyring availability, and unsafe settings. A requested provider with no configured profile is not ready. Interactive checks may read configured static credentials through the OS keyring. When a static Claude credential is stored and its local route matches, `doctor` always reports `WARN`, not `FAIL`, because it neither makes nor records model requests. With `--non-interactive`, static keyring reads are skipped and also reported as warnings. `--json` emits an `ok` boolean and a `checks` array whose entries contain `level`, `name`, and `detail`; review paths and identifiers before sharing a report. The command exits `1` when it reports a failure, otherwise `0`; warnings alone do not fail it, and it never repairs the layout.
 
 ## Directory bindings
 

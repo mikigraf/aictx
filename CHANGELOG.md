@@ -19,6 +19,8 @@ No changes yet.
 - Billing-domain banners and confirmation on context changes.
 - Ratatui terminal dashboard for context selection, profile and binding inspection, and safe active-context changes.
 - Status, credential availability, doctor, shell shims, non-secret environment selectors, and shell completion generation.
+- Provider-neutral `--auth subscription` profile creation while preserving vendor-native configuration and compatibility auth spellings.
+- Guided first-run setup for the `claude:personal` subscription profile through `aictx init --guided`.
 - Actionable error hints, close-name suggestions, command help examples, and machine-readable `doctor --json` readiness reports.
 - Unit, CLI lifecycle, native fake-vendor, Unix runner, and PTY contract tests plus coverage-gated cross-platform CI and release scaffolding.
 
@@ -29,3 +31,5 @@ No changes yet.
 - Refuse static-secret and cached Codex OAuth use when inherited GitHub event metadata identifies a pull-request workflow, and require an explicit trusted-runner assertion for long-lived subscription/OAuth/access-token automation in CI/non-interactive execution.
 - Produce keyless Sigstore bundles, checksums, an SBOM, and GitHub provenance for release assets, and scan repository history for committed secrets in CI.
 - Bound local vendor version and authentication-status preflights so a broken executable cannot block diagnostics or a run indefinitely.
+- Normalize safe line wrapping and indentation in raw setup-token pastes, reject shell-style or ambiguous input before keyring storage, and never execute pasted credential text.
+- Distinguish local Claude authentication-route evidence from remote validity, which begins with a successful model request.

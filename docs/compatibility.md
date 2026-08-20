@@ -33,7 +33,7 @@ The compiled native fake-vendor suite is process-level E2E evidence for the wrap
 | direct argument forwarding and exit-code propagation | fake executable tests | current official binaries on each deployment OS |
 | competing credential/base-URL/loader removal and trusted child `PATH` | environment construction and fake executable/interpreter tests | validate billing/account using vendor-supported status UI/command |
 | Claude `CLAUDE_CONFIG_DIR` isolation | fake executable tests | Linux/Windows official Claude behavior; native macOS subscription login is excluded |
-| Claude setup-token injection and auth-route preflight | fake/static environment and `auth status` contract tests | official setup-token generation, remote validity, expiry/rotation, feature limitations |
+| Guided Claude setup, setup-token capture, and auth-route preflight | CLI/native fake-vendor, input-validation, static environment, and `auth status` contract tests | official setup-token generation, native keyring behavior, first remote model request, expiry/rotation, feature limitations |
 | Claude API key and auth-route preflight | environment and `auth status` contract tests | real API account, remote validity, billing attribution, and whether optional org pins expose `orgId`/`orgName` |
 | Claude WIF selectors/identity-token file | unit tests/private-file checks | real IdP federation and official client exchange/refresh |
 | isolated Codex `CODEX_HOME` | fake executable/config tests | browser and device OAuth on each deployment OS |
@@ -44,7 +44,7 @@ The compiled native fake-vendor suite is process-level E2E evidence for the wrap
 
 On Windows, configured Claude and Codex executables must resolve to native `.exe` files. `.bat` and `.cmd` launchers are refused because Windows executes them through `cmd.exe`, which cannot preserve the wrapper's no-shell argument boundary.
 
-The implementation does not parse token claims or undocumented credential-cache formats. Account labels are masked configured hints. Claude organization pins are compared with fields exposed by the official local auth-status command, and Codex workspace pins are forced through official configuration; neither is independent cryptographic or remote-service verification.
+The implementation does not parse token claims or undocumented credential-cache formats. Account labels are masked configured hints. Claude organization pins are compared with fields exposed by the official local auth-status command, and Codex workspace pins are forced through official configuration; neither is independent cryptographic or remote-service verification. A successful Claude auth-status result is local route evidence only. The first successful model request is the remote credential check at that point in time.
 
 ## Known boundaries
 
@@ -59,6 +59,10 @@ Distinct `CODEX_HOME` directories provide explicit file-store separation. With `
 ### Interactive keyrings
 
 Native keyrings may prompt for unlock or consent. `--non-interactive` therefore refuses credential reads, writes, and deletes in the keyring instead of assuming they will be silent. Headless Claude jobs should use WIF where it is available.
+
+### Guided setup
+
+`aictx init --guided` supports the exact `claude:personal` subscription-token path. It validates existing metadata, refuses incompatible profile reuse, invokes the official setup-token process, applies bounded input-safety checks without depending on an undocumented token prefix or length, and stores the captured credential in the OS keyring. It does not create a context. Public tests use synthetic input and a native fake vendor; they do not run a live Claude login, write to the host keyring, or make a model request.
 
 ### Repository settings
 

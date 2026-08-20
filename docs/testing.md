@@ -17,14 +17,16 @@ In this project, “automated end to end” means that the compiled `aictx` bina
 | Layer | Location | What it checks |
 | --- | --- | --- |
 | Unit | `src/**` test modules | parsing, validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and TUI state/rendering |
-| CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs` | the public binary, initialization, profile/context lifecycle, bindings, status, doctor readiness/JSON, shell output, completions, stable exit categories, recovery hints, locking, and local filesystem policy |
+| CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, bindings, status, doctor readiness/JSON, shell output, completions, stable exit categories, recovery hints, locking, and local filesystem policy |
 | Unix runner contracts | `tests/runner_contract.rs` | argument and exit propagation, environment cleaning, lifecycle locks, process signals, repository-policy refusals, and injected-secret routing through temporary shell fixtures |
-| Native fake-vendor E2E | `tests/native_vendor_contract.rs`, `tests/fixtures/native_vendor.rs` | a compiled fake vendor executable on the host OS, including WIF selectors, Codex OAuth preflight, static Claude preflight, isolated state, secret absence, and vendor exit status |
-| Terminal/PTY | `tests/tui_pty.rs` | dashboard startup, resize handling, `q`, `Ctrl-C`, alternate-screen and cursor restoration, and refusal before raw mode |
+| Native fake-vendor E2E | `tests/native_vendor_contract.rs`, `tests/setup_token_pty.rs`, `tests/fixtures/native_vendor.rs` | a compiled fake vendor executable on the host OS, including guided Claude setup-token invocation/failure, WIF selectors, Codex OAuth preflight, static Claude route checks, isolated state, secret absence, and vendor exit status |
+| Terminal/PTY | `tests/tui_pty.rs`, `tests/setup_token_pty.rs` | dashboard startup/resize/exit restoration plus guided setup-token preflight preservation, protected wrapped-paste handling, queued-input draining into a next-shell check, cancellation, signals, bracketed-paste cleanup, and terminal-mode restoration |
 | Toolchain and OS matrix | `.github/workflows/ci.yml` | Rust 1.89 check/tests on Linux and pinned Rust tests on native Linux, macOS, and Windows runners |
 | Security and release gates | `.github/workflows/ci.yml`, `.github/workflows/release.yml` | formatting, Clippy, rustdoc tests, package creation, dependency policy, full-history secret scanning, checksums, SBOM generation, Sigstore bundles, and GitHub provenance |
 
 The Unix runner suite uses shell fixtures and is disabled on Windows. The native fake-vendor and CLI suites provide process coverage without a shell fixture. Platform-gated code still needs a native job on the matching operating system.
+
+The Claude static-auth contracts prove that the selected credential reaches the expected local `claude auth status --json` route. They do not make a model request. The public suite therefore cannot prove remote credential validity; that evidence starts with a successful request in the protected qualification environment.
 
 ## Run the checks
 
@@ -47,9 +49,10 @@ cargo test --locked --test error_contract
 cargo test --locked --test runner_contract
 cargo test --locked --features test-fixtures --test native_vendor_contract
 cargo test --locked --test tui_pty
+cargo test --locked --features test-fixtures --test setup_token_pty
 ```
 
-On Windows, `runner_contract` contains no tests because the file is Unix-only. Do not treat that result as Windows runner coverage.
+On Windows, `runner_contract` and `setup_token_pty` contain no tests because those files are Unix-only. Do not treat those empty results as Windows runner or setup-token terminal coverage; the native fake-vendor and CLI suites still run there.
 
 Check the minimum supported Rust version separately:
 
@@ -75,13 +78,13 @@ CI=true GITHUB_EVENT_NAME=push cargo +1.97.1 llvm-cov \
   --fail-under-regions 75
 ```
 
-The pre-commit engineering baseline on 2026-08-20 used macOS on arm64, Rust 1.97.1, and `cargo-llvm-cov` 0.9.0 with all targets, all features, the lockfile, and `GITHUB_EVENT_NAME=push`. It ran 96 tests:
+The pre-commit engineering baseline on 2026-08-20 used macOS on arm64, Rust 1.97.1, and `cargo-llvm-cov` 0.9.0 with all targets, all features, the lockfile, and `GITHUB_EVENT_NAME=push`. It ran 114 tests:
 
 | Metric | Measured | CI floor |
 | --- | ---: | ---: |
-| Regions | 77.79% | 75% |
-| Functions | 62.25% | 60% |
-| Lines | 74.96% | 70% |
+| Regions | 78.93% | 75% |
+| Functions | 63.79% | 60% |
+| Lines | 76.26% | 70% |
 
 This local measurement describes the reviewed pre-commit worktree, not an immutable revision. Use the green CI report for the committed revision as release evidence.
 
@@ -111,6 +114,7 @@ Use the lowest layer that proves the behavior, then add a process-level test whe
 - Put deterministic parsing and state transitions in unit tests.
 - Use an explicit temporary `--root` for CLI tests. Do not read a developer home directory.
 - Use injected secrets or synthetic markers. Do not open the host keyring.
+- Keep guided-login tests synthetic: prove initialization, the exact setup-token process call, wrapped-paste normalization, malformed-input rejection, and restart behavior without storing a real credential.
 - Use the native fake vendor when executable discovery, stdin/stdout, environment, state, or exit status is part of the contract.
 - Use a PTY only for terminal behavior. Always set a short timeout and verify terminal restoration.
 - Add native platform coverage for platform-gated behavior. A cross-compile check cannot prove runtime permissions or process behavior.

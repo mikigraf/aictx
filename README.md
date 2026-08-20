@@ -6,42 +6,36 @@ Run the official Claude Code and Codex CLIs under clear personal, work, or CI id
 
 ## Quick start
 
-Initialize the user-scoped configuration:
+Set up a personal Claude subscription profile:
 
 ```bash
-aictx init
+aictx init --guided
 ```
 
-Add one profile for each provider:
+This one command initializes `aictx`, creates or safely reuses the `claude:personal` subscription-token profile, runs the official `claude setup-token` flow, and stores the pasted token in the native OS keyring. It requires terminal input and output. It does not create or change a context.
+
+Make the first model request with the explicit profile:
 
 ```bash
-aictx profile add claude personal --auth subscription-token
-aictx profile add codex personal --auth chatgpt-oauth
+aictx run --profile claude:personal claude -- -p "explain this repository"
 ```
 
-Authenticate through the official flows:
+The local `claude auth status --json` check confirms that the selected credential reaches the expected local Claude authentication route. It does not contact the model service. Treat the first successful model request as the remote validity check for that credential.
+
+To add Codex and use one shared context, continue with:
 
 ```bash
-aictx login claude:personal --generate
+aictx profile add codex personal --auth subscription
 aictx login codex:personal
-```
-
-Create a context and select it:
-
-```bash
 aictx context add personal \
   --claude claude:personal \
   --codex codex:personal
-
 aictx use personal
-```
-
-Run the vendor CLIs:
-
-```bash
 aictx run claude -- -p "explain this repository"
 aictx run codex -- exec "run the tests"
 ```
+
+For Claude API keys, WIF, custom profile names, or a fully manual setup, use `aictx init`, `aictx profile add`, and `aictx login` separately. See the [Command reference](docs/command-reference.md).
 
 Arguments after `--` are passed as an argument vector. A shell never parses them. Options that could change the selected identity, bypass isolated state, or load unsafe repository commands are refused.
 
@@ -120,6 +114,8 @@ Bindings live in global user metadata. Repository `.aictx.toml` files are ignore
 
 ## Authentication support
 
+Use `--auth subscription` when creating either a Claude or Codex subscription profile. The compatibility spellings `subscription-token` and `chatgpt-oauth` remain accepted; configuration is normalized to the vendor-native mode shown below.
+
 | Provider | Mode | Billing path | Credential handling |
 | --- | --- | --- | --- |
 | Claude | `subscription-token` | Claude subscription | native OS keyring, with optional official `setup-token` generation |
@@ -135,7 +131,9 @@ Static secrets are stored in the native OS keyring. Configuration contains only 
 keyring://service/account
 ```
 
-The secret value is entered through a hidden prompt or standard input during login. It is never accepted as an ordinary command-line argument.
+The secret value is entered through a hidden prompt or standard input during login. For a Claude setup token, paste only the raw token, not an `export` command or other shell text. The prompt does not depend on an undocumented token prefix, length, or character set. It joins nonblank wrapped lines after removing ASCII space or tab indentation at each line edge, then rejects empty input, whitespace or controls inside a segment, and common labels or shell wrappers before storage. Pasted text is never executed as shell code. A secret is never accepted as an ordinary command-line argument.
+
+If Claude creates a setup token but capture or keyring storage fails, revoke that remote token in your Claude account settings under **Settings > Claude Code** before retrying. Local replacement or logout does not revoke an already-created remote token.
 
 Codex API-key and access-token login can store a second vendor-owned credential copy. With the default `file` policy, that copy is plaintext inside the private, isolated `CODEX_HOME`. Treat current and retired Codex state as credential-bearing data. Other Codex store policies follow vendor and operating-system behavior.
 
@@ -145,6 +143,7 @@ Read [Configuration](docs/configuration.md) for every supported profile field an
 
 | Command | Purpose |
 | --- | --- |
+| `aictx init --guided` | Set up the personal Claude subscription profile and credential |
 | `aictx` | Open the interactive context dashboard |
 | `aictx status --verbose` | Show resolved profiles and non-secret identity metadata |
 | `aictx current` | Print the context selected for the current directory |
@@ -159,7 +158,7 @@ See the full [Command reference](docs/command-reference.md).
 
 Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative; use `aictx --help` and `aictx <command> --help` for current syntax and examples.
 
-Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. With `--non-interactive`, it skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array; every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
+Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests; a successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array; every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
 
 ## Shell integration
 
@@ -216,7 +215,7 @@ The boundary has limits:
 - Same-user malware, a compromised vendor CLI, and administrator or root access are outside the protection boundary.
 - Windows vendor executables must be native `.exe` files. Script launchers such as `.cmd` and `.bat` are refused.
 
-Static Claude checks use the official local `claude auth status --json` output to verify the selected method and optional organization evidence. This check does not make a model request or prove remote validity, expiry, or revocation. WIF is passed to the official Claude client through documented selectors. `aictx` does not exchange or refresh WIF tokens.
+Static Claude checks use the official local `claude auth status --json` output to verify the selected method and optional organization evidence. This is local routing evidence. It does not make a model request or prove remote validity, expiry, or revocation. The first successful model request is the remote validity check at that point in time. WIF is passed to the official Claude client through documented selectors. `aictx` does not exchange or refresh WIF tokens.
 
 Read the [Threat model](THREAT_MODEL.md) and [Security policy](SECURITY.md) before an enterprise rollout.
 
