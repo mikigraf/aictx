@@ -12,9 +12,11 @@ use tempfile::TempDir;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DASHBOARD_MARKER: &str = "secure";
 const DASHBOARD_FOOTER_MARKER: &str = "quit";
-const EVENT_LOOP_MARKER: &str = "Metadata";
+const RELOAD_MESSAGE_MARKER: &str = "Metadata reloaded.";
 const SMALL_TERMINAL_MARKER: &str = "Terminal";
-const DRAW_COMPLETE_MARKER: &str = "\u{1b}[?25l";
+const SMALL_TERMINAL_RESIZE_MARKER: &str = "Resize";
+const SMALL_TERMINAL_FOOTER_MARKER: &str = "quit";
+const INITIAL_DRAW_COMPLETE_MARKER: &str = "\u{1b}[?25l";
 const MAX_TERMINAL_QUERY_LENGTH: usize = 5;
 
 type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -281,7 +283,7 @@ fn run_in_pty(
         let initial_render = wait_for_output(
             &output,
             &mut child,
-            DRAW_COMPLETE_MARKER,
+            INITIAL_DRAW_COMPLETE_MARKER,
             dashboard_footer,
             deadline,
             "the completed initial dashboard draw",
@@ -289,21 +291,13 @@ fn run_in_pty(
         if exercise_resize {
             write_pty(&writer, b"r")
                 .unwrap_or_else(|error| panic!("write PTY readiness input: {error}"));
-            let event_loop_marker = wait_for_output(
-                &output,
-                &mut child,
-                EVENT_LOOP_MARKER,
-                initial_render,
-                deadline,
-                "the event-loop readiness render",
-            );
             let event_loop_ready = wait_for_output(
                 &output,
                 &mut child,
-                DRAW_COMPLETE_MARKER,
-                event_loop_marker,
+                RELOAD_MESSAGE_MARKER,
+                initial_render,
                 deadline,
-                "the completed event-loop readiness draw",
+                "the event-loop readiness render",
             );
             pair.master
                 .resize(PtySize {
@@ -321,13 +315,21 @@ fn run_in_pty(
                 deadline,
                 "the undersized-terminal render",
             );
+            let small_resize_instruction = wait_for_output(
+                &output,
+                &mut child,
+                SMALL_TERMINAL_RESIZE_MARKER,
+                small_marker,
+                deadline,
+                "the undersized-terminal resize instruction",
+            );
             let small_render = wait_for_output(
                 &output,
                 &mut child,
-                DRAW_COMPLETE_MARKER,
-                small_marker,
+                SMALL_TERMINAL_FOOTER_MARKER,
+                small_resize_instruction,
                 deadline,
-                "the completed undersized-terminal draw",
+                "the undersized-terminal footer",
             );
             pair.master
                 .resize(PtySize {
@@ -348,10 +350,10 @@ fn run_in_pty(
             wait_for_output(
                 &output,
                 &mut child,
-                DRAW_COMPLETE_MARKER,
+                RELOAD_MESSAGE_MARKER,
                 restored_header,
                 deadline,
-                "the completed restored dashboard draw",
+                "the restored dashboard status",
             );
         }
         write_pty(&writer, input).unwrap_or_else(|error| panic!("write PTY input: {error}"));
