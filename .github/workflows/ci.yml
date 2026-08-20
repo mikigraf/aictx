@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Format, lint, and docs (Rust 1.97.1)
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.97.1
+          components: clippy,rustfmt
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Verify locked dependency graph
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint all targets
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Test documentation
+        run: cargo test --doc --locked
+
+  test:
+    name: Test Rust 1.97.1 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Test all targets and features
+        run: cargo test --all-targets --all-features --locked
+
+  msrv:
+    name: Minimum supported Rust 1.89
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install MSRV
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.89.0
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: msrv-1.89
+
+      - name: Check all targets at MSRV
+        run: cargo check --all-targets --all-features --locked
+
+      - name: Test at MSRV
+        run: cargo test --all-targets --all-features --locked
+
+  supply-chain:
+    name: Advisories, licenses, bans, and sources
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.97.1
+
+      - name: Check dependency policy with pinned Cargo Deny 0.20.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
+          install_dir="${RUNNER_TEMP}/cargo-deny-0.20.2"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location \
+            --output "$archive" \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  ${archive}" \
+            | sha256sum --check --strict
+          tar -xzf "$archive" -C "$install_dir" --strip-components=1
+          "$install_dir/cargo-deny" --all-features --locked check
+
+  secret-scan:
+    name: Repository secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan all revisions with pinned Gitleaks 8.30.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gitleaks_8.30.1_linux_x64.tar.gz"
+          install_dir="${RUNNER_TEMP}/gitleaks-8.30.1"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location \
+            --output "$archive" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${archive}" \
+            | sha256sum --check --strict
+          tar -xzf "$archive" -C "$install_dir" gitleaks
+          "$install_dir/gitleaks" git --redact --no-banner --log-opts="--all" .
