@@ -1082,7 +1082,13 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use tempfile::TempDir;
 
-    use crate::model::{BillingDomain, Binding, ClaudeAuth, Context, Profile, SCHEMA_VERSION};
+    use crate::{
+        config::AppPaths,
+        model::{
+            BillingDomain, Binding, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Profile,
+            SCHEMA_VERSION,
+        },
+    };
 
     use super::*;
 
@@ -1146,6 +1152,77 @@ mod tests {
             .collect::<String>()
     }
 
+    fn activation_app() -> (TempDir, MetadataStore, App, Name, Name) {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let paths = AppPaths::for_root(temporary.path().join("aictx"));
+        let store = MetadataStore::new(paths.clone());
+        store
+            .initialize()
+            .unwrap_or_else(|error| panic!("initialize store: {error}"));
+
+        let personal =
+            Name::parse("personal").unwrap_or_else(|error| panic!("valid name: {error}"));
+        let work = Name::parse("work").unwrap_or_else(|error| panic!("valid name: {error}"));
+        let personal_id: ProfileId = "claude:personal"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
+        let work_id: ProfileId = "claude:work"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
+
+        store
+            .update_config(|config| {
+                config.profiles.insert(
+                    personal_id.clone(),
+                    Profile::Claude {
+                        billing_domain: BillingDomain::ClaudeSubscription,
+                        auth: ClaudeAuth::SubscriptionToken,
+                        state_dir: paths
+                            .profile_state_dir(personal_id.provider(), personal_id.name()),
+                        secret_ref: Some("keyring://aictx/claude-personal".to_owned()),
+                        account_hint: None,
+                        expected_organization: None,
+                        wif: None,
+                    },
+                );
+                config.profiles.insert(
+                    work_id.clone(),
+                    Profile::Claude {
+                        billing_domain: BillingDomain::AnthropicApi,
+                        auth: ClaudeAuth::ApiKey,
+                        state_dir: paths.profile_state_dir(work_id.provider(), work_id.name()),
+                        secret_ref: Some("keyring://aictx/claude-work".to_owned()),
+                        account_hint: None,
+                        expected_organization: None,
+                        wif: None,
+                    },
+                );
+                config.contexts.insert(
+                    personal.clone(),
+                    Context {
+                        claude: Some(personal_id),
+                        codex: None,
+                    },
+                );
+                config.contexts.insert(
+                    work.clone(),
+                    Context {
+                        claude: Some(work_id),
+                        codex: None,
+                    },
+                );
+                config.default_context = Some(personal.clone());
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("populate store: {error}"));
+
+        let (config, state) = store
+            .load_metadata()
+            .unwrap_or_else(|error| panic!("load metadata: {error}"));
+        let app = App::from_metadata(config, state, temporary.path().to_path_buf());
+        (temporary, store, app, personal, work)
+    }
+
     #[test]
     fn tiny_terminal_renders_without_panicking() {
         let text = render_text(&test_app(), 8, 3);
@@ -1199,5 +1276,171 @@ mod tests {
         let text = render_text(&app, 120, 30);
         assert!(text.contains("Global: work"));
         assert!(text.contains("Here: personal (directory binding)"));
+    }
+
+    #[test]
+    fn key_handling_covers_panels_help_and_clean_exit() {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("aictx")));
+        let mut app = test_app();
+
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(app.panel, Panel::Profiles);
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+        );
+        assert_eq!(app.panel, Panel::Contexts);
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(app.show_help);
+        assert!(render_text(&app, 100, 28).contains("Keyboard shortcuts"));
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(!app.show_help);
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        );
+        assert!(app.should_quit);
+        assert_eq!(app.exit_code, 0);
+    }
+
+    #[test]
+    fn billing_modal_cancel_and_confirm_use_the_shared_activation_service() {
+        let (_temporary, store, mut app, personal, work) = activation_app();
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+        );
+        assert_eq!(app.selected_context(), Some(&work));
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(app.pending_activation.is_some());
+        assert!(render_text(&app, 100, 28).contains("Billing domain change"));
+
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
+        assert!(app.pending_activation.is_none());
+        let (config, state) = store
+            .load_metadata()
+            .unwrap_or_else(|error| panic!("load cancelled state: {error}"));
+        assert_eq!(state.current_context, None);
+        assert_eq!(config.default_context.as_ref(), Some(&personal));
+
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        let (config, state) = store
+            .load_metadata()
+            .unwrap_or_else(|error| panic!("load activated state: {error}"));
+        assert_eq!(state.current_context.as_ref(), Some(&work));
+        assert_eq!(config.default_context.as_ref(), Some(&personal));
+        assert!(app.pending_activation.is_none());
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.text.contains("Active context: work"))
+        );
+    }
+
+    #[test]
+    fn stale_billing_modal_requires_reviewing_the_updated_change() {
+        let (_temporary, store, mut app, _personal, work) = activation_app();
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+        );
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(app.pending_activation.is_some());
+
+        let codex_id: ProfileId = "codex:work"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
+        let codex_state = store
+            .paths()
+            .profile_state_dir(codex_id.provider(), codex_id.name());
+        store
+            .update_config(|config| {
+                config.profiles.insert(
+                    codex_id.clone(),
+                    Profile::Codex {
+                        billing_domain: BillingDomain::OpenaiApi,
+                        auth: CodexAuth::ApiKey,
+                        state_dir: codex_state,
+                        secret_ref: Some("keyring://aictx/codex-work".to_owned()),
+                        account_hint: None,
+                        expected_workspace_id: None,
+                        credential_store: CodexCredentialStore::File,
+                        trusted_runners_only: false,
+                    },
+                );
+                config
+                    .contexts
+                    .get_mut(&work)
+                    .ok_or_else(|| Error::ContextNotFound(work.to_string()))?
+                    .codex = Some(codex_id);
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("change billing fingerprint: {error}"));
+
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(app.pending_activation.is_some());
+        assert!(app.message.as_ref().is_some_and(|message| {
+            message.text.contains("Context state changed") && message.level == MessageLevel::Warning
+        }));
+        let (_, state) = store
+            .load_metadata()
+            .unwrap_or_else(|error| panic!("load unchanged state: {error}"));
+        assert_eq!(state.current_context, None);
+    }
+
+    #[test]
+    fn control_c_requests_exit_130_without_other_state_changes() {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("aictx")));
+        let mut app = test_app();
+        handle_key(
+            &mut app,
+            &store,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(app.should_quit);
+        assert_eq!(app.exit_code, 130);
     }
 }
