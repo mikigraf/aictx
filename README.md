@@ -2,73 +2,133 @@
 
 Run the official Claude Code and Codex CLIs under clear personal, work, or CI identities.
 
-`aictx` keeps each provider profile in its own vendor state directory. Contexts group one Claude profile and one Codex profile, so you can switch both tools together without copying credentials into shell files or repository config.
+`aictx` gives every profile its own vendor state directory. You can switch accounts without copying tokens into shell files or repository configuration.
 
 ## Quick start
 
-Set up a personal Claude subscription profile:
+You need Rust 1.89 or newer and the official `claude` and/or `codex` CLI.
+
+### Install or update
+
+From an existing source checkout:
+
+```bash
+git pull --ff-only
+cargo install --path . --locked --force
+```
+
+For a new checkout:
+
+```bash
+git clone https://github.com/mikigraf/aictx.git
+cd aictx
+cargo install --path . --locked
+```
+
+### Claude subscription
+
+Run the guided setup:
 
 ```bash
 aictx init --guided
 ```
 
-This one command initializes `aictx`, creates or safely reuses the `claude:personal` subscription-token profile, runs the official `claude setup-token` flow, and stores the pasted token in the native OS keyring. It requires terminal input and output. It does not create or change a context.
+This command:
 
-Make the first model request with the explicit profile:
+1. Initializes `aictx`.
+2. Creates or safely reuses `claude:personal`.
+3. Runs the official `claude setup-token` flow.
+4. Reads the pasted token through a hidden prompt.
+5. Stores it in the native OS credential store.
+
+Paste only the raw token. Wrapped lines are handled safely. Do not paste an `export` command or other shell text.
+
+Test the profile with a real model request:
 
 ```bash
-aictx run --profile claude:personal claude -- -p "explain this repository"
+aictx run --profile claude:personal claude -- \
+  -p "reply with exactly: Claude subscription works"
 ```
 
-The local `claude auth status --json` check confirms that the selected credential reaches the expected local Claude authentication route. It does not contact the model service. Treat the first successful model request as the remote validity check for that credential.
+The local Claude status command can confirm the selected authentication route, but it cannot prove that the token is accepted remotely. The first successful model request is the remote check.
 
-To add Codex and use one shared context, continue with:
+If you previously stored an invalid Claude token, clear the local copy before running guided setup again:
 
 ```bash
+aictx logout claude:personal
+aictx init --guided
+```
+
+Local logout does not revoke a remote Claude token. Revoke old tokens in your Claude account when needed.
+
+### Codex subscription
+
+For a clean Codex-only setup:
+
+```bash
+aictx init
 aictx profile add codex personal --auth subscription
 aictx login codex:personal
+aictx run --profile codex:personal codex -- exec "explain this repository"
+```
+
+`aictx login codex:personal` starts the official Codex browser login. If you already ran Claude guided setup, `aictx` is initialized and the first command is harmless but optional.
+
+The compatibility spelling below also works:
+
+```bash
+aictx profile add codex personal --auth subscription-token
+```
+
+For Codex, both `subscription` and `subscription-token` map to its native `chatgpt-oauth` mode. Use `subscription` in new commands because it describes both providers clearly.
+
+### Use Claude and Codex together
+
+Create one context after both profiles exist:
+
+```bash
 aictx context add personal \
   --claude claude:personal \
   --codex codex:personal
 aictx use personal
+
 aictx run claude -- -p "explain this repository"
 aictx run codex -- exec "run the tests"
 ```
 
-For Claude API keys, WIF, custom profile names, or a fully manual setup, use `aictx init`, `aictx profile add`, and `aictx login` separately. See the [Command reference](docs/command-reference.md).
+After a context is active, you do not need `--profile` on every run. Everything after `--` is passed directly to the official vendor CLI as arguments, without a shell.
 
-Arguments after `--` are passed as an argument vector. A shell never parses them. Options that could change the selected identity, bypass isolated state, or load unsafe repository commands are refused.
+Run `aictx` with no subcommand to open the terminal context picker.
+
+## Why aictx is different
+
+Claude Code and Codex normally reuse their default home directory and current login. That is simple for one account, but it becomes unclear when personal, work, and CI identities share a machine.
+
+`aictx` keeps those choices explicit:
+
+- Every profile gets an isolated `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
+- A context can select one Claude profile, one Codex profile, or both.
+- Static secrets stay out of project files, shell startup files, and command arguments.
+- The official Claude and Codex binaries still own API calls, browser login, refresh, and vendor state.
+- Repository settings and inherited environment values cannot silently replace the selected account or endpoint.
+
+`aictx` is a local launcher and profile manager. It is not an API proxy and does not replace either vendor CLI.
+
+## Why Claude uses the OS credential store
+
+Claude and Codex expose different subscription login flows:
+
+- `claude setup-token` prints a token but does not save it for `aictx`. The token is needed on later runs, so `aictx` stores it in Keychain on macOS, Credential Manager on Windows, or Secret Service on Linux. The `aictx` configuration stores only a `keyring://...` reference.
+- Codex subscription login is browser OAuth managed by Codex. Codex stores its login state inside that profile's isolated `CODEX_HOME`. `aictx` does not ask you to paste or store a ChatGPT OAuth token.
+
+This is why the shared command uses `--auth subscription`, while the saved provider modes remain `subscription-token` for Claude and `chatgpt-oauth` for Codex.
+
+For API keys, WIF, managed access tokens, custom profile names, and other options, see [Authentication support](#authentication-support) and the [Command reference](docs/command-reference.md).
+
+Options that could change the selected identity, bypass isolated state, or load unsafe repository commands are refused.
 
 > [!IMPORTANT]
 > The local wrapper flow is tested end to end with compiled native fake-vendor executables. These offline tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes. They do not contact Claude or Codex. Production rollout still requires live-account, WIF, native-keyring, billing, Windows, and release-signing qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
-
-## What aictx gives you
-
-- A terminal dashboard when you run `aictx` with no subcommand
-- Named contexts such as `personal`, `work`, and `ci`
-- Separate `CLAUDE_CONFIG_DIR` and `CODEX_HOME` state for every profile
-- Native OS-keyring storage for static secrets
-- Direct argument forwarding to official vendor CLIs without a shell
-- Clean child environments that remove competing credentials and routing settings
-- Directory bindings stored in user-owned metadata, outside the repository
-- Billing-change confirmation and CI guardrails for long-lived credentials
-
-`aictx` stays at the process boundary. Claude Code and Codex still own browser login, device login, API calls, token refresh, and their private state formats.
-
-## Install
-
-You need:
-
-- Rust 1.89 or newer
-- the official `claude` and/or `codex` CLI
-
-Install from a source checkout:
-
-```bash
-cargo install --path . --locked
-```
-
-When release archives are published, they include the binary, shell completions, license, and project documentation. Each archive and SBOM has a SHA-256 file. The release workflow also creates Sigstore bundles and GitHub build provenance. These files do not replace native Authenticode or Apple code signing, and macOS notarization remains a separate release step.
 
 ## Interactive mode
 
