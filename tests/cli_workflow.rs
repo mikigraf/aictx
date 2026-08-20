@@ -25,6 +25,54 @@ fn run_ok(command: &mut Command) -> std::process::Output {
     output
 }
 
+fn copy_aictx_as_vendor(directory: &Path, name: &str) -> std::path::PathBuf {
+    let executable = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(env!("CARGO_BIN_EXE_aictx"), &executable)
+        .unwrap_or_else(|error| panic!("copy test vendor executable: {error}"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("secure test vendor executable: {error}"));
+    }
+    executable
+}
+
+fn add_personal_context(root: &Path) {
+    run_ok(aictx(root).arg("init"));
+    run_ok(aictx(root).args(["profile", "add", "claude", "personal", "--auth", "api-key"]));
+    run_ok(aictx(root).args(["context", "add", "personal", "--claude", "claude:personal"]));
+}
+
+#[test]
+fn lifecycle_mutations_before_init_report_not_initialized_without_creating_layout() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+
+    for arguments in [
+        vec!["profile", "add", "claude", "personal", "--auth", "api-key"],
+        vec!["profile", "remove", "claude:personal"],
+        vec!["login", "claude:personal"],
+        vec!["logout", "claude:personal"],
+    ] {
+        let output = aictx(&root)
+            .args(arguments)
+            .output()
+            .unwrap_or_else(|error| panic!("run pre-initialization command: {error}"));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("aictx is not initialized"));
+        assert!(stderr.contains("aictx init"));
+        assert!(!stderr.contains("No such file or directory"));
+        assert!(
+            !root.exists(),
+            "pre-initialization command must not create a partial layout"
+        );
+    }
+}
+
 #[test]
 fn bare_invocation_refuses_non_terminal_io_without_ansi_output() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
@@ -105,6 +153,48 @@ fn use_updates_only_mutable_state_and_bindings_take_precedence() {
     .unwrap_or_else(|error| panic!("write malicious repo config: {error}"));
     let output = run_ok(aictx(&root).current_dir(&company).arg("current"));
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "personal");
+}
+
+#[test]
+fn binding_errors_are_actionable_and_deleted_directories_can_be_unbound() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    add_personal_context(&root);
+
+    let binding = temporary.path().join("company/project");
+    let missing = aictx(&root)
+        .arg("bind")
+        .arg(&binding)
+        .arg("personal")
+        .output()
+        .unwrap_or_else(|error| panic!("bind missing directory: {error}"));
+    assert_eq!(missing.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("binding target"));
+    assert!(stderr.contains("does not exist; create it first"));
+    assert!(!stderr.contains("os error"));
+
+    fs::create_dir_all(&binding)
+        .unwrap_or_else(|error| panic!("create directory to bind: {error}"));
+    run_ok(aictx(&root).current_dir(temporary.path()).args([
+        "bind",
+        "company/project",
+        "personal",
+    ]));
+    fs::remove_dir_all(temporary.path().join("company"))
+        .unwrap_or_else(|error| panic!("remove bound directory: {error}"));
+
+    let removed = run_ok(
+        aictx(&root)
+            .current_dir(temporary.path())
+            .args(["unbind", "company/project"]),
+    );
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("Removed binding"));
+    let bindings = run_ok(aictx(&root).arg("bindings"));
+    assert_eq!(
+        String::from_utf8_lossy(&bindings.stdout).trim(),
+        "No directory bindings configured."
+    );
 }
 
 #[test]
@@ -257,6 +347,18 @@ fn config_schema_rejects_unknown_fields_and_telemetry() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("FAIL metadata"));
     assert!(output.stderr.is_empty());
 
+    let json = aictx(&root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap_or_else(|error| panic!("diagnose unknown config as JSON: {error}"));
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout)
+        .unwrap_or_else(|error| panic!("doctor JSON should parse: {error}"));
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["checks"][0]["level"], "failure");
+    assert_eq!(report["checks"][0]["name"], "metadata");
+
     let telemetry = valid.replace("telemetry = false", "telemetry = true");
     fs::write(&config_path, telemetry)
         .unwrap_or_else(|error| panic!("write telemetry config: {error}"));
@@ -266,6 +368,158 @@ fn config_schema_rejects_unknown_fields_and_telemetry() {
         .unwrap_or_else(|error| panic!("load telemetry config: {error}"));
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("telemetry must remain disabled"));
+}
+
+#[test]
+fn doctor_fails_readiness_when_a_wif_identity_source_is_missing() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let fake_claude = copy_aictx_as_vendor(temporary.path(), "claude");
+    let missing_token = temporary.path().join("missing-identity-token.jwt");
+    run_ok(aictx(&root).arg("init"));
+    run_ok(
+        aictx(&root).args([
+            "profile",
+            "add",
+            "claude",
+            "ci",
+            "--auth",
+            "wif",
+            "--organization-id",
+            "org_test",
+            "--federation-rule-id",
+            "rule_test",
+            "--service-account-id",
+            "service_test",
+            "--identity-token-file",
+            missing_token
+                .to_str()
+                .unwrap_or_else(|| panic!("temporary path should be UTF-8")),
+        ]),
+    );
+
+    let output = aictx(&root)
+        .arg("--claude-bin")
+        .arg(&fake_claude)
+        .args(["doctor", "--provider", "claude"])
+        .output()
+        .unwrap_or_else(|error| panic!("run doctor with missing WIF source: {error}"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("FAIL"));
+    assert!(stdout.contains("claude:ci identity source"));
+    assert!(stdout.contains("missing-identity-token.jwt"));
+    assert!(!stdout.contains("OS keyring"));
+
+    fs::write(&missing_token, "short-lived-test-identity")
+        .unwrap_or_else(|error| panic!("write WIF identity source: {error}"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&missing_token, fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("secure WIF identity source: {error}"));
+    }
+    let ready = run_ok(aictx(&root).arg("--claude-bin").arg(&fake_claude).args([
+        "doctor",
+        "--provider",
+        "claude",
+        "--json",
+    ]));
+    let ready: serde_json::Value = serde_json::from_slice(&ready.stdout)
+        .unwrap_or_else(|error| panic!("doctor JSON should parse: {error}"));
+    assert_eq!(ready["ok"], true);
+    let checks = ready["checks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("doctor checks should be an array"));
+    assert!(
+        checks.iter().any(|check| {
+            check["level"] == "pass" && check["name"] == "claude:ci identity source"
+        })
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| { check["level"] == "pass" && check["name"] == "claude:ci credential" })
+    );
+    assert!(!checks.iter().any(|check| check["name"] == "OS keyring"));
+}
+
+#[test]
+fn doctor_reports_an_unconfigured_provider_as_not_ready() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let fake_claude = copy_aictx_as_vendor(temporary.path(), "claude");
+    run_ok(aictx(&root).arg("init"));
+
+    let output = aictx(&root)
+        .arg("--claude-bin")
+        .arg(&fake_claude)
+        .args(["doctor", "--provider", "claude", "--json"])
+        .output()
+        .unwrap_or_else(|error| panic!("run unconfigured-provider doctor: {error}"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("doctor JSON should parse: {error}"));
+    assert_eq!(report["ok"], false);
+    assert!(report["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|check| {
+            check["level"] == "failure"
+                && check["name"] == "claude profiles"
+                && check["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("aictx profile add"))
+        })
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn logout_reports_completed_cleanup_and_propagates_vendor_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let fake_codex = temporary.path().join("codex");
+    fs::write(&fake_codex, "#!/bin/sh\nexit 0\n")
+        .unwrap_or_else(|error| panic!("write successful fake Codex: {error}"));
+    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("secure fake Codex: {error}"));
+    run_ok(aictx(&root).arg("init"));
+    run_ok(aictx(&root).args([
+        "profile",
+        "add",
+        "codex",
+        "personal",
+        "--auth",
+        "chatgpt-oauth",
+    ]));
+
+    let completed = run_ok(
+        aictx(&root)
+            .arg("--codex-bin")
+            .arg(&fake_codex)
+            .args(["logout", "codex:personal"]),
+    );
+    let stdout = String::from_utf8_lossy(&completed.stdout);
+    assert!(stdout.contains("Completed local authentication cleanup for codex:personal"));
+    assert!(stdout.contains("does not confirm that local credentials existed"));
+    assert!(!stdout.contains("Logged out"));
+
+    fs::write(&fake_codex, "#!/bin/sh\nexit 37\n")
+        .unwrap_or_else(|error| panic!("write failing fake Codex: {error}"));
+    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("secure failing fake Codex: {error}"));
+    let failed = aictx(&root)
+        .arg("--codex-bin")
+        .arg(&fake_codex)
+        .args(["logout", "codex:personal"])
+        .output()
+        .unwrap_or_else(|error| panic!("run failing Codex logout: {error}"));
+    assert_eq!(failed.status.code(), Some(37));
+    assert!(failed.stdout.is_empty());
 }
 
 #[test]
@@ -311,6 +565,152 @@ fn concurrent_metadata_updates_are_serialized_without_lost_writes() {
     for index in 0..8 {
         assert!(listing.contains(&format!("claude:profile-{index}")));
     }
+}
+
+#[test]
+fn public_command_surface_supports_a_complete_local_lifecycle() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("aictx");
+    let project = temporary.path().join("company/project");
+    fs::create_dir_all(&project).unwrap_or_else(|error| panic!("create project: {error}"));
+
+    let initialized = run_ok(aictx(&root).arg("init"));
+    let initialized_stdout = String::from_utf8_lossy(&initialized.stdout);
+    assert!(initialized_stdout.contains("Initialized aictx metadata."));
+    assert!(initialized_stdout.contains("Next: add a profile with `aictx profile add --help`."));
+    let idempotent = run_ok(aictx(&root).arg("init"));
+    assert_eq!(
+        String::from_utf8_lossy(&idempotent.stdout).trim(),
+        "aictx is already initialized; existing metadata was left unchanged."
+    );
+    let quiet = run_ok(aictx(&root).args(["--quiet", "init"]));
+    assert!(quiet.stdout.is_empty());
+    assert!(quiet.stderr.is_empty());
+
+    run_ok(aictx(&root).args([
+        "profile",
+        "add",
+        "claude",
+        "personal",
+        "--auth",
+        "api-key",
+        "--account",
+        "person@example.test",
+        "--organization",
+        "organization-private",
+    ]));
+    run_ok(aictx(&root).args([
+        "profile",
+        "add",
+        "codex",
+        "personal",
+        "--auth",
+        "chatgpt-oauth",
+        "--account",
+        "codex-user@example.test",
+        "--workspace",
+        "workspace-private",
+    ]));
+
+    let profiles = run_ok(aictx(&root).args(["profile", "list"]));
+    let profile_list = String::from_utf8_lossy(&profiles.stdout);
+    assert!(profile_list.contains("claude:personal"));
+    assert!(profile_list.contains("codex:personal"));
+    let shown_profile = run_ok(aictx(&root).args(["profile", "show", "claude:personal"]));
+    let shown_profile = String::from_utf8_lossy(&shown_profile.stdout);
+    assert!(shown_profile.contains("profile:        claude:personal"));
+    assert!(shown_profile.contains("p***@example.test"));
+    assert!(!shown_profile.contains("person@example.test"));
+    assert!(!shown_profile.contains("organization-private"));
+
+    run_ok(aictx(&root).args([
+        "context",
+        "add",
+        "personal",
+        "--claude",
+        "claude:personal",
+        "--codex",
+        "codex:personal",
+    ]));
+    let contexts = run_ok(aictx(&root).args(["context", "list"]));
+    let context_list = String::from_utf8_lossy(&contexts.stdout);
+    assert!(context_list.contains("personal"));
+    assert!(context_list.contains("claude=claude:personal"));
+    assert!(context_list.contains("codex=codex:personal"));
+    let shown_context = run_ok(aictx(&root).args(["context", "show", "personal"]));
+    assert!(String::from_utf8_lossy(&shown_context.stdout).contains("Context: personal"));
+
+    let status = run_ok(aictx(&root).arg("status"));
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("Context: personal (default context)"));
+    assert!(status.contains("p***@example.test"));
+    assert!(status.contains("c***@example.test"));
+    assert!(!status.contains("person@example.test"));
+    assert!(!status.contains("codex-user@example.test"));
+    assert!(!status.contains("keyring://"));
+
+    let referenced_profile = aictx(&root)
+        .args(["profile", "remove", "claude:personal"])
+        .output()
+        .unwrap_or_else(|error| panic!("remove referenced profile: {error}"));
+    assert_eq!(referenced_profile.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&referenced_profile.stderr).contains("still referenced by context")
+    );
+
+    run_ok(aictx(&root).arg("bind").arg(&project).arg("personal"));
+    let bindings = run_ok(aictx(&root).arg("bindings"));
+    let bindings = String::from_utf8_lossy(&bindings.stdout);
+    assert!(bindings.contains("personal"));
+    assert!(bindings.contains("project"));
+    let bound_context = aictx(&root)
+        .args(["context", "remove", "personal"])
+        .output()
+        .unwrap_or_else(|error| panic!("remove bound context: {error}"));
+    assert_eq!(bound_context.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bound_context.stderr).contains("directory binding"));
+    run_ok(aictx(&root).arg("unbind").arg(&project));
+    let no_bindings = run_ok(aictx(&root).arg("bindings"));
+    assert_eq!(
+        String::from_utf8_lossy(&no_bindings.stdout).trim(),
+        "No directory bindings configured."
+    );
+
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let environment = run_ok(aictx(&root).args(["env", "--shell", shell]));
+        let environment = String::from_utf8_lossy(&environment.stdout);
+        assert!(environment.contains("AICTX_CONTEXT"), "shell={shell}");
+        assert!(environment.contains("CLAUDE_CONFIG_DIR"), "shell={shell}");
+        assert!(environment.contains("CODEX_HOME"), "shell={shell}");
+        assert!(!environment.contains("keyring://"), "shell={shell}");
+
+        let init = run_ok(aictx(&root).args(["shell-init", shell]));
+        let init = String::from_utf8_lossy(&init.stdout);
+        assert!(init.contains("run claude"), "shell={shell}");
+        assert!(init.contains("run codex"), "shell={shell}");
+        assert!(init.contains("--root"), "shell={shell}");
+    }
+
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        let completion = run_ok(aictx(&root).args(["completions", shell]));
+        let completion = String::from_utf8_lossy(&completion.stdout);
+        assert!(!completion.trim().is_empty(), "shell={shell}");
+        assert!(completion.contains("aictx"), "shell={shell}");
+    }
+
+    run_ok(aictx(&root).args(["context", "remove", "personal"]));
+    run_ok(aictx(&root).args(["profile", "remove", "claude:personal"]));
+    run_ok(aictx(&root).args(["profile", "remove", "codex:personal"]));
+    let no_contexts = run_ok(aictx(&root).args(["context", "list"]));
+    assert_eq!(
+        String::from_utf8_lossy(&no_contexts.stdout).trim(),
+        "No contexts configured."
+    );
+    let no_profiles = run_ok(aictx(&root).args(["profile", "list"]));
+    assert_eq!(
+        String::from_utf8_lossy(&no_profiles.stdout).trim(),
+        "No profiles configured."
+    );
 }
 
 #[test]

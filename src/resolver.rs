@@ -1,4 +1,4 @@
-use std::{env, path::Path};
+use std::{env, ffi::OsString, path::Path};
 
 use crate::{
     Error, Result,
@@ -58,7 +58,7 @@ pub fn resolve_profile(
         let profile = config
             .profiles
             .get(profile_id)
-            .ok_or_else(|| Error::ProfileNotFound(profile_id.to_string()))?;
+            .ok_or_else(|| profile_not_found(config, profile_id))?;
         return Ok(ResolvedProfile {
             id: profile_id.clone(),
             profile: profile.clone(),
@@ -81,7 +81,7 @@ pub fn resolve_profile(
     let profile = config
         .profiles
         .get(profile_id)
-        .ok_or_else(|| Error::ProfileNotFound(profile_id.to_string()))?;
+        .ok_or_else(|| profile_not_found(config, profile_id))?;
 
     Ok(ResolvedProfile {
         id: profile_id.clone(),
@@ -150,9 +150,18 @@ pub fn current_directory() -> Result<std::path::PathBuf> {
 }
 
 pub fn canonical_directory(path: &Path) -> Result<std::path::PathBuf> {
-    let path = path.canonicalize().map_err(|source| Error::ReadFile {
-        path: path.to_path_buf(),
-        source,
+    let path = path.canonicalize().map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            Error::InvalidInput(format!(
+                "binding target {} does not exist; create it first",
+                path.display()
+            ))
+        } else {
+            Error::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
     })?;
     let metadata = path.metadata().map_err(|source| Error::ReadFile {
         path: path.clone(),
@@ -167,12 +176,125 @@ pub fn canonical_directory(path: &Path) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// Resolve a binding path for removal, including when its final components no longer exist.
+pub fn binding_lookup_path(path: &Path) -> Result<std::path::PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            canonicalize_with_missing(path)
+        }
+        Err(source) => Err(Error::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn canonicalize_with_missing(path: &Path) -> Result<std::path::PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_directory()?.join(path)
+    };
+    if absolute
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(Error::InvalidInput(format!(
+            "cannot resolve missing binding path {} while it contains `..`; use the absolute path shown by `aictx bindings`",
+            path.display()
+        )));
+    }
+
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::<OsString>::new();
+    loop {
+        match cursor.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor.file_name().ok_or_else(|| Error::ReadFile {
+                    path: absolute.clone(),
+                    source,
+                })?;
+                missing.push(name.to_os_string());
+                cursor = cursor.parent().ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "could not resolve binding path {}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Err(source) => {
+                return Err(Error::ReadFile {
+                    path: cursor.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
 fn ensure_context_exists(config: &Config, name: &Name) -> Result<()> {
     if config.contexts.contains_key(name) {
         Ok(())
     } else {
-        Err(Error::ContextNotFound(name.to_string()))
+        Err(context_not_found(config, name))
     }
+}
+
+#[must_use]
+pub fn context_not_found(config: &Config, requested: &Name) -> Error {
+    let candidates = config.contexts.keys().map(ToString::to_string);
+    Error::ContextNotFound(with_suggestion(requested.as_str(), candidates))
+}
+
+#[must_use]
+pub fn profile_not_found(config: &Config, requested: &ProfileId) -> Error {
+    let candidates = config
+        .profiles
+        .keys()
+        .filter(|candidate| candidate.provider() == requested.provider())
+        .map(ToString::to_string);
+    Error::ProfileNotFound(with_suggestion(&requested.to_string(), candidates))
+}
+
+fn with_suggestion(requested: &str, candidates: impl Iterator<Item = String>) -> String {
+    let requested_folded = requested.to_ascii_lowercase();
+    let maximum_distance = if requested.chars().count() <= 4 { 1 } else { 2 };
+    let suggestion = candidates
+        .map(|candidate| {
+            let distance = levenshtein(&requested_folded, &candidate.to_ascii_lowercase());
+            (distance, candidate)
+        })
+        .filter(|(distance, _)| *distance <= maximum_distance)
+        .min_by(Ord::cmp);
+    suggestion.map_or_else(
+        || requested.to_owned(),
+        |(_, candidate)| format!("{requested}; did you mean `{candidate}`?"),
+    )
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_character) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_character) in right.iter().enumerate() {
+            let substitution =
+                previous[right_index] + usize::from(left_character != *right_character);
+            current[right_index + 1] = (current[right_index] + 1)
+                .min(previous[right_index + 1] + 1)
+                .min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 #[cfg(test)]
@@ -252,5 +374,28 @@ mod tests {
             .unwrap_or_else(|error| panic!("context should resolve: {error}"));
         assert_eq!(resolved.name.as_str(), "work");
         assert_eq!(resolved.source, ResolutionSource::DirectoryBinding);
+    }
+
+    #[test]
+    fn missing_names_suggest_only_close_candidates() {
+        let config = config_with_contexts();
+        assert_eq!(
+            context_not_found(
+                &config,
+                &Name::parse("persnal")
+                    .unwrap_or_else(|error| panic!("valid misspelling: {error}")),
+            )
+            .to_string(),
+            "context not found: persnal; did you mean `personal`?"
+        );
+        assert_eq!(
+            context_not_found(
+                &config,
+                &Name::parse("unknown")
+                    .unwrap_or_else(|error| panic!("valid missing name: {error}")),
+            )
+            .to_string(),
+            "context not found: unknown"
+        );
     }
 }

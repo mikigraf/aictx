@@ -1,15 +1,18 @@
 use std::{env, path::Path};
 
+use serde::Serialize;
+
 use crate::{
-    config::{AppPaths, validate_secure_directory},
-    model::{CodexAuth, Config, Profile, Provider},
+    config::{AppPaths, validate_secure_directory, validate_sensitive_file},
+    model::{ClaudeAuth, CodexAuth, Config, Profile, Provider},
     runner::{
         is_blocked_key, resolve_vendor_binary, validate_claude_settings, validate_codex_settings,
         vendor_version,
     },
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CheckLevel {
     Pass,
     Warning,
@@ -27,7 +30,7 @@ impl CheckLevel {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Check {
     pub level: CheckLevel,
     pub name: String,
@@ -47,7 +50,12 @@ impl DoctorReport {
             .any(|check| check.level == CheckLevel::Failure)
     }
 
-    fn push(&mut self, level: CheckLevel, name: impl Into<String>, detail: impl Into<String>) {
+    pub(crate) fn push(
+        &mut self,
+        level: CheckLevel,
+        name: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
         self.checks.push(Check {
             level,
             name: name.into(),
@@ -107,6 +115,24 @@ pub fn inspect(
         );
     }
 
+    if !config
+        .profiles
+        .values()
+        .any(|profile| provider_filter.is_none_or(|filter| filter == profile.provider()))
+    {
+        let name = provider_filter.map_or_else(
+            || "profiles".to_owned(),
+            |provider| format!("{provider} profiles"),
+        );
+        let detail = provider_filter.map_or_else(
+            || "no profiles are configured; run `aictx profile add --help`".to_owned(),
+            |provider| {
+                format!("no {provider} profiles are configured; run `aictx profile add --help`")
+            },
+        );
+        report.push(CheckLevel::Failure, name, detail);
+    }
+
     for provider in [Provider::Claude, Provider::Codex] {
         if provider_filter.is_some_and(|filter| filter != provider) {
             continue;
@@ -157,6 +183,26 @@ pub fn inspect(
                 format!("{profile_id} state"),
                 error.to_string(),
             ),
+        }
+
+        if let Profile::Claude {
+            auth: ClaudeAuth::Wif,
+            wif: Some(wif),
+            ..
+        } = profile
+        {
+            match validate_sensitive_file(&wif.identity_token_file) {
+                Ok(()) => report.push(
+                    CheckLevel::Pass,
+                    format!("{profile_id} identity source"),
+                    "private WIF identity-token file is available",
+                ),
+                Err(error) => report.push(
+                    CheckLevel::Failure,
+                    format!("{profile_id} identity source"),
+                    error.to_string(),
+                ),
+            }
         }
 
         if profile.provider() == Provider::Claude {

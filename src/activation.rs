@@ -2,6 +2,7 @@ use crate::{
     Error, Result,
     config::MetadataStore,
     model::{BillingDomain, Config, Context, Name, Profile, Provider},
+    resolver::context_not_found,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,7 +49,7 @@ pub fn required_billing_change(
 ) -> Result<Option<BillingChange>> {
     let (config, state) = store.load_metadata()?;
     if !config.contexts.contains_key(target) {
-        return Err(Error::ContextNotFound(target.to_string()));
+        return Err(context_not_found(&config, target));
     }
     let previous = state
         .current_context
@@ -68,7 +69,7 @@ pub fn activate(
 ) -> Result<()> {
     store.update_metadata(|config, state| {
         if !config.contexts.contains_key(target) {
-            return Err(Error::ContextNotFound(target.to_string()));
+            return Err(context_not_found(config, target));
         }
         let previous = state
             .current_context

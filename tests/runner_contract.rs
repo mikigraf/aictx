@@ -1,13 +1,14 @@
 #![cfg(unix)]
 
 use std::{
+    env,
     ffi::OsString,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use aictx::{
@@ -19,6 +20,9 @@ use aictx::{
 };
 use secrecy::SecretString;
 use tempfile::TempDir;
+
+const TRUSTED_PUSH_CHILD: &str = "AICTX_RUNNER_CONTRACT_TRUSTED_PUSH_CHILD";
+const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn executable(path: &Path, body: &str) {
     let body = if path
@@ -40,7 +44,39 @@ fn executable(path: &Path, body: &str) {
 fn aictx(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_aictx"));
     command.arg("--root").arg(root);
+    command.env("CI", "true");
+    command.env("GITHUB_EVENT_NAME", "push");
     command
+}
+
+fn rerun_as_trusted_push(test_name: &str) -> bool {
+    if env::var_os(TRUSTED_PUSH_CHILD).is_some() {
+        assert_eq!(
+            env::var("GITHUB_EVENT_NAME").unwrap_or_default(),
+            "push",
+            "trusted-push test child must model a non-PR GitHub event"
+        );
+        return false;
+    }
+
+    let output = Command::new(
+        env::current_exe().unwrap_or_else(|error| panic!("resolve current test binary: {error}")),
+    )
+    .arg("--exact")
+    .arg(test_name)
+    .arg("--nocapture")
+    .env(TRUSTED_PUSH_CHILD, "1")
+    .env("CI", "true")
+    .env("GITHUB_EVENT_NAME", "push")
+    .output()
+    .unwrap_or_else(|error| panic!("run {test_name} under trusted push event: {error}"));
+    assert!(
+        output.status.success(),
+        "trusted-push child for {test_name} failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }
 
 fn ok(command: &mut Command) -> Output {
@@ -70,6 +106,97 @@ fn wait_for_path(path: &Path) {
         thread::sleep(Duration::from_millis(10));
     }
     panic!("timed out waiting for {}", path.display());
+}
+
+fn wait_for_path_while_child_runs(path: &Path, child: &mut Child) {
+    for _ in 0..1_000 {
+        if path.exists() {
+            return;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                panic!(
+                    "child exited with {status} before creating {}",
+                    path.display()
+                );
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!(
+                "inspect child while waiting for {}: {error}",
+                path.display()
+            ),
+        }
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+fn wait_for_child(child: &mut Child, operation: &str) -> ExitStatus {
+    let deadline = Instant::now() + CHILD_EXIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let kill_result = child.kill();
+                let reap_result = child.wait();
+                panic!(
+                    "{operation} exceeded {CHILD_EXIT_TIMEOUT:?}; kill={kill_result:?}, reap={reap_result:?}"
+                );
+            }
+            Err(error) => {
+                let kill_result = child.kill();
+                let reap_result = child.wait();
+                panic!("inspect {operation}: {error}; kill={kill_result:?}, reap={reap_result:?}");
+            }
+        }
+    }
+}
+
+struct ReleasingChild {
+    child: Option<Child>,
+    release: PathBuf,
+}
+
+impl ReleasingChild {
+    fn new(child: Child, release: PathBuf) -> Self {
+        Self {
+            child: Some(child),
+            release,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .unwrap_or_else(|| panic!("child should still be running"))
+    }
+
+    fn release_and_wait(mut self) -> ExitStatus {
+        fs::write(&self.release, "go")
+            .unwrap_or_else(|error| panic!("release child process: {error}"));
+        let mut child = self
+            .child
+            .take()
+            .unwrap_or_else(|| panic!("child should still be running"));
+        wait_for_child(&mut child, "released profile run")
+    }
+}
+
+impl Drop for ReleasingChild {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, "go");
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        for _ in 0..100 {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn setup_wif_profile(root: &Path) -> PathBuf {
@@ -549,6 +676,12 @@ impl SecretProvider for FixedSecrets {
 
 #[test]
 fn static_profiles_route_injected_keyring_credentials_without_host_keychain_access() {
+    if rerun_as_trusted_push(
+        "static_profiles_route_injected_keyring_credentials_without_host_keychain_access",
+    ) {
+        return;
+    }
+
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("aictx");
     let claude_capture = temporary.path().join("claude.txt");
@@ -688,12 +821,14 @@ fn oauth_profile_lock_serializes_one_profile_but_not_distinct_profiles() {
         ok(aictx(&root).args(["profile", "add", "codex", name, "--auth", "chatgpt-oauth"]));
     }
 
-    let mut first = aictx(&root)
+    let first = aictx(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
             "--quiet",
+            "--non-interactive",
             "run",
+            "--trusted-runner",
             "--profile",
             "codex:one",
             "codex",
@@ -702,44 +837,51 @@ fn oauth_profile_lock_serializes_one_profile_but_not_distinct_profiles() {
         ])
         .spawn()
         .unwrap_or_else(|error| panic!("start first profile run: {error}"));
-    wait_for_path(&started);
-    let same = aictx(&root)
+    let mut first = ReleasingChild::new(first, release);
+    wait_for_path_while_child_runs(&started, first.child_mut());
+    let mut same = aictx(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
             "--quiet",
+            "--non-interactive",
             "run",
+            "--trusted-runner",
             "--profile",
             "codex:one",
             "codex",
             "--",
             "quick",
         ])
-        .output()
-        .unwrap_or_else(|error| panic!("run locked profile: {error}"));
-    assert_eq!(same.status.code(), Some(15));
-    let other = aictx(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("start locked profile: {error}"));
+    let same_status = wait_for_child(&mut same, "same-profile lock refusal");
+    assert_eq!(same_status.code(), Some(15));
+    let mut other = aictx(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
             "--quiet",
+            "--non-interactive",
             "run",
+            "--trusted-runner",
             "--profile",
             "codex:two",
             "codex",
             "--",
             "quick",
         ])
-        .output()
-        .unwrap_or_else(|error| panic!("run distinct profile: {error}"));
-    assert!(other.status.success());
-    fs::write(&release, "go").unwrap_or_else(|error| panic!("release first run: {error}"));
-    assert!(
-        first
-            .wait()
-            .unwrap_or_else(|error| panic!("wait first run: {error}"))
-            .success()
-    );
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("start distinct profile: {error}"));
+    let other_status = wait_for_child(&mut other, "distinct-profile run");
+    assert!(other_status.success());
+    assert!(first.release_and_wait().success());
 }
 
 #[derive(Clone)]
@@ -761,6 +903,10 @@ impl SecretProvider for BlockingSecrets {
 
 #[test]
 fn lifecycle_lock_precedes_static_credential_access() {
+    if rerun_as_trusted_push("lifecycle_lock_precedes_static_credential_access") {
+        return;
+    }
+
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("aictx");
     let started = temporary.path().join("secret-started");
@@ -934,7 +1080,7 @@ fn trusted_child_path_prevents_repository_interpreter_hijacking() {
         &format!("#!/usr/bin/env {interpreter}\nexit 97\n"),
     );
     setup_wif_profile(&root);
-    let path = std::env::join_paths([
+    let path = env::join_paths([
         malicious_bin.as_path(),
         trusted_bin.as_path(),
         Path::new("/usr/bin"),

@@ -10,29 +10,44 @@ use crate::model::{AuthArg, CodexCredentialStore, Name, ProfileId, Provider};
     version,
     about = "Run Claude Code and Codex under explicit, isolated identity and billing contexts",
     long_about = None,
-    disable_help_subcommand = true,
     propagate_version = true,
-    after_help = "Run `aictx` with no subcommand to open the interactive terminal dashboard."
+    after_help = "Run `aictx` with no subcommand to open the interactive terminal dashboard.",
+    after_long_help = "Examples:\n  aictx init\n  aictx profile add claude personal --auth subscription-token\n  aictx context add personal --claude claude:personal\n  aictx use personal\n  aictx run claude -- -p \"explain this repository\""
 )]
 pub struct Cli {
     /// Use an explicit application root outside the current repository.
-    #[arg(long, global = true, value_name = "ABSOLUTE_PATH")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "ABSOLUTE_PATH",
+        help_heading = "Global options"
+    )]
     pub root: Option<PathBuf>,
 
     /// Use this trusted Claude executable for the current invocation.
-    #[arg(long, global = true, value_name = "ABSOLUTE_PATH")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "ABSOLUTE_PATH",
+        help_heading = "Global options"
+    )]
     pub claude_bin: Option<PathBuf>,
 
     /// Use this trusted Codex executable for the current invocation.
-    #[arg(long, global = true, value_name = "ABSOLUTE_PATH")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "ABSOLUTE_PATH",
+        help_heading = "Global options"
+    )]
     pub codex_bin: Option<PathBuf>,
 
     /// Fail instead of opening a browser, prompting, or unlocking an OS keyring.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub non_interactive: bool,
 
     /// Suppress informational banners; security warnings and errors are still shown.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub quiet: bool,
 
     #[command(subcommand)]
@@ -101,9 +116,14 @@ pub enum ProfileCommand {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  aictx profile add claude personal --auth subscription-token\n  aictx profile add codex work --auth chatgpt-oauth --workspace ws_work\n  aictx profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --identity-token-file /run/secrets/anthropic.jwt"
+)]
 pub struct ProfileAddArgs {
+    /// Vendor that owns the profile: `claude` or `codex`.
     #[arg(value_enum)]
     pub provider: Provider,
+    /// Short local name used in the profile ID, for example `personal` or `work`.
     pub name: Name,
 
     /// Authentication mechanism; only provider-compatible modes are accepted.
@@ -180,7 +200,11 @@ pub struct UseArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  aictx login claude:personal --generate\n  aictx login codex:work\n  aictx login codex:work --device"
+)]
 pub struct LoginArgs {
+    /// Provider profile ID, for example `claude:personal` or `codex:work`.
     pub profile: ProfileId,
     /// Use Codex's official device authorization flow.
     #[arg(long)]
@@ -199,6 +223,9 @@ pub struct LogoutArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  aictx run claude -- -p \"explain this repository\"\n  aictx run codex -- exec \"run the tests\"\n  aictx run --profile codex:work codex -- exec \"review this change\""
+)]
 pub struct RunArgs {
     /// Resolve this context for one invocation without changing active state.
     #[arg(long, conflicts_with = "profile")]
@@ -241,6 +268,9 @@ pub struct UnbindArgs {
 pub struct DoctorArgs {
     #[arg(long, value_enum)]
     pub provider: Option<Provider>,
+    /// Emit a stable JSON report for support bundles and automation.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

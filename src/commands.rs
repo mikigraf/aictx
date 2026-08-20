@@ -19,7 +19,10 @@ use crate::{
         AuthArg, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Context, Name,
         Profile, ProfileId, Provider, WifConfig,
     },
-    resolver::{canonical_directory, current_directory, resolve_context, resolve_profile},
+    resolver::{
+        binding_lookup_path, canonical_directory, context_not_found, current_directory,
+        profile_not_found, resolve_context, resolve_profile,
+    },
     runner::{
         CredentialState, RunOptions, codex_static_login, credential_state, enforce_runner_policy,
         generate_claude_setup_token, login_codex, logout_codex, run_profile,
@@ -47,6 +50,7 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
                     println!("  config: {}", paths.config_file.display());
                     println!("  state:  {}", paths.state_file.display());
                     println!("No credentials were created or imported.");
+                    println!("Next: add a profile with `aictx profile add --help`.");
                 } else {
                     println!("aictx is already initialized; existing metadata was left unchanged.");
                 }
@@ -147,7 +151,7 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             let canonical = canonical_directory(&args.path)?;
             store.update_config(|config| {
                 if !config.contexts.contains_key(&args.context) {
-                    return Err(Error::ContextNotFound(args.context.to_string()));
+                    return Err(context_not_found(config, &args.context));
                 }
                 config.bindings.retain(|binding| binding.path != canonical);
                 config.bindings.push(crate::model::Binding {
@@ -160,7 +164,7 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             Ok(0)
         }
         Some(Command::Unbind(args)) => {
-            let canonical = canonical_directory(&args.path)?;
+            let canonical = binding_lookup_path(&args.path)?;
             let removed = store.update_config(|config| {
                 let before = config.bindings.len();
                 config.bindings.retain(|binding| binding.path != canonical);
@@ -190,25 +194,22 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             let config = match store.load_config_for_diagnostics() {
                 Ok(config) => config,
                 Err(error) => {
-                    println!(
-                        "{:<4} {:<24} {}",
-                        "FAIL",
-                        "metadata",
-                        terminal_safe(&error.to_string())
-                    );
+                    let mut report = doctor::DoctorReport::default();
+                    report.push(doctor::CheckLevel::Failure, "metadata", error.to_string());
+                    print_doctor_report(&report, args.json)?;
                     return Ok(1);
                 }
             };
             let cwd = current_directory()?;
-            let report = doctor::inspect(&config, paths, &cwd, args.provider);
-            for check in &report.checks {
-                println!(
-                    "{:<4} {:<24} {}",
-                    check.level.label(),
-                    check.name,
-                    terminal_safe(&check.detail)
-                );
-            }
+            let mut report = doctor::inspect(&config, paths, &cwd, args.provider);
+            append_credential_readiness(
+                &mut report,
+                &config,
+                paths,
+                args.provider,
+                cli.non_interactive,
+            );
+            print_doctor_report(&report, args.json)?;
             Ok(i32::from(report.has_failures()))
         }
         Some(Command::Credential(args)) => match args.command {
@@ -262,6 +263,80 @@ fn terminal_safe(value: &str) -> String {
     output
 }
 
+fn append_credential_readiness(
+    report: &mut doctor::DoctorReport,
+    config: &Config,
+    paths: &AppPaths,
+    provider_filter: Option<Provider>,
+    non_interactive: bool,
+) {
+    let manager = SecretManager::new();
+    for (profile_id, profile) in &config.profiles {
+        if provider_filter.is_some_and(|filter| filter != profile.provider()) {
+            continue;
+        }
+        let name = format!("{profile_id} credential");
+        if non_interactive && profile.requires_static_secret() {
+            report.push(
+                doctor::CheckLevel::Warning,
+                name,
+                "not checked because non-interactive mode refuses native keyring reads; run `aictx credential check` from an interactive terminal",
+            );
+            continue;
+        }
+        match credential_state(
+            config,
+            paths,
+            profile_id,
+            profile,
+            &manager,
+            non_interactive,
+        ) {
+            Ok(CredentialState::Available) => report.push(
+                doctor::CheckLevel::Pass,
+                name,
+                "configured authentication material is available",
+            ),
+            Ok(CredentialState::Unavailable) => report.push(
+                doctor::CheckLevel::Failure,
+                name,
+                format!("authentication material is unavailable; run `aictx login {profile_id}`"),
+            ),
+            Ok(CredentialState::Unverified) => report.push(
+                doctor::CheckLevel::Failure,
+                name,
+                format!(
+                    "authentication material could not be verified against the configured identity; run `aictx login {profile_id}`"
+                ),
+            ),
+            Err(error) => report.push(doctor::CheckLevel::Failure, name, error.to_string()),
+        }
+    }
+}
+
+fn print_doctor_report(report: &doctor::DoctorReport, json: bool) -> Result<()> {
+    if json {
+        let value = serde_json::json!({
+            "ok": !report.has_failures(),
+            "checks": &report.checks,
+        });
+        let output = serde_json::to_string_pretty(&value).map_err(|error| {
+            Error::InvalidConfig(format!("failed to serialize doctor report: {error}"))
+        })?;
+        println!("{output}");
+    } else {
+        for check in &report.checks {
+            println!(
+                "{:<4} {:<24} {}",
+                check.level.label(),
+                check.name,
+                terminal_safe(&check.detail)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn execute_profile(
     store: &MetadataStore,
     paths: &AppPaths,
@@ -270,6 +345,7 @@ fn execute_profile(
 ) -> Result<i32> {
     match command {
         ProfileCommand::Add(args) => {
+            require_initialized(store)?;
             let profile_id = ProfileId::new(args.provider, args.name.clone());
             let state_dir = paths.profile_state_dir(args.provider, &args.name);
             let _profile_lock = acquire_profile_lock(
@@ -337,7 +413,7 @@ fn execute_profile(
             let value = config
                 .profiles
                 .get(&profile)
-                .ok_or_else(|| Error::ProfileNotFound(profile.to_string()))?;
+                .ok_or_else(|| profile_not_found(&config, &profile))?;
             print_profile(&profile, value, true, None);
             Ok(0)
         }
@@ -345,6 +421,7 @@ fn execute_profile(
             profile,
             delete_secret,
         } => {
+            require_initialized(store)?;
             let _profile_lock = acquire_profile_lock(
                 &paths.profile_lock(profile.provider(), profile.name()),
                 true,
@@ -355,7 +432,7 @@ fn execute_profile(
                     .profiles
                     .get(&profile)
                     .cloned()
-                    .ok_or_else(|| Error::ProfileNotFound(profile.to_string()))?;
+                    .ok_or_else(|| profile_not_found(current, &profile))?;
                 let deleted_keyring_secret = if delete_secret {
                     if let Some(reference) = value.secret_ref() {
                         let reference: SecretRef = reference.parse()?;
@@ -551,7 +628,7 @@ fn execute_context(store: &MetadataStore, command: ContextCommand) -> Result<i32
             let context = config
                 .contexts
                 .get(&name)
-                .ok_or_else(|| Error::ContextNotFound(name.to_string()))?;
+                .ok_or_else(|| context_not_found(&config, &name))?;
             println!("Context: {name}");
             println!(
                 "  Claude: {}",
@@ -586,7 +663,7 @@ fn execute_context(store: &MetadataStore, command: ContextCommand) -> Result<i32
                     )));
                 }
                 if config.contexts.remove(&name).is_none() {
-                    return Err(Error::ContextNotFound(name.to_string()));
+                    return Err(context_not_found(config, &name));
                 }
                 if config.default_context.as_ref() == Some(&name) {
                     config.default_context = config.contexts.keys().next().cloned();
@@ -605,6 +682,7 @@ fn execute_login(
     args: &LoginArgs,
     non_interactive: bool,
 ) -> Result<i32> {
+    require_initialized(store)?;
     let profile_id = &args.profile;
     let device = args.device;
     let generate = args.generate;
@@ -617,7 +695,7 @@ fn execute_login(
         .profiles
         .get(profile_id)
         .cloned()
-        .ok_or_else(|| Error::ProfileNotFound(profile_id.to_string()))?;
+        .ok_or_else(|| profile_not_found(&config, profile_id))?;
     enforce_runner_policy(&profile, non_interactive, args.trusted_runner)?;
     ensure_secure_directory(profile.state_dir())?;
     if profile.provider() == Provider::Codex {
@@ -786,6 +864,7 @@ fn execute_logout(
     profile_id: &ProfileId,
     non_interactive: bool,
 ) -> Result<i32> {
+    require_initialized(store)?;
     let lifecycle = acquire_profile_lock(
         &paths.profile_lock(profile_id.provider(), profile_id.name()),
         true,
@@ -795,7 +874,7 @@ fn execute_logout(
         .profiles
         .get(profile_id)
         .cloned()
-        .ok_or_else(|| Error::ProfileNotFound(profile_id.to_string()))?;
+        .ok_or_else(|| profile_not_found(&config, profile_id))?;
     if matches!(
         &profile,
         Profile::Claude {
@@ -840,7 +919,7 @@ fn execute_logout(
         println!("Deleted wrapper-held keyring credential for {profile_id}.");
     }
     println!(
-        "Logged out {profile_id} locally. This does not guarantee remote revocation; use the vendor account controls when revocation is required."
+        "Completed local authentication cleanup for {profile_id}. This does not confirm that local credentials existed or that remote credentials were revoked; use the vendor account controls when revocation is required."
     );
     Ok(0)
 }
@@ -871,7 +950,7 @@ fn execute_status(
         let profile = config
             .profiles
             .get(profile_id)
-            .ok_or_else(|| Error::ProfileNotFound(profile_id.to_string()))?;
+            .ok_or_else(|| profile_not_found(&config, profile_id))?;
         let state = if verbose {
             Some(credential_state(
                 &config,
@@ -907,7 +986,7 @@ fn execute_credential_check(
         let profile = config
             .profiles
             .get(profile_id)
-            .ok_or_else(|| Error::ProfileNotFound(profile_id.to_string()))?;
+            .ok_or_else(|| profile_not_found(&config, profile_id))?;
         vec![(profile_id, profile)]
     } else {
         config.profiles.iter().collect()
@@ -1129,7 +1208,7 @@ fn validate_context_profile(
         )));
     }
     if !config.profiles.contains_key(profile_id) {
-        return Err(Error::ProfileNotFound(profile_id.to_string()));
+        return Err(profile_not_found(config, profile_id));
     }
     Ok(())
 }
@@ -1276,6 +1355,18 @@ fn validate_metadata(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn require_initialized(store: &MetadataStore) -> Result<()> {
+    let config_file = &store.paths().config_file;
+    match config_file.try_exists() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Error::NotInitialized),
+        Err(source) => Err(Error::ReadFile {
+            path: config_file.clone(),
+            source,
+        }),
+    }
 }
 
 fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
