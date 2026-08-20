@@ -2,7 +2,7 @@
 
 ## Security objective
 
-`aictx` reduces accidental identity and billing crossover when one OS user runs official Claude Code and Codex CLIs under multiple personal, work, and automation profiles. It aims to ensure that only the selected credential and isolated state reach the selected vendor child process.
+`aictx` reduces accidental account, identity, and billing crossover when one OS user runs the official Claude Code and Codex CLIs for personal, work, or automation. It aims to ensure that only the selected credential and isolated state reach the selected vendor child process.
 
 The primary protected assets are API keys, subscription/setup tokens, Codex access tokens, vendor-managed OAuth state, WIF identity tokens, and the integrity of profile/context selection.
 

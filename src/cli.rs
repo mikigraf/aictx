@@ -8,7 +8,7 @@ use crate::model::{AuthArg, CodexCredentialStore, Name, ProfileId, Provider};
 #[command(
     name = "aictx",
     version,
-    about = "Run Claude Code and Codex under explicit, isolated identity and billing contexts",
+    about = "Safely switch and isolate Claude Code and Codex accounts",
     long_about = None,
     propagate_version = true,
     after_help = "Run `aictx` with no subcommand to open the interactive terminal dashboard.",

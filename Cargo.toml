@@ -5,11 +5,11 @@ default-run = "aictx"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
-description = "Secure local profile and billing-context orchestration for Claude Code and Codex"
+description = "Safely switch and isolate personal, work, and CI accounts for Claude Code and Codex"
 documentation = "https://docs.rs/aictx"
 repository = "https://github.com/mikigraf/aictx"
 readme = "README.md"
-keywords = ["claude", "codex", "cli", "credentials", "profiles"]
+keywords = ["claude", "codex", "cli", "credentials", "accounts"]
 categories = ["command-line-utilities", "authentication"]
 
 [features]

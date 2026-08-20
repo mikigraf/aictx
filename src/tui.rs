@@ -557,7 +557,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .bg(ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  secure identity and billing contexts"),
+        Span::raw("  Claude Code and Codex account switcher"),
     ]);
     let status = Line::from(format!(
         " Global: {active}   Default: {default}   Here: {resolved}"

@@ -10,7 +10,7 @@ use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use tempfile::TempDir;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-const DASHBOARD_MARKER: &str = "secure";
+const DASHBOARD_MARKER: &str = "switcher";
 const DASHBOARD_FOOTER_MARKER: &str = "quit";
 const RELOAD_MESSAGE_MARKER: &str = "Metadata reloaded.";
 const SMALL_TERMINAL_MARKER: &str = "Terminal";

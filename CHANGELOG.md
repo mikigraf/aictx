@@ -4,7 +4,9 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## Unreleased
 
-No changes yet.
+### Changed
+
+- Reframed public product language around account selection and profile separation while keeping `profile` as the CLI and configuration object.
 
 ## 0.1.0 - 2026-08-20
 
