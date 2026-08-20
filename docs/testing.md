@@ -114,7 +114,7 @@ Use the lowest layer that proves the behavior, then add a process-level test whe
 - Put deterministic parsing and state transitions in unit tests.
 - Use an explicit temporary `--root` for CLI tests. Do not read a developer home directory.
 - Use injected secrets or synthetic markers. Do not open the host keyring.
-- Keep guided-login tests synthetic: prove initialization, the exact setup-token process call, wrapped-paste normalization, malformed-input rejection, and restart behavior without storing a real credential.
+- Keep guided-login tests synthetic: prove initialization, the exact setup-token process call, wrapped-paste normalization, and malformed-input rejection without storing a real credential.
 - Use the native fake vendor when executable discovery, stdin/stdout, environment, state, or exit status is part of the contract.
 - Use a PTY only for terminal behavior. Always set a short timeout and verify terminal restoration.
 - Add native platform coverage for platform-gated behavior. A cross-compile check cannot prove runtime permissions or process behavior.

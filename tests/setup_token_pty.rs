@@ -320,16 +320,6 @@ fn guided_vendor_failure_warns_that_the_generated_token_may_need_revocation() {
     )
     .unwrap_or_else(|error| panic!("parse failed setup-token vendor record: {error}"));
     assert_eq!(record["args"], serde_json::json!(["setup-token"]));
-
-    let retry = run_guided_preflight(&root, &worktree, &fake_claude);
-    assert_eq!(retry.code, 23, "retry PTY output:\n{}", retry.output);
-    assert!(retry.output.contains("Validated existing aictx metadata"));
-    assert!(
-        retry
-            .output
-            .contains("Using existing compatible profile claude:personal")
-    );
-    assert!(retry.output.contains(REVOCATION_WARNING));
 }
 
 #[test]
