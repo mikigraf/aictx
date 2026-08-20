@@ -1,0 +1,16 @@
+/target/
+*.profraw
+*.profdata
+.DS_Store
+
+# Local credentials and identity material must never become fixtures.
+.env
+.env.*
+!.env.example
+*.jwt
+*.key
+*.pem
+*.p12
+*.pfx
+auth.json
+.credentials.json

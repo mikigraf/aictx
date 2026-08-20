@@ -1,0 +1,55 @@
+[package]
+name = "aictx"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "Secure local profile and billing-context orchestration for Claude Code and Codex"
+documentation = "https://docs.rs/aictx"
+repository = "https://github.com/mikigraf/Coding-Agent-Profiles"
+readme = "README.md"
+keywords = ["claude", "codex", "cli", "credentials", "profiles"]
+categories = ["command-line-utilities", "authentication"]
+
+[dependencies]
+atomic-write-file = "0.3.1"
+clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
+crossterm = "0.29.0"
+directories = "6.0.0"
+keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
+rpassword = "7.5.4"
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+toml = "1.1.4"
+toml_edit = "0.25.13"
+which = "8.0.5"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["process"] }
+signal-hook = "0.4.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_lifetimes = "deny"
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+expect_used = "deny"
+unwrap_used = "deny"
+missing_errors_doc = "allow"
+too_many_lines = "allow"
