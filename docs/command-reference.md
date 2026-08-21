@@ -51,7 +51,7 @@ ctxlane --root <NEW_ROOT> migrate aictx --from-root <OLD_ROOT> [--dry-run]
 ctxlane --root <NEW_ROOT> migrate recover --from-root <OLD_ROOT>
 ```
 
-Migration is copy-only and explicit. `--dry-run` validates the complete source and reports non-secret counts without creating target files. A completed migration rewrites managed profile state paths but preserves existing keyring references. Profile metadata, vendor state, and credentials are not moved or deleted; migration may create or normalize private advisory profile locks in the old state directory. A preserved keyring reference addresses the same OS credential from both tools, so later credential changes in `ctxlane` can affect rollback through `aictx`. Explicit target roots require `--from-root`.
+Migration is copy-only and explicit. `--dry-run` validates the complete source and reports non-secret counts without creating target files. A completed migration rewrites managed profile state paths but preserves existing keyring references. Profile metadata, vendor state, and credentials are not moved or deleted; migration may create or normalize private advisory profile locks in the old state directory. A preserved keyring reference addresses the same OS credential from both tools, so later credential changes in `ctxlane` can affect rollback through the old tool. Explicit target roots require `--from-root`.
 
 If a journal remains after interruption, every ordinary command refuses to use the target. `migrate recover` rolls back transaction-owned partial data or finalizes an already verified target. See [Migration from v0.1](migration-from-v0.1.md).
 
