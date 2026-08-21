@@ -8,6 +8,8 @@ In `ctxlane`, a profile represents one Claude or Codex account or authentication
 
 At launch, `ctxlane` removes known competing selectors and refuses inspected repository settings that could change the selected route. Wrapper-managed static secrets stay in the native OS credential store, outside repository files and shell configuration. The official vendor CLIs still handle login and model traffic; `ctxlane` adds no API proxy or remote credential service.
 
+The ordinary CLI, terminal dashboard, and local account switching are standalone. They do not start or require an automation service, controller, or MCP server, and they have no ASF or Runmill dependency.
+
 ## Quick start
 
 ```bash
@@ -161,7 +163,11 @@ The CLI uses these terms:
 | Context | A named selection containing a Claude profile, a Codex profile, or both |
 | Binding | The context selected for a directory tree |
 | Vendor home | The separate login and configuration state directory for a profile |
+| Installation UID | The immutable, non-secret identity generated for one v2 metadata store |
+| Profile UID | The immutable, non-secret identity that stays with a profile when its display ID is renamed |
 | Billing domain | The subscription, workspace, or API route that `ctxlane` intends to select. Vendor account controls remain authoritative |
+
+Configuration schema v2 adds the installation and profile UIDs. Removing a profile retires its UID, and neither that UID nor its detached vendor home is reused automatically. New and upgraded profiles also receive an operator-owned automation-policy record with `eligible = false`; it is reserved foundation and does not turn an ordinary local profile into an automation identity.
 
 A context can point to one Claude profile, one Codex profile, or both:
 
@@ -204,6 +210,22 @@ Use `--auth subscription` when creating either a Claude or Codex subscription pr
 | Codex | `chatgpt-oauth` | ChatGPT subscription or workspace | official login inside an isolated `CODEX_HOME` |
 | Codex | `api-key` | OpenAI API | native OS keyring, then official stdin login into the isolated vendor store |
 | Codex | `access-token` | ChatGPT subscription or workspace | native OS keyring, then official stdin login, with workspace and trusted-runner rules |
+| Codex | `wif` | ChatGPT workspace | strict enrollment and config validation only; no native login or run support in this release |
+
+Codex WIF enrollment records the complete closed metadata shape, but does not authenticate or start Codex:
+
+```bash
+ctxlane profile add codex ci \
+  --auth wif \
+  --federation-rule-id idpm_production \
+  --identity-token-file /run/ctxlane/codex-identity.jwt \
+  --workspace chatgpt-workspace:engineering \
+  --principal service-account:ctxlane-ci \
+  --environment production \
+  --minimum-codex-version 0.148.0
+```
+
+The dashboard neither exposes this enrollment flow nor edits Codex WIF authority fields. Config loading validates the closed metadata shape, including absolute path syntax, without probing the configured file or its filesystem location. CLI enrollment separately rejects an identity-token path beneath Git-worktree ancestry, without opening the token. `ctxlane login`, `ctxlane logout`, and `ctxlane run` then refuse an enrolled Codex WIF profile before inspecting token-path-derived metadata, preparing vendor state, or starting Codex. An explicit `credential check` may inspect file availability, but that is not native runtime qualification. `doctor` skips the Codex WIF token probe and reports the profile as runtime-unqualified rather than ready.
 
 Static secrets managed by `ctxlane` are stored in the native OS keyring. Configuration contains only a reference:
 
@@ -247,7 +269,7 @@ Wrapper errors keep stable exit categories and print a short `Hint:` line when a
 
 If setup fails before a login or token prompt appears, run `ctxlane doctor --provider claude` or `ctxlane doctor --provider codex`. `ctxlane` refuses vendor executables on unsafe writable paths; reinstall the official CLI or correct the reported permissions instead of bypassing that check.
 
-Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests. A successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array. Every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
+Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests. A successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. It also reports each profile's automation policy as disabled or eligible, reduces environment, role, and caller scopes to counts, and warns when either explicit exception is acknowledged. That is configuration visibility, not lease or runtime readiness. `--json` returns a top-level `ok` value and a `checks` array. Every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
 
 ## Shell integration
 
@@ -272,9 +294,15 @@ Invoke-Expression (& ctxlane shell-init powershell | Out-String)
 
 Review generated shell code before adding it to a startup file. The shims pin the canonical `ctxlane` path and any explicit `--root`. Regenerate them after either path moves.
 
-`ctxlane env` emits non-secret selectors only. Running a vendor directly after evaluating that output bypasses environment cleaning, repository checks, lifecycle locks, workspace setup, and static-secret delivery. Use `ctxlane run` or a generated shim for authenticated work.
+For supported runnable profiles, `ctxlane env` emits non-secret selectors only. It refuses a resolved context that selects Codex WIF: exporting `CODEX_HOME` would prepare an unsupported execution path outside the native-runtime refusal. Running a vendor directly after evaluating any successful output bypasses environment cleaning, repository checks, lifecycle locks, workspace setup, and static-secret delivery. Use `ctxlane run` or a generated shim for authenticated work.
 
 ## Automation
+
+Every config-v2 profile carries a validated automation policy, but it is disabled by default with `eligible = false`. This release has no lease service, automation MCP server, controller runtime, or policy-editing command, and changing metadata by hand does not create those capabilities. The Phase-0 schemas and architecture documents define a possible controller-neutral future boundary; ASF and Runmill appear only as optional integration examples.
+
+The Rust library also exposes pure, controller-neutral policy-evaluation and lease-lifecycle domains. They are inert building blocks for a future trusted service: they do not persist leases, authenticate callers, access credentials, start processes, or connect the CLI or dashboard to a controller.
+
+The direct CLI controls below predate that future identity plane. Neither `--non-interactive` nor `--trusted-runner` changes `eligible`, creates a lease, or grants production automation authority.
 
 Use `--non-interactive` in CI. It fails before a browser, prompt, terminal dashboard, or OS-keyring unlock can appear. Static credential reads from the native keyring are unavailable in this mode. Prefer WIF for Claude where your Anthropic account supports it. A pre-authorized Codex OAuth profile may be used only on a controlled private runner.
 
@@ -306,12 +334,14 @@ The boundary has limits:
 
 Static Claude checks use the official local `claude auth status --json` output to verify the selected method and optional organization evidence. This is local routing evidence. It does not make a model request or prove remote validity, expiry, or revocation. The first successful model request is the remote validity check at that point in time. WIF is passed to the official Claude client through documented selectors. `ctxlane` does not exchange or refresh WIF tokens.
 
+Codex WIF metadata validation is not equivalent to that Claude runtime path. Codex WIF `login`, `logout`, and `run` remain fail-closed before configured token-path traversal until the official native flow and its identity, workspace, token-file, and version checks are implemented and qualified.
+
 Read the [Threat model](THREAT_MODEL.md) and [Security policy](SECURITY.md) before an enterprise rollout.
 
 ## Validation status
 
 > [!IMPORTANT]
-> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes without contacting Claude or Codex. Live accounts, WIF, native keyrings, billing, Windows deployments, and platform-native code signing still need deployment qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
+> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes without contacting Claude or Codex. Live accounts, Claude WIF, native keyrings, billing, Windows deployments, and platform-native code signing still need deployment qualification. Codex WIF has enrollment tests only because its native runtime is not implemented. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
 
 Local and CI checks are layered: unit tests, public CLI lifecycle tests, Unix runner contracts, native fake-vendor E2E tests, PTY tests, MSRV checks, and native Linux/macOS/Windows jobs. CI also checks formatting, Clippy, documentation, dependency policy, secret history, packaging, and coverage with region/function/line floors of 75%/60%/70%. A configured workflow is evidence only after it runs successfully on a committed revision.
 
@@ -320,7 +350,8 @@ For [v0.2.0](https://github.com/mikigraf/ctxlane/releases/tag/v0.2.0), the sourc
 These checks still need real deployment evidence:
 
 - Claude and Codex login, one harmless request, logout, and re-login with approved versions
-- WIF exchange and refresh against the real identity provider
+- Claude WIF exchange and refresh against the real identity provider
+- Codex WIF native integration and qualification after that runtime is implemented
 - Billing and workspace identity for managed accounts
 - Native keyring behavior, including locked stores and consent prompts
 - Native Windows ACL and `.exe` launcher behavior
@@ -329,9 +360,10 @@ These checks still need real deployment evidence:
 Read [Testing](docs/testing.md) for the exact automated layers, commands, coverage method, and evidence boundary. The deployment checklist is in [Compatibility and validation status](docs/compatibility.md).
 
 `ctxlane` remains fully standalone. Normal CLI, TUI, login, profile, context,
-and run workflows do not require ASF, Runmill, MCP, or an automation service.
-The automation identity plane is an optional controller-neutral capability;
-ASF and Runmill are one integration of it.
+and supported run workflows neither start nor require ASF, Runmill, MCP, an
+automation service, or any controller. The automation identity-plane material
+describes an optional controller-neutral future capability. ASF and Runmill are
+examples only; no integration with either ships in the current binary.
 
 ## Project documentation
 

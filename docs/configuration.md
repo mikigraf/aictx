@@ -16,15 +16,20 @@ On Unix, directories must be owned by the current user and inaccessible to group
 
 `config.toml` contains no secret values. It stores:
 
-- schema version;
+- configuration schema version and an immutable installation UID;
 - the default context;
 - settings and trusted executable paths;
-- profile metadata and OS-keyring references;
+- profile metadata, immutable profile UIDs, default-disabled automation policy, and OS-keyring references;
+- retired profile UIDs that must not be reused;
 - contexts and canonical directory bindings.
 
-`state.toml` contains the active context. `ctxlane use` changes this file only.
+`state.toml` uses its own schema and contains the active context. `ctxlane use` changes this file only.
 
-Unknown fields are rejected. The current schema version is `1`; this build does not silently migrate other versions.
+Unknown fields are rejected. The current configuration schema is version `2`; the mutable-state schema remains version `1`. A coordinated normal metadata load or update upgrades a valid version-1 `config.toml` in place, generating one installation UID, deriving stable profile UIDs from that installation UID, the provider, and each immutable managed state leaf identity, and adding `eligible = false` automation policies. Diagnostic-only reads may validate an in-memory projection without writing it. Other configuration versions are refused. This internal schema upgrade is separate from the explicit v0.1 application-store migration described above.
+
+The installation UID identifies this metadata store and must not be edited or copied to make another installation. Each profile UID identifies one profile lifecycle independently of its renameable `claude:name` or `codex:name` key. These identifiers are non-secret, but changing or reusing them breaks lifecycle identity.
+
+The normal CLI, terminal dashboard, and local account-switching paths remain standalone. They neither start nor require an automation service, controller, MCP server, ASF, or Runmill.
 
 The no-subcommand terminal dashboard reads the same validated `config.toml` and `state.toml`. Moving through its lists does not write metadata, access the OS keyring, or contact a vendor. Activating a context updates `state.toml` through the same metadata lock and fresh billing-policy check used by `ctxlane use`.
 
@@ -33,7 +38,8 @@ Dashboard Add, Edit, Rename, and Remove forms write through the normal metadata 
 An illustrative generated configuration is shown below. Paths are absolute in a real file and should be managed through CLI commands whenever possible.
 
 ```toml
-version = 1
+version = 2
+installation_uid = "installation_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 default_context = "personal"
 
 [settings]
@@ -47,18 +53,46 @@ codex = "/trusted/path/to/codex"
 
 [profiles."claude:personal"]
 provider = "claude"
+profile_uid = "profile_2DHQ0SEENBW9RM5FEH3HB0GTZ6"
 billing_domain = "claude-subscription"
 auth = "subscription-token"
-state_dir = "/absolute/private/data/vendor-state/claude/p-<private-id>"
+state_dir = "/absolute/private/data/vendor-state/claude/p-00000000000000000000000000000001-00000001-0000000000000001"
 secret_ref = "keyring://ctxlane/claude-personal-<generation>"
+
+[profiles."claude:personal".automation]
+eligible = false
+environments = []
+roles = []
+caller_subjects = []
+lease_ttl_seconds = 900
+max_session_seconds = 14400
+max_concurrent_leases = 1
+concurrency_mode = "exclusive"
+require_workload_identity = true
+authentication_exception_acknowledged = false
+isolation_exception_acknowledged = false
 
 [profiles."codex:personal"]
 provider = "codex"
+profile_uid = "profile_1RJ7CPSH1B5NMFCRNA6A9AC0ZW"
 billing_domain = "chatgpt-subscription"
 auth = "chatgpt-oauth"
-state_dir = "/absolute/private/data/vendor-state/codex/p-<private-id>"
+state_dir = "/absolute/private/data/vendor-state/codex/p-00000000000000000000000000000002-00000001-0000000000000002"
 credential_store = "file"
 trusted_runners_only = false
+
+[profiles."codex:personal".automation]
+eligible = false
+environments = []
+roles = []
+caller_subjects = []
+lease_ttl_seconds = 900
+max_session_seconds = 14400
+max_concurrent_leases = 1
+concurrency_mode = "exclusive"
+require_workload_identity = true
+authentication_exception_acknowledged = false
+isolation_exception_acknowledged = false
 
 [contexts.personal]
 claude = "claude:personal"
@@ -73,7 +107,7 @@ Do not paste this example wholesale: provider/auth/billing combinations, state p
 
 ## Settings
 
-- `require_billing_confirmation_on_change`: when `true`, changing any exact provider-profile selection requires terminal confirmation or `ctxlane use --yes`, including two profiles with the same billing domain. The legacy setting name is kept so version 1 configuration files remain compatible.
+- `require_billing_confirmation_on_change`: when `true`, changing any exact provider-profile selection requires terminal confirmation or `ctxlane use --yes`, including two profiles with the same billing domain. The legacy setting name is retained when a version-1 configuration is upgraded.
 - `show_run_banner`: prints the selected context/profile/auth/billing/source before a run unless global `--quiet` is used.
 - `telemetry`: must remain `false`. Telemetry is not implemented and validation rejects `true`.
 
@@ -102,15 +136,17 @@ Static secret values are limited to 1 MiB and must be non-empty UTF-8. They are 
 
 ## Profiles
 
-Profile IDs always have the form `claude:name` or `codex:name`. Each profile receives a unique, absolute mutable state directory. Two profiles cannot share a state directory. The directory leaf is private implementation state and does not need to match the profile name.
+Profile IDs always have the form `claude:name` or `codex:name`. They are renameable display references. Each profile also receives an immutable `profile_uid` and a unique, absolute mutable state directory. Two profiles cannot share a UID or state directory. The directory leaf is private implementation state and does not need to match the profile name.
 
-The dashboard can add profiles for every supported authentication shape. Profile Edit changes only non-secret identity hints and, for Codex, the credential-store policy. It does not change the provider, authentication mode, private state directory, or secret reference. Empty Edit fields keep existing identity hints; `-` clears the selected hint.
+The dashboard can add the ordinary supported authentication shapes and Claude WIF; specialized Codex WIF enrollment is CLI-only. It neither enrolls Codex WIF nor edits its authority fields. Profile Edit changes only non-secret identity hints and, for Codex, the credential-store policy. It does not change the provider, authentication mode, private state directory, or secret reference. Empty Edit fields keep existing identity hints; `-` clears the selected hint.
 
-Profile Rename changes the profile ID and every context reference to it. The existing private state directory and `secret_ref` remain unchanged. This keeps the isolated vendor login state and the wrapper-held keyring reference attached to the same local account.
+Profile Rename changes the profile ID and every context reference to it. The profile UID, existing private state directory, and `secret_ref` remain unchanged. This keeps lifecycle identity, isolated vendor login state, and the wrapper-held keyring reference attached to the same local account.
 
-Dashboard profile removal does not read or delete the keyring item. It removes the unreferenced profile metadata and leaves the immutable managed vendor directory detached at the same path. That directory is not reused automatically and can contain vendor-owned credentials. `ctxlane` does not perform automated orphan cleanup. A private `p-*` leaf does not distinguish configured state from detached state, so never delete one based on its name alone; verify that no configured profile references the exact path first.
+Dashboard profile removal does not read or delete the keyring item. It removes the unreferenced profile metadata, records the immutable profile UID as retired, and leaves the immutable managed vendor directory detached at the same path. Neither the UID nor that directory is reused automatically, and the directory can contain vendor-owned credentials. `ctxlane` does not perform automated orphan cleanup. A private `p-*` leaf does not distinguish configured state from detached state, so never delete one based on its name alone; verify that no configured profile references the exact path first.
 
 Use the explicit CLI `profile remove --delete-secret` option when you also intend to delete a wrapper-held keyring credential. If keyring cleanup fails, `ctxlane` attempts to restore the profile metadata. A successful rollback leaves the profile configured; if rollback also fails, the command reports both failures and the metadata may already be absent. Remote credentials are never revoked by local profile removal.
+
+Every new or upgraded profile has an `automation` policy. The default is deliberately ineligible, empty-scoped, exclusive, and limited to one prospective lease. The policy is reserved operator-owned metadata for later phases: this release has no lease service, automation MCP server, controller runtime, or policy-editing command. Editing `eligible` by hand does not create or authorize an automation runtime, and the policy does not make ordinary interactive CLI or TUI use depend on one. `doctor` makes the local policy visible by reporting disabled or eligible status with environment, role, and caller scopes reduced to counts. It emits a warning when either the authentication or isolation exception is acknowledged. These fields describe configuration, not lease readiness.
 
 Valid authentication/billing combinations are fixed:
 
@@ -124,8 +160,13 @@ At profile creation, `--auth subscription` is the provider-neutral spelling for 
 | Codex `chatgpt-oauth` | optional `--workspace`; optional credential-store policy | no, vendor-managed |
 | Codex `api-key` | optional `--account`; optional credential-store policy | yes; also materialized through official Codex login |
 | Codex `access-token` | required `--workspace`; optional `--account`; optional credential-store policy | yes; also materialized through official Codex login |
+| Codex `wif` | `--federation-rule-id`, `--identity-token-file`, normalized `--workspace` and `--principal`, one or more `--environment`, and `--minimum-codex-version`; optional workload labels and structured context | no; enrollment only, while login/run are unavailable and logout refuses the external identity source |
 
-The WIF identity-token file path is made absolute and must be a private regular file when used. `ctxlane` sets Anthropic's documented selector environment for the official client; it does not perform token exchange itself.
+For Claude WIF, the CLI makes the identity-token path absolute, and it must be a private regular file when used. `ctxlane` sets Anthropic's documented selector environment for the official client; it does not perform token exchange itself.
+
+The v2 profile model validates a closed Codex WIF record containing a federation-rule ID, a syntactically absolute identity-token-file path, expected workspace and principal references, allowed environments and workload labels, optional structured workload context, and a minimum Codex version; CLI `profile add` persists it. Model/config loading is deliberately pure: it does not stat the configured path or prove that the path remains outside a Git worktree. CLI enrollment separately checks the supplied path's Git-worktree ancestry, without opening the token file. Explicit credential diagnostics, and the qualified Claude WIF runtime, repeat repository-location and private-file checks immediately before file use.
+
+The dashboard does not expose this specialized enrollment form or edit its authority fields. Codex WIF enrollment is configuration foundation only: it does not perform token exchange, authenticate Codex, or prove that the declared Codex version is installed and qualified. `login`, `logout`, and `run` refuse an enrolled Codex WIF profile before token-path-derived filesystem inspection, vendor-state preparation, or process launch until native runtime qualification is implemented. An explicit `credential check` can report only identity-token-file availability. `doctor` does not probe the Codex WIF token path; it reports the native runtime as unqualified.
 
 For Claude static credentials, `claude auth status --json` checks the local authentication route and any configured organization evidence. It does not make a model request. Treat the first successful model request as the remote validity check; neither local status nor one request proves future expiry or revocation state.
 

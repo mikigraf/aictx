@@ -7,7 +7,7 @@ This document distinguishes implemented behavior from evidence still required in
 | Area | Declared baseline | Repository validation |
 | --- | --- | --- |
 | Rust | MSRV 1.89; edition 2024 | CI compiles/tests 1.89 on Linux and pinned Rust 1.97.1 on Linux, macOS, and Windows |
-| Metadata | schema version 1 | unknown versions/fields and invalid relationships are rejected |
+| Metadata | config schema v2; mutable-state schema v1 | strict locked config-v1-to-v2 upgrade; unknown versions/fields and invalid relationships are rejected |
 | Linux | current GitHub-hosted Ubuntu image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
 | macOS | current GitHub-hosted macOS image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
 | Windows | current GitHub-hosted Windows image | unit, CLI, native fake-vendor, and PTY tests in CI; Unix shell-fixture contracts are disabled |
@@ -15,6 +15,8 @@ This document distinguishes implemented behavior from evidence still required in
 | Coverage | regions/functions/lines | CI floors are 75%/60%/70%; see [Testing](testing.md) for the measured baseline and interpretation |
 
 CI configuration is an intended validation matrix, not proof that a given commit has passed until its workflow run is green. The OS matrix uses native GitHub-hosted runners. It does not qualify every architecture, distribution, terminal host, or vendor release. See [Testing](testing.md) for exact commands and test-layer limits.
+
+The config-v2 automation policy is operator-owned foundation and defaults to `eligible = false`. This release has no lease service, automation MCP server, or controller runtime. Ordinary CLI/TUI account switching and supported local vendor workflows remain standalone, with no ASF, Runmill, service, controller, or MCP dependency.
 
 ## Evidence classes
 
@@ -44,6 +46,7 @@ The source CI and release workflow passed for the commit tagged as [v0.2.0](http
 | Codex forced login/workspace/credential-store config | config tests | managed workspace enforcement in the organization's current Codex CLI |
 | Codex API key stdin login and secret-free main child | runner contract tests | real API account, vendor credential-store behavior, and billing attribution |
 | Codex access-token stdin login and CI refusal policy | runner policy/contract tests | eligible managed workspace (currently documented for ChatGPT Enterprise) and private runner |
+| Codex WIF enrollment metadata and fail-closed boundary | pure model/config validation, CLI ancestry/persistence, login/logout/run/env refusal, explicit credential-file checks, and doctor runtime-unqualified tests | native Codex WIF runtime is not implemented; after implementation, qualify identity/workspace binding, token-file safety, official version, exchange, refresh, expiry, and revocation |
 | native OS keyring | reference parsing, injected-secret routing, fail-before-access policy, and diagnostics | real store/read/delete, locked-store behavior, consent UI, and ACLs on each OS |
 
 On Windows, configured Claude and Codex executables must resolve to native `.exe` files. `.bat` and `.cmd` launchers are refused because Windows executes them through `cmd.exe`, which cannot preserve the wrapper's no-shell argument boundary.
@@ -74,7 +77,9 @@ To prevent a selected credential from being rerouted or exfiltrated, runs reject
 
 ### Schema migration
 
-Only schema `1` is supported. The v0.1 product rename does not change that schema, but absolute managed state paths move. Use the copy-only `ctxlane migrate aictx` flow described in [Migration from v0.1](migration-from-v0.1.md). There is no downgrade command. Legacy metadata and vendor state stay available for rollback; migration coordination may create or normalize advisory profile lock files in the source state directory.
+The current configuration schema is version `2`; `state.toml` remains version `1`. On the first coordinated normal load or mutation, a valid config-schema-v1 file is upgraded under the exclusive metadata/config locks and replaced atomically. The upgrade creates one immutable installation UID, derives immutable profile UIDs from that installation UID, the provider, and each immutable managed state leaf identity, and adds a validated automation policy with `eligible = false` to every profile. A diagnostic-only read can validate a non-authoritative in-memory projection without writing it. Unknown schema versions and invalid or unknown fields fail closed.
+
+This is a one-way format transition: there is no config-v2-to-v1 downgrade, and an older binary that only understands config schema v1 must not be used after the upgrade. The explicit copy-only `ctxlane migrate aictx` application-store flow is separate; see [Migration from v0.1](migration-from-v0.1.md). Legacy metadata and vendor state remain in the source store for rollback, and migration coordination may create or normalize advisory profile lock files there.
 
 ## Qualification checklist
 
@@ -82,7 +87,7 @@ Before enabling a new OS/vendor version combination:
 
 1. Install official vendor CLIs through your approved channel.
 2. Run interactive `ctxlane doctor --json` and record the reviewed report without recording secrets. In `--non-interactive` mode, static OS-keyring reads are skipped with a warning; this is not static-credential readiness evidence.
-3. Exercise login, status, one harmless request, logout, and re-login for each supported auth mode.
+3. Exercise login, status, one harmless request, logout, and re-login for each runnable supported auth mode. Codex WIF is enrollment-only and must remain excluded until its native runtime is implemented and qualified.
 4. Confirm the expected vendor account/workspace and billing domain using vendor-supported status/account controls.
 5. Seed deliberately conflicting parent environment variables and verify the selected identity still wins.
 6. Test a locked native keyring and a missing or denied keyring item.
