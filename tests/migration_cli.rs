@@ -163,7 +163,8 @@ fn dry_run_reports_safe_plan_without_creating_target_state() {
     assert!(stdout.contains("vendor files: 2"));
     assert!(stdout.contains("vendor directories: 4"));
     assert!(stdout.contains("skipped lock entries: 1"));
-    assert!(stdout.contains("skipped lock: codex/work/active.lock"));
+    let skipped_lock = Path::new("codex").join("work").join("active.lock");
+    assert!(stdout.contains(&format!("skipped lock: {}", skipped_lock.display())));
     assert!(!stdout.contains("keyring://"));
     assert!(!fixture.target_root.exists());
     assert!(!migration_journal_path(&fixture.target).exists());
@@ -251,7 +252,12 @@ fn migration_command_copies_state_rewrites_paths_and_preserves_secret_references
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Copied the aictx store into the ctxlane layout"));
     assert!(stdout.contains("The old aictx store remains available"));
-    assert!(stdout.contains("metadata, vendor state, and credentials were not changed"));
+    assert!(
+        stdout
+            .contains("profile metadata, vendor state, and credentials were not moved or deleted")
+    );
+    assert!(stdout.contains("may create or normalize private advisory locks"));
+    assert!(stdout.contains("same OS credential as the old profile"));
     assert!(!stdout.contains("keyring://"));
 
     let target_store = MetadataStore::new(fixture.target.clone());
@@ -402,7 +408,12 @@ fn recovery_command_rolls_back_owned_partial_state_and_reports_noop_truthfully()
     assert!(stdout.contains("Archived committed partial target directories"));
     assert!(stdout.contains("Review these private archives before deleting them"));
     assert!(stdout.contains("old aictx store remains available"));
-    assert!(stdout.contains("metadata, vendor state, and credentials were not changed"));
+    assert!(
+        stdout
+            .contains("profile metadata, vendor state, and credentials were not moved or deleted")
+    );
+    assert!(stdout.contains("may create or normalize private advisory locks"));
+    assert!(stdout.contains("same OS credential as the old profile"));
     assert!(!migration_journal_path(&fixture.target).exists());
     for anchor in &anchors {
         assert!(!anchor.target.exists());

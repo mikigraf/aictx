@@ -42,6 +42,8 @@ Migration copies profiles, contexts, bindings, active state, and managed vendor 
 
 Legacy metadata, vendor state, and credential references are not changed or removed. Migration may create or normalize private advisory profile-lock files in the legacy state directory while it prevents concurrent profile changes.
 
+> **Shared credential:** A preserved `keyring://aictx/...` reference still points to the same OS-keyring item from both tools. After migration, `ctxlane login`, `ctxlane logout`, or `ctxlane profile remove --delete-secret` can replace or delete the credential used by the old `aictx` profile. Avoid those operations while you still depend on credential-level rollback, or be ready to log in again.
+
 ## Custom roots
 
 Without `--root`, `ctxlane` discovers the old and new platform application directories. Explicit roots are never guessed, so supply both paths:

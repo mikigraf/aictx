@@ -408,7 +408,13 @@ fn print_safe_path(label: &str, path: &Path) {
 
 fn print_source_preservation_receipt() {
     println!("The old aictx store remains available.");
-    println!("Its metadata, vendor state, and credentials were not changed.");
+    println!("Its profile metadata, vendor state, and credentials were not moved or deleted.");
+    println!(
+        "Migration may create or normalize private advisory locks in the old state directory."
+    );
+    println!(
+        "Migrated keyring references still address the same OS credential as the old profile."
+    );
 }
 
 fn execute_init(
