@@ -30,14 +30,17 @@ Keep the old executable and data until the new installation works.
 
 4. Check the result:
 
+   Run each provider check that matches a migrated profile:
+
    ```bash
-   ctxlane doctor
+   ctxlane doctor --provider claude  # if you migrated Claude profiles
+   ctxlane doctor --provider codex   # if you migrated Codex profiles
    ctxlane status
    ```
 
 5. Test each account you use. Remove the old executable only after those checks pass.
 
-There is no `aictx` executable or Cargo alias. Update scripts and shell configuration to call `ctxlane`.
+The v0.2 package installs only `ctxlane`. It does not install an `aictx` compatibility executable or Cargo alias. If Homebrew retained the old v0.1 keg, that keg contains the old binary rather than a v0.2 shim. Update scripts and shell configuration to call `ctxlane`.
 
 ## What is copied
 

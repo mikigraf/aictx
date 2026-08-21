@@ -2,43 +2,21 @@
 
 **Use the right AI coding account, every time.**
 
-Switch between Claude Code and Codex accounts with isolated local state. `ctxlane` is a local account launcher for personal, work, and CI identities. It runs the official vendor CLIs without adding a proxy.
+`ctxlane` switches and isolates personal, work, and CI accounts for Claude Code and Codex.
 
-Each profile gets its own vendor state directory and configured authentication route. Select a profile directly or through a directory binding, then `ctxlane` applies that configuration when it starts Claude Code or Codex.
+In `ctxlane`, a profile represents one Claude or Codex account or authentication path. Each profile gets a separate vendor state directory. A context can switch both tools together or bind the selection to a project directory.
 
-```text
-personal project  -> personal Claude + personal Codex
-company project   -> work Claude     + work Codex
-CI runner         -> CI profile      + separate state
-```
-
-In the CLI, a **profile** represents one configured provider account or authentication route. A **context** groups a Claude profile, a Codex profile, or both.
-
-## Why ctxlane
-
-Claude Code and Codex normally use a default login and state directory. On a machine with personal, company, customer, or CI accounts, a normal command can reuse the wrong cached login or charge the wrong billing destination.
-
-`ctxlane` reduces the risk of accidental account and billing crossover on the same machine. For managed accounts, confirm the final billing destination through the vendor's account controls.
-
-- **Separate profile state:** each profile gets its own `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
-- **One context across tools:** switch Claude Code and Codex accounts together.
-- **Directory-aware selection:** bind the right context to a project tree.
-- **Keyring-backed secrets:** wrapper-managed static credentials stay in the native OS credential store, outside repository files and shell configuration.
-- **Clean vendor launch:** known competing selectors are removed, and inspected project settings that can override routing or load commands are refused.
-- **Official vendor CLIs:** Claude Code and Codex still handle login, refresh, and model requests.
-- **Local-only design:** `ctxlane` has no API proxy or remote credential service. The vendor CLIs still contact Claude or OpenAI.
+At launch, `ctxlane` removes known competing selectors and refuses inspected repository settings that could change the selected route. Static secrets stay in the native OS credential store, outside repository files and shell configuration. The official vendor CLIs still handle login and model traffic; `ctxlane` adds no API proxy or remote credential service.
 
 ## Quick start
-
-### Install
 
 ```bash
 brew install mikigraf/tap/ctxlane
 ```
 
-Install at least one supported vendor CLI: Claude Code or Codex.
+> Used version 0.1? Follow [Migration from v0.1](docs/migration-from-v0.1.md) before setup. `ctxlane` does not import the old local store automatically.
 
-If you used version 0.1, follow [Migration from v0.1](docs/migration-from-v0.1.md) before normal setup. Homebrew users must first rename and upgrade the formula as described there. `ctxlane` does not import the old local store automatically.
+Install at least one supported vendor CLI: [Claude Code](https://code.claude.com/docs/en/quickstart) or [Codex CLI](https://developers.openai.com/codex/cli/).
 
 ### Claude Code
 
@@ -48,7 +26,7 @@ ctxlane run --profile claude:personal claude -- \
   -p "explain this repository"
 ```
 
-Guided setup initializes `ctxlane`, creates or reuses the `claude:personal` account profile, runs the official `claude setup-token` flow, and stores the pasted token in the native OS credential store.
+The guided command initializes `ctxlane`, creates or reuses `claude:personal`, runs the official `claude setup-token` flow, safely accepts wrapped paste input, and stores the token in the native OS credential store.
 
 ### Codex
 
@@ -60,15 +38,26 @@ ctxlane run --profile codex:personal codex -- \
   exec "explain this repository"
 ```
 
-Codex uses its vendor-managed ChatGPT OAuth flow. The compatibility spelling below selects the same saved `chatgpt-oauth` mode:
+`ctxlane login` opens the official ChatGPT OAuth flow in Codex.
+
+## Add subscription profiles manually
+
+When you create profiles manually, both providers accept the same neutral option:
+
+```bash
+ctxlane profile add claude personal --auth subscription
+ctxlane profile add codex personal --auth subscription
+```
+
+For Codex, the compatibility command below is an alternative to the second command above. Both create the same saved `chatgpt-oauth` mode:
 
 ```bash
 ctxlane profile add codex personal --auth subscription-token
 ```
 
-### Switch both together
+## Use Claude Code and Codex together
 
-Create one context after both profiles exist:
+Create one context after both account profiles exist:
 
 ```bash
 ctxlane context add personal \
@@ -83,6 +72,26 @@ ctxlane run codex -- exec "run the tests"
 After a context is active, you do not need `--profile` on every run.
 
 Run `ctxlane` with no subcommand to open the terminal context picker.
+
+## Why ctxlane
+
+Claude Code and Codex normally use a default login and state directory. On a machine with personal, company, customer, or CI accounts, a normal command can reuse the wrong cached login or charge the wrong billing destination.
+
+`ctxlane` reduces the risk of accidental account and billing crossover on the same machine. For managed accounts, confirm the final billing destination through the vendor's account controls.
+
+```text
+personal project  -> personal Claude + personal Codex
+company project   -> work Claude     + work Codex
+CI runner         -> CI account      + separate state
+```
+
+- **Separate account state:** each profile gets its own `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
+- **One context across tools:** switch Claude Code and Codex accounts together.
+- **Directory-aware selection:** bind the right context to a project tree.
+- **Keyring-backed secrets:** wrapper-managed static credentials stay in the native OS credential store, outside repository files and shell configuration.
+- **Clean vendor launch:** known competing selectors are removed, and inspected project settings that can override routing or load commands are refused.
+- **Official vendor CLIs:** Claude Code and Codex still handle login, refresh, and model requests.
+- **Local-only design:** `ctxlane` has no API proxy or remote credential service. The vendor CLIs still contact Anthropic or OpenAI.
 
 ## Install or update from source
 
@@ -108,7 +117,7 @@ Claude and Codex expose different subscription login flows:
 - `claude setup-token` prints a token but does not save it for `ctxlane`. The token is needed on later runs, so `ctxlane` stores it in Keychain on macOS, Credential Manager on Windows, or Secret Service on Linux. The `ctxlane` configuration stores only a `keyring://...` reference.
 - Codex subscription login is browser OAuth managed by Codex. With the default `file` credential-store policy, Codex keeps its login state inside that profile's private `CODEX_HOME`. The `keyring` and `auto` policies remain vendor- and OS-defined. `ctxlane` does not ask you to paste or store a ChatGPT OAuth token.
 
-This is why the shared command uses `--auth subscription`, while the saved provider modes remain `subscription-token` for Claude and `chatgpt-oauth` for Codex.
+This is why the shared command uses `--auth subscription`. The saved provider modes remain `subscription-token` for Claude and `chatgpt-oauth` for Codex.
 
 For API keys, WIF, managed access tokens, custom profile names, and other options, see [Authentication support](#authentication-support) and the [Command reference](docs/command-reference.md).
 
@@ -116,7 +125,7 @@ For API keys, WIF, managed access tokens, custom profile names, and other option
 
 ## Interactive mode
 
-After `ctxlane init`, run `ctxlane` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
+After you create a context, run `ctxlane` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
 
 ```bash
 ctxlane
@@ -124,13 +133,24 @@ ctxlane
 
 The dashboard shows contexts, active and default selection, directory resolution, profile IDs, authentication modes, and billing domains. It never reads secret values or starts a vendor login. Profile creation, login, logout, and vendor runs stay in the explicit CLI commands.
 
-Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. Changing any selected provider profile opens a confirmation dialog before state is written, even when both profiles use the same billing type.
+Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. By default, changing any selected provider profile opens a confirmation dialog before state is written, even when both profiles use the same billing type.
 
 The dashboard opens only when standard input and output are terminals. Bare `ctxlane --non-interactive` and redirected use fail instead of entering raw terminal mode. Non-interactive commands remain available for scripts, while browser login, terminal prompts, and native-keyring access fail closed when interaction is disabled.
 
 ## Context resolution
 
-A profile configures one provider authentication route and its intended billing domain. A context can point to one Claude profile, one Codex profile, or both:
+The CLI uses these terms:
+
+| Term | Meaning |
+| --- | --- |
+| Account | A Claude or Codex identity that you use for model requests |
+| Profile | One provider account or authentication path configured in `ctxlane` |
+| Context | A named selection containing a Claude profile, a Codex profile, or both |
+| Binding | The context selected for a directory tree |
+| Vendor home | The separate login and configuration state directory for a profile |
+| Billing domain | The subscription, workspace, or API route that `ctxlane` intends to select. Vendor account controls remain authoritative |
+
+A context can point to one Claude profile, one Codex profile, or both:
 
 ```text
 personal -> claude:personal + codex:personal
@@ -147,10 +167,13 @@ For each run, `ctxlane` uses the first available choice in this order:
 
 `ctxlane use work` updates only the small mutable state file. It does not copy credentials or rewrite vendor homes. The result shows the selected global context and, when a directory binding takes precedence, the different context and provider profiles effective in the current directory.
 
-Bind a directory tree when one checkout should always use the same context:
+Bind a directory tree when one checkout should always use the same context. This example assumes that `claude:work` and `codex:work` already exist:
 
 ```bash
-ctxlane bind "$HOME/src/company" work
+ctxlane context add work \
+  --claude claude:work \
+  --codex codex:work
+ctxlane bind . work
 ctxlane bindings
 ```
 
@@ -158,7 +181,7 @@ Bindings live in global user metadata. Repository `.ctxlane.toml` files are igno
 
 ## Authentication support
 
-Use `--auth subscription` when creating either a Claude or Codex subscription profile. The compatibility spellings `subscription-token` and `chatgpt-oauth` remain accepted. Configuration is normalized to the vendor-native mode shown below.
+Use `--auth subscription` when creating either a Claude or Codex subscription profile. For Claude, `subscription-token` is the provider-native alternative and is the saved mode. For Codex, `chatgpt-oauth` is the provider-native alternative, while `subscription-token` remains a compatibility alias. Codex saves all three accepted subscription spellings as `chatgpt-oauth`.
 
 | Provider | Mode | Configured billing domain | Credential handling |
 | --- | --- | --- | --- |
@@ -208,6 +231,8 @@ Read [Configuration](docs/configuration.md) for every supported profile field an
 See the full [Command reference](docs/command-reference.md).
 
 Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative. Use `ctxlane --help` and `ctxlane <command> --help` for current syntax and examples.
+
+If setup fails before a login or token prompt appears, run `ctxlane doctor --provider claude` or `ctxlane doctor --provider codex`. `ctxlane` refuses vendor executables on unsafe writable paths; reinstall the official CLI or correct the reported permissions instead of bypassing that check.
 
 Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests. A successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array. Every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
 
@@ -273,9 +298,11 @@ Read the [Threat model](THREAT_MODEL.md) and [Security policy](SECURITY.md) befo
 ## Validation status
 
 > [!IMPORTANT]
-> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes without contacting Claude or Codex. Live accounts, WIF, native keyrings, billing, Windows deployments, and release signing still need deployment qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
+> The local wrapper flow is tested end to end with compiled native fake-vendor executables. These tests cover context selection, state isolation, argument forwarding, credential routing, policy refusals, and exit codes without contacting Claude or Codex. Live accounts, WIF, native keyrings, billing, Windows deployments, and platform-native code signing still need deployment qualification. See [Testing](docs/testing.md) and [Compatibility and validation status](docs/compatibility.md).
 
 Local and CI checks are layered: unit tests, public CLI lifecycle tests, Unix runner contracts, native fake-vendor E2E tests, PTY tests, MSRV checks, and native Linux/macOS/Windows jobs. CI also checks formatting, Clippy, documentation, dependency policy, secret history, packaging, and coverage with region/function/line floors of 75%/60%/70%. A configured workflow is evidence only after it runs successfully on a committed revision.
+
+For [v0.2.0](https://github.com/mikigraf/ctxlane/releases/tag/v0.2.0), the source and release workflows passed for the tagged commit. The published archives, checksums, CycloneDX SBOM, Sigstore bundles, and GitHub provenance attestations were verified against that release.
 
 These checks still need real deployment evidence:
 
@@ -284,7 +311,6 @@ These checks still need real deployment evidence:
 - Billing and workspace identity for managed accounts
 - Native keyring behavior, including locked stores and consent prompts
 - Native Windows ACL and `.exe` launcher behavior
-- Live GitHub OIDC, Sigstore, provenance, and release publishing
 - Authenticode, Apple code signing, and macOS notarization where required
 
 Read [Testing](docs/testing.md) for the exact automated layers, commands, coverage method, and evidence boundary. The deployment checklist is in [Compatibility and validation status](docs/compatibility.md).

@@ -24,6 +24,10 @@ CI configuration is an intended validation matrix, not proof that a given commit
 
 The compiled native fake-vendor suite is process-level E2E evidence for the wrapper. It is not a live Claude or Codex test.
 
+### v0.2.0 release evidence
+
+The source CI and release workflow passed for the commit tagged as [v0.2.0](https://github.com/mikigraf/ctxlane/releases/tag/v0.2.0). The published platform archives, checksums, CycloneDX SBOM, Sigstore bundles, and GitHub provenance attestations were verified against that release. Authenticode, Apple Developer ID signing, and macOS notarization remain separate deployment requirements where an organization needs them.
+
 ## Vendor contracts
 
 `ctxlane` intentionally relies on documented public process contracts rather than pinning guessed vendor CLI versions:

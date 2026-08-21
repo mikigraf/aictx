@@ -4,9 +4,12 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## Unreleased
 
-### Documentation
+### Changed
 
-- Clarified the Homebrew package rename and local-store migration steps for every v0.1 installation method.
+- Moved the Homebrew, Claude Code, and Codex first-run paths to the top of the README and clarified the v0.1 migration and verified release evidence.
+- Aligned package, command-help, and dashboard positioning around local account isolation.
+- Added exact selected-profile recovery hints for missing credentials without exposing opaque keyring handles.
+- Completed argument descriptions and copyable examples on the remaining high-value CLI help surfaces.
 
 ## 0.2.0 - 2026-08-21
 
