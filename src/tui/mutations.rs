@@ -75,12 +75,14 @@ pub(super) fn apply_submission(
                 Provider::Claude => ProfileEdit::Claude(ClaudeProfileEdit {
                     account_hint: value_edit(account),
                     expected_organization: value_edit(organization_or_workspace),
+                    automation: None,
                 }),
                 Provider::Codex => ProfileEdit::Codex(CodexProfileEdit {
                     account_hint: value_edit(account),
                     expected_workspace_id: value_edit(organization_or_workspace),
                     credential_store,
                     trusted_runners_only: None,
+                    automation: None,
                 }),
             };
             let receipt = management::edit_profile(store, &id, &expected, edit)?;
@@ -280,6 +282,7 @@ fn management_profile_draft(
                 expected_workspace_id: draft.workspace,
                 credential_store: draft.credential_store,
                 trusted_runners_only: false,
+                wif: None,
             })
         }
         (Provider::Codex, crate::model::AuthArg::ApiKey) => Ok(management::ProfileDraft::Codex {
@@ -290,6 +293,7 @@ fn management_profile_draft(
             expected_workspace_id: None,
             credential_store: draft.credential_store,
             trusted_runners_only: false,
+            wif: None,
         }),
         (Provider::Codex, crate::model::AuthArg::AccessToken) => {
             Ok(management::ProfileDraft::Codex {
@@ -300,6 +304,7 @@ fn management_profile_draft(
                 expected_workspace_id: Some(required_form_value(draft.workspace, "workspace ID")?),
                 credential_store: draft.credential_store,
                 trusted_runners_only: true,
+                wif: None,
             })
         }
         _ => Err(Error::InvalidInput(

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub use crate::model::Provider;
+pub use crate::model::{ProfileUid, Provider};
 
 pub const IDENTITY_LEASE_REQUEST_SCHEMA: &str = "ctxlane.identity-lease-request/v1";
 pub const IDENTITY_LEASE_SCHEMA: &str = "ctxlane.identity-lease/v1";
@@ -397,7 +397,6 @@ macro_rules! service_id {
 }
 
 service_id!(LeaseId, "lease ID", "lease_");
-service_id!(ProfileUid, "profile UID", "profile_");
 service_id!(ExecutionHandle, "execution handle", "exec_");
 
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]

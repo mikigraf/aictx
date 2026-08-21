@@ -193,6 +193,7 @@ struct PendingActivation {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 enum Removal {
     Context { name: Name, expected: Context },
     Profile { id: ProfileId, expected: Profile },

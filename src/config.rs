@@ -1,20 +1,26 @@
 use std::{
     fs,
-    fs::{File, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
 };
 
-use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use directories::ProjectDirs;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 
 use crate::{
     Error, Result,
     binary::is_in_current_repository,
     identity::{AppIdentity, CURRENT_APPLICATION},
-    model::{Config, MutableState, Name, Provider},
+    model::{Config, MutableState, Name, ProfileUid, Provider},
 };
+
+mod storage;
+mod upgrade;
+
+pub use storage::write_secure_text;
+pub(crate) use storage::{
+    OrderedProfileLocks, ProfileLockGuard, acquire_ordered_profile_locks, acquire_profile_lock,
+};
+use storage::{acquire_exclusive, acquire_shared, write_toml};
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
@@ -164,6 +170,22 @@ impl AppPaths {
             name.as_str().to_ascii_lowercase()
         ))
     }
+
+    /// Immutable lifecycle lock shared by profile mutation and execution paths.
+    #[must_use]
+    pub fn profile_lifecycle_lock(&self, profile_uid: &ProfileUid) -> PathBuf {
+        self.state_dir
+            .join("profile-locks")
+            .join(format!("{}-lifecycle.lock", profile_uid.as_str()))
+    }
+
+    /// Immutable mutable-vendor-home lock held exclusively by every vendor operation.
+    #[must_use]
+    pub fn profile_resource_lock(&self, profile_uid: &ProfileUid) -> PathBuf {
+        self.state_dir
+            .join("profile-locks")
+            .join(format!("{}-resource.lock", profile_uid.as_str()))
+    }
 }
 
 fn valid_profile_state_leaf(leaf: &std::ffi::OsStr) -> bool {
@@ -215,16 +237,27 @@ impl MetadataStore {
     pub fn initialize(&self) -> Result<bool> {
         self.paths.ensure_layout()?;
         let _metadata_lock = acquire_exclusive(&self.paths.metadata_lock)?;
-        let _lock = acquire_exclusive(&self.paths.config_lock)?;
+        let _config_lock = acquire_exclusive(&self.paths.config_lock)?;
+        let _state_lock = acquire_exclusive(&self.paths.state_lock)?;
         if self.paths.config_file.exists() {
-            let config: Config = read_toml(&self.paths.config_file)?;
-            self.validate_config(&config)?;
+            let mut decoded = read_config(&self.paths.config_file)?;
+            let state = if self.paths.state_file.exists() {
+                read_toml(&self.paths.state_file)?
+            } else {
+                MutableState::default()
+            };
+            let config = &decoded.config;
+            self.validate_config(config)?;
+            state.validate(config)?;
+            persist_config_upgrade(&self.paths.config_file, &mut decoded)?;
+            if !self.paths.state_file.exists() {
+                write_toml(&self.paths.state_file, &state)?;
+            }
             return Ok(false);
         }
 
-        let config = Config::default();
+        let config = Config::new()?;
         write_toml(&self.paths.config_file, &config)?;
-        let _state_lock = acquire_exclusive(&self.paths.state_lock)?;
         if !self.paths.state_file.exists() {
             write_toml(&self.paths.state_file, &MutableState::default())?;
         }
@@ -236,11 +269,12 @@ impl MetadataStore {
             return Err(Error::NotInitialized);
         }
         self.paths.ensure_layout()?;
-        let _metadata_lock = acquire_shared(&self.paths.metadata_lock)?;
-        let _lock = acquire_shared(&self.paths.config_lock)?;
-        let config: Config = read_toml(&self.paths.config_file)?;
-        self.validate_config(&config)?;
-        Ok(config)
+        let _metadata_lock = acquire_exclusive(&self.paths.metadata_lock)?;
+        let _lock = acquire_exclusive(&self.paths.config_lock)?;
+        let mut decoded = read_config(&self.paths.config_file)?;
+        self.validate_config(&decoded.config)?;
+        persist_config_upgrade(&self.paths.config_file, &mut decoded)?;
+        Ok(decoded.config)
     }
 
     /// Read configuration for a diagnostic command without creating locks or directories.
@@ -251,12 +285,17 @@ impl MetadataStore {
         if !self.paths.config_file.exists() {
             return Err(Error::NotInitialized);
         }
-        let config: Config = read_toml(&self.paths.config_file)?;
-        self.validate_config(&config)?;
-        Ok(config)
+        let decoded = read_config(&self.paths.config_file)?;
+        self.validate_config(&decoded.config)?;
+        Ok(decoded.config)
     }
 
     pub fn load_state(&self, config: &Config) -> Result<MutableState> {
+        if !config.is_authoritative() {
+            return Err(Error::InvalidConfig(
+                "a projected legacy configuration is diagnostic-only".to_owned(),
+            ));
+        }
         self.paths.ensure_layout()?;
         let _metadata_lock = acquire_shared(&self.paths.metadata_lock)?;
         let _lock = acquire_shared(&self.paths.state_lock)?;
@@ -274,18 +313,19 @@ impl MetadataStore {
             return Err(Error::NotInitialized);
         }
         self.paths.ensure_layout()?;
-        let _metadata_lock = acquire_shared(&self.paths.metadata_lock)?;
-        let _config_lock = acquire_shared(&self.paths.config_lock)?;
+        let _metadata_lock = acquire_exclusive(&self.paths.metadata_lock)?;
+        let _config_lock = acquire_exclusive(&self.paths.config_lock)?;
         let _state_lock = acquire_shared(&self.paths.state_lock)?;
-        let config: Config = read_toml(&self.paths.config_file)?;
-        self.validate_config(&config)?;
+        let mut decoded = read_config(&self.paths.config_file)?;
+        self.validate_config(&decoded.config)?;
         let state = if self.paths.state_file.exists() {
             read_toml(&self.paths.state_file)?
         } else {
             MutableState::default()
         };
-        state.validate(&config)?;
-        Ok((config, state))
+        state.validate(&decoded.config)?;
+        persist_config_upgrade(&self.paths.config_file, &mut decoded)?;
+        Ok((decoded.config, state))
     }
 
     pub fn update_config<T>(&self, update: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
@@ -296,7 +336,8 @@ impl MetadataStore {
         if !self.paths.config_file.exists() {
             return Err(Error::NotInitialized);
         }
-        let mut config: Config = read_toml(&self.paths.config_file)?;
+        let decoded = read_config(&self.paths.config_file)?;
+        let mut config = decoded.config;
         self.validate_config(&config)?;
         let state = if self.paths.state_file.exists() {
             read_toml(&self.paths.state_file)?
@@ -307,6 +348,7 @@ impl MetadataStore {
         let output = update(&mut config)?;
         self.validate_config(&config)?;
         state.validate(&config)?;
+        config.mark_persisted();
         write_toml(&self.paths.config_file, &config)?;
         Ok(output)
     }
@@ -317,21 +359,22 @@ impl MetadataStore {
     ) -> Result<T> {
         self.paths.ensure_layout()?;
         let _metadata_lock = acquire_exclusive(&self.paths.metadata_lock)?;
-        let _config_lock = acquire_shared(&self.paths.config_lock)?;
+        let _config_lock = acquire_exclusive(&self.paths.config_lock)?;
         let _state_lock = acquire_exclusive(&self.paths.state_lock)?;
         if !self.paths.config_file.exists() {
             return Err(Error::NotInitialized);
         }
-        let config: Config = read_toml(&self.paths.config_file)?;
-        self.validate_config(&config)?;
+        let mut decoded = read_config(&self.paths.config_file)?;
+        self.validate_config(&decoded.config)?;
         let mut state = if self.paths.state_file.exists() {
             read_toml(&self.paths.state_file)?
         } else {
             MutableState::default()
         };
-        state.validate(&config)?;
-        let output = update(&config, &mut state)?;
-        state.validate(&config)?;
+        state.validate(&decoded.config)?;
+        let output = update(&decoded.config, &mut state)?;
+        state.validate(&decoded.config)?;
+        persist_config_upgrade(&self.paths.config_file, &mut decoded)?;
         write_toml(&self.paths.state_file, &state)?;
         Ok(output)
     }
@@ -348,7 +391,9 @@ impl MetadataStore {
             return Err(Error::NotInitialized);
         }
 
-        let mut config: Config = read_toml(&self.paths.config_file)?;
+        let decoded = read_config(&self.paths.config_file)?;
+        let migrated = decoded.migrated;
+        let mut config = decoded.config;
         self.validate_config(&config)?;
         let mut state = if self.paths.state_file.exists() {
             read_toml(&self.paths.state_file)?
@@ -362,7 +407,8 @@ impl MetadataStore {
         let output = update(&mut config, &mut state)?;
         self.validate_config(&config)?;
         state.validate(&config)?;
-        if config != original_config {
+        if migrated || config != original_config {
+            config.mark_persisted();
             write_toml(&self.paths.config_file, &config)?;
         }
         if state != original_state {
@@ -644,480 +690,60 @@ fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {
     })
 }
 
-fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if path.exists() {
-        validate_sensitive_file(path)?;
-    }
-    let text = toml::to_string_pretty(value)?;
-    write_secure_text(path, &format!("{text}\n"))
-}
-
-pub fn write_secure_text(path: &Path, text: &str) -> Result<()> {
-    validate_absolute_sensitive_path(path)?;
-    validate_trusted_path_chain(path, LeafOwnership::CurrentUser)?;
-    match fs::symlink_metadata(path) {
-        Ok(_) => validate_sensitive_file(path)?,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(Error::ReadFile {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    }
-    let options = AtomicOpenOptions::new();
-
-    #[cfg(unix)]
-    let options = {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut options = options;
-        options.mode(0o600);
-        options
-    };
-
-    let mut file = options.open(path).map_err(|source| Error::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.write_all(text.as_bytes())
-        .map_err(|source| Error::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.commit().map_err(|source| Error::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-            Error::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
-    }
-
-    validate_sensitive_file(path)
-}
-
-fn lock_file(path: &Path) -> Result<File> {
-    validate_absolute_sensitive_path(path)?;
-    validate_trusted_path_chain(path, LeafOwnership::CurrentUser)?;
-    match fs::symlink_metadata(path) {
-        Ok(_) => validate_sensitive_file(path)?,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(Error::ReadFile {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    }
-
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.mode(0o600);
-    }
-
-    let file = options.open(path).map_err(|source| Error::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-            Error::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
-    }
-
+fn read_config(path: &Path) -> Result<upgrade::DecodedConfig> {
     validate_sensitive_file(path)?;
-    Ok(file)
-}
-
-fn acquire_exclusive(path: &Path) -> Result<File> {
-    let file = lock_file(path)?;
-    file.lock().map_err(|source| Error::WriteFile {
+    let text = fs::read_to_string(path).map_err(|source| Error::ReadFile {
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(file)
+    upgrade::decode(path, &text)
 }
 
-fn acquire_shared(path: &Path) -> Result<File> {
-    let file = lock_file(path)?;
-    file.lock_shared().map_err(|source| Error::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(file)
+fn persist_config_upgrade(path: &Path, decoded: &mut upgrade::DecodedConfig) -> Result<()> {
+    if decoded.migrated {
+        decoded.config.mark_persisted();
+        write_toml(path, &decoded.config)?;
+        decoded.migrated = false;
+    }
+    Ok(())
 }
 
-pub(crate) struct ProfileLockGuard {
-    _file: File,
-}
-
-pub(crate) fn acquire_profile_lock(path: &Path, exclusive: bool) -> Result<ProfileLockGuard> {
-    let file = lock_file(path)?;
-    let result = if exclusive {
-        file.try_lock()
-    } else {
-        file.try_lock_shared()
+pub(crate) fn decode_config_for_migration(
+    path: &Path,
+    bytes: &[u8],
+    installation_uid: Option<&crate::model::InstallationUid>,
+) -> Result<Config> {
+    let redacted = || {
+        Error::InvalidConfig(format!(
+            "failed to parse TOML metadata in {}; parser details and input were redacted",
+            path.display()
+        ))
     };
-    result.map_err(|_| {
-        Error::PolicyRefused(format!("profile is busy (lock file {})", path.display()))
+    let text = std::str::from_utf8(bytes).map_err(|_| redacted())?;
+    upgrade::decode_with_installation_uid(path, text, installation_uid.cloned())
+        .map(|decoded| decoded.config)
+        .map_err(|_| redacted())
+}
+
+pub(crate) fn expected_legacy_v1_target_config(
+    source_path: &Path,
+    bytes: &[u8],
+    target: &AppPaths,
+) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        Error::InvalidConfig(format!(
+            "failed to parse TOML metadata in {}; parser details and input were redacted",
+            source_path.display()
+        ))
     })?;
-    Ok(ProfileLockGuard { _file: file })
+    upgrade::expected_legacy_v1_target_config(source_path, text, target).map_err(|_| {
+        Error::InvalidConfig(format!(
+            "failed to parse TOML metadata in {}; parser details and input were redacted",
+            source_path.display()
+        ))
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Barrier},
-        thread,
-    };
-
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::{
-        identity::{LEGACY_AICTX, TARGET_CTXLANE},
-        model::{
-            BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Profile, ProfileId,
-        },
-    };
-
-    fn assert_same_paths(left: &AppPaths, right: &AppPaths) {
-        assert_eq!(left.config_dir, right.config_dir);
-        assert_eq!(left.data_dir, right.data_dir);
-        assert_eq!(left.state_dir, right.state_dir);
-        assert_eq!(left.config_file, right.config_file);
-        assert_eq!(left.state_file, right.state_file);
-        assert_eq!(left.metadata_lock, right.metadata_lock);
-        assert_eq!(left.config_lock, right.config_lock);
-        assert_eq!(left.state_lock, right.state_lock);
-    }
-
-    fn assert_matches_platform_identity(paths: &AppPaths, identity: AppIdentity) {
-        let project = ProjectDirs::from(
-            identity.qualifier(),
-            identity.organization(),
-            identity.application(),
-        )
-        .unwrap_or_else(|| panic!("platform application directories should be available"));
-        let data_dir = project.data_dir().to_path_buf();
-        let state_dir = project
-            .state_dir()
-            .map_or_else(|| data_dir.join("state"), Path::to_path_buf);
-
-        assert_eq!(paths.config_dir, project.config_dir());
-        assert_eq!(paths.data_dir, data_dir);
-        assert_eq!(paths.state_dir, state_dir);
-    }
-
-    #[test]
-    fn default_discovery_uses_the_target_application_identity() {
-        let current = AppPaths::discover(None)
-            .unwrap_or_else(|error| panic!("discover current paths: {error}"));
-        let target = AppPaths::discover_for(TARGET_CTXLANE, None)
-            .unwrap_or_else(|error| panic!("discover target paths: {error}"));
-
-        assert_same_paths(&current, &target);
-        assert_matches_platform_identity(&current, TARGET_CTXLANE);
-    }
-
-    #[test]
-    fn discovery_supports_legacy_and_target_platform_identities() {
-        assert_eq!(LEGACY_AICTX.qualifier(), "dev");
-        assert_eq!(LEGACY_AICTX.organization(), "Cloudsail");
-        assert_eq!(LEGACY_AICTX.application(), "aictx");
-        assert_eq!(TARGET_CTXLANE.qualifier(), "dev");
-        assert_eq!(TARGET_CTXLANE.organization(), "Cloudsail");
-        assert_eq!(TARGET_CTXLANE.application(), "ctxlane");
-
-        let legacy = AppPaths::discover_for(LEGACY_AICTX, None)
-            .unwrap_or_else(|error| panic!("discover legacy paths: {error}"));
-        let target = AppPaths::discover_for(TARGET_CTXLANE, None)
-            .unwrap_or_else(|error| panic!("discover target paths: {error}"));
-
-        assert_matches_platform_identity(&legacy, LEGACY_AICTX);
-        assert_matches_platform_identity(&target, TARGET_CTXLANE);
-        assert_ne!(legacy.config_dir, target.config_dir);
-        assert_ne!(legacy.data_dir, target.data_dir);
-        assert_ne!(legacy.state_dir, target.state_dir);
-    }
-
-    #[test]
-    fn explicit_root_is_independent_of_application_identity() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let root = temporary.path().join("explicit-root");
-        let legacy = AppPaths::discover_for(LEGACY_AICTX, Some(&root))
-            .unwrap_or_else(|error| panic!("discover legacy paths: {error}"));
-        let target = AppPaths::discover_for(TARGET_CTXLANE, Some(&root))
-            .unwrap_or_else(|error| panic!("discover target paths: {error}"));
-
-        assert_same_paths(&legacy, &target);
-        assert_same_paths(&legacy, &AppPaths::for_root(root));
-    }
-
-    #[test]
-    fn initialize_is_idempotent_and_secure() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
-        let store = MetadataStore::new(paths.clone());
-        assert!(store.initialize().is_ok());
-        assert!(matches!(store.initialize(), Ok(false)));
-        assert!(store.load_config().is_ok());
-        assert!(paths.config_file.exists());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&paths.config_file)
-                .unwrap_or_else(|error| panic!("metadata: {error}"))
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o077, 0);
-        }
-    }
-
-    #[test]
-    fn update_revalidates_before_commit() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("ctxlane")));
-        assert!(store.initialize().is_ok());
-        let result = store.update_config(|config| {
-            config.settings.telemetry = true;
-            Ok(())
-        });
-        assert!(result.is_err());
-        let config = store
-            .load_config()
-            .unwrap_or_else(|error| panic!("config remains readable: {error}"));
-        assert!(!config.settings.telemetry);
-    }
-
-    #[test]
-    fn metadata_store_rejects_non_managed_profile_state_directory() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
-        let store = MetadataStore::new(paths.clone());
-        store
-            .initialize()
-            .unwrap_or_else(|error| panic!("initialize: {error}"));
-        let mut config = store
-            .load_config()
-            .unwrap_or_else(|error| panic!("load config: {error}"));
-        let name = Name::parse("work").unwrap_or_else(|error| panic!("name: {error}"));
-        config.profiles.insert(
-            ProfileId::new(Provider::Codex, name),
-            Profile::Codex {
-                billing_domain: BillingDomain::ChatgptSubscription,
-                auth: CodexAuth::ChatgptOauth,
-                state_dir: paths.config_dir.clone(),
-                secret_ref: None,
-                account_hint: None,
-                expected_workspace_id: None,
-                credential_store: CodexCredentialStore::File,
-                trusted_runners_only: false,
-            },
-        );
-        write_toml(&paths.config_file, &config)
-            .unwrap_or_else(|error| panic!("write hand-edited config: {error}"));
-
-        let error = match store.load_config() {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("non-managed state directory should be rejected"),
-        };
-        assert!(error.contains("state_dir must be the managed directory"));
-    }
-
-    #[test]
-    fn derived_application_directories_inside_a_repository_are_rejected() {
-        let cwd = std::env::current_dir().unwrap_or_else(|error| panic!("current dir: {error}"));
-        if !cwd
-            .ancestors()
-            .any(|ancestor| ancestor.join(".git").exists())
-        {
-            return;
-        }
-        let error = match AppPaths::from_dirs(
-            cwd.join(".test-config"),
-            cwd.join(".test-data"),
-            cwd.join(".test-state"),
-        ) {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("repository-derived application paths should be rejected"),
-        };
-        assert!(error.contains("must not point inside the current Git worktree"));
-    }
-
-    #[test]
-    fn explicit_root_rejects_parent_components_before_missing_path_resolution() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let root = temporary
-            .path()
-            .join("missing")
-            .join("..")
-            .join("repository")
-            .join(".ctxlane");
-        let Err(error) = AppPaths::discover(Some(&root)) else {
-            panic!("root containing a parent component should be rejected");
-        };
-        assert!(error.to_string().contains("must not contain `.` or `..`"));
-        assert!(!temporary.path().join("repository/.ctxlane").exists());
-    }
-
-    #[test]
-    fn concurrent_context_selection_and_removal_preserve_cross_file_invariants() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
-        let store = MetadataStore::new(paths.clone());
-        store
-            .initialize()
-            .unwrap_or_else(|error| panic!("initialize: {error}"));
-
-        let profile_id = ProfileId::new(
-            Provider::Claude,
-            Name::parse("account").unwrap_or_else(|error| panic!("profile name: {error}")),
-        );
-        let personal =
-            Name::parse("personal").unwrap_or_else(|error| panic!("personal context: {error}"));
-        let work = Name::parse("work").unwrap_or_else(|error| panic!("work context: {error}"));
-        store
-            .update_config(|config| {
-                config.profiles.insert(
-                    profile_id.clone(),
-                    Profile::Claude {
-                        billing_domain: BillingDomain::AnthropicApi,
-                        auth: ClaudeAuth::ApiKey,
-                        state_dir: paths.profile_state_dir(Provider::Claude, profile_id.name()),
-                        secret_ref: Some("keyring://ctxlane/test-api-key".to_owned()),
-                        account_hint: None,
-                        expected_organization: None,
-                        wif: None,
-                    },
-                );
-                let context = Context {
-                    claude: Some(profile_id.clone()),
-                    codex: None,
-                };
-                config.contexts =
-                    BTreeMap::from([(personal.clone(), context.clone()), (work.clone(), context)]);
-                config.default_context = Some(personal.clone());
-                Ok(())
-            })
-            .unwrap_or_else(|error| panic!("seed contexts: {error}"));
-
-        let start = Arc::new(Barrier::new(3));
-        let selecting_store = store.clone();
-        let selecting_start = Arc::clone(&start);
-        let selecting_work = work.clone();
-        let selecting = thread::spawn(move || {
-            selecting_start.wait();
-            selecting_store.update_metadata(|config, state| {
-                if !config.contexts.contains_key(&selecting_work) {
-                    return Err(Error::ContextNotFound(selecting_work.to_string()));
-                }
-                state.current_context = Some(selecting_work.clone());
-                Ok(())
-            })
-        });
-
-        let removing_store = store.clone();
-        let removing_start = Arc::clone(&start);
-        let removing_work = work.clone();
-        let removing = thread::spawn(move || {
-            removing_start.wait();
-            removing_store.update_metadata(|config, state| {
-                if state.current_context.as_ref() == Some(&removing_work) {
-                    return Err(Error::InvalidInput("context is active".to_owned()));
-                }
-                config.contexts.remove(&removing_work);
-                Ok(())
-            })
-        });
-
-        start.wait();
-        let _ = selecting
-            .join()
-            .unwrap_or_else(|_| panic!("selection thread panicked"));
-        let _ = removing
-            .join()
-            .unwrap_or_else(|_| panic!("removal thread panicked"));
-
-        let (config, state) = store
-            .load_metadata()
-            .unwrap_or_else(|error| panic!("load consistent metadata: {error}"));
-        assert_eq!(
-            config.contexts.contains_key(&work),
-            state.current_context.as_ref() == Some(&work),
-            "a selected context must not be removed from config"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn secure_directory_rejects_a_symlinked_ancestor() {
-        use std::os::unix::fs::symlink;
-
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let target = temporary.path().join("target");
-        fs::create_dir(&target).unwrap_or_else(|error| panic!("create target: {error}"));
-        let linked = temporary.path().join("linked");
-        symlink(&target, &linked).unwrap_or_else(|error| panic!("create symlink: {error}"));
-
-        let Err(error) = ensure_secure_directory(&linked.join("sensitive")) else {
-            panic!("symlinked ancestor should be rejected");
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("symlinked security-sensitive path component")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sensitive_file_rejects_a_world_writable_ancestor() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let unsafe_directory = temporary.path().join("unsafe");
-        fs::create_dir(&unsafe_directory)
-            .unwrap_or_else(|error| panic!("create unsafe ancestor: {error}"));
-        fs::set_permissions(&unsafe_directory, fs::Permissions::from_mode(0o777))
-            .unwrap_or_else(|error| panic!("make ancestor writable: {error}"));
-        let sensitive = unsafe_directory.join("state.toml");
-        fs::write(&sensitive, "version = 1\n")
-            .unwrap_or_else(|error| panic!("write sensitive file: {error}"));
-        fs::set_permissions(&sensitive, fs::Permissions::from_mode(0o600))
-            .unwrap_or_else(|error| panic!("secure sensitive file: {error}"));
-
-        let Err(error) = validate_sensitive_file(&sensitive) else {
-            panic!("writable ancestor should be rejected");
-        };
-        assert!(error.to_string().contains("ancestor"));
-        assert!(
-            error
-                .to_string()
-                .contains("writable by group or other users")
-        );
-    }
-}
+#[path = "config/tests.rs"]
+mod tests;

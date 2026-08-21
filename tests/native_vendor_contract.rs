@@ -13,7 +13,8 @@ use ctxlane::{
     Error, Result,
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     model::{
-        BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Profile, ProfileId,
+        AutomationPolicy, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config,
+        Profile, ProfileId, ProfileUid,
     },
     runner::{RunOptions, run_profile, vendor_version},
     secret::{SecretProvider, SecretRef},
@@ -25,6 +26,18 @@ use tempfile::TempDir;
 const RECORD_FILE: &str = "native-vendor-record.json";
 const STATIC_SECRET_CANARY: &str = "ctxlane-native-fixture-static-secret-v1";
 const TRUSTED_PUSH_CHILD: &str = "CTXLANE_NATIVE_VENDOR_TRUSTED_PUSH_CHILD";
+
+fn derived_profile_uid(
+    store: &MetadataStore,
+    profile_id: &ProfileId,
+    state_dir: &Path,
+) -> ProfileUid {
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load installation identity: {error}"));
+    ProfileUid::for_state_dir(&config.installation_uid, profile_id.provider(), state_dir)
+        .unwrap_or_else(|error| panic!("derive profile UID: {error}"))
+}
 
 fn ctxlane(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ctxlane"));
@@ -174,7 +187,7 @@ fn native_version_preflight_rejects_exit_oversize_and_terminal_controls() {
         } else {
             trusted_vendor(&temporary, name)
         };
-        let mut config = Config::default();
+        let mut config = Config::new().unwrap_or_else(|error| panic!("config: {error}"));
         config.binaries.claude = executable;
         let error = match vendor_version(&config, ctxlane::model::Provider::Claude) {
             Ok(version) => panic!("{name} unexpectedly reported version {version}"),
@@ -453,6 +466,7 @@ fn native_static_claude_preflight_gates_the_main_process() {
     ensure_secure_directory(&state_dir)
         .unwrap_or_else(|error| panic!("create profile state: {error}"));
     let profile = Profile::Claude {
+        profile_uid: derived_profile_uid(&store, &profile_id, &state_dir),
         billing_domain: BillingDomain::AnthropicApi,
         auth: ClaudeAuth::ApiKey,
         state_dir: state_dir.clone(),
@@ -460,6 +474,7 @@ fn native_static_claude_preflight_gates_the_main_process() {
         account_hint: None,
         expected_organization: None,
         wif: None,
+        automation: AutomationPolicy::default(),
     };
     store
         .update_config(|config| {
@@ -584,6 +599,7 @@ fn native_codex_api_key_uses_stdin_login_and_keeps_secret_out_of_main_child() {
     ensure_secure_directory(&state_dir)
         .unwrap_or_else(|error| panic!("create profile state: {error}"));
     let profile = Profile::Codex {
+        profile_uid: derived_profile_uid(&store, &profile_id, &state_dir),
         billing_domain: BillingDomain::OpenaiApi,
         auth: CodexAuth::ApiKey,
         state_dir: state_dir.clone(),
@@ -592,6 +608,8 @@ fn native_codex_api_key_uses_stdin_login_and_keeps_secret_out_of_main_child() {
         expected_workspace_id: None,
         credential_store: CodexCredentialStore::File,
         trusted_runners_only: false,
+        wif: None,
+        automation: AutomationPolicy::default(),
     };
     store
         .update_config(|config| {

@@ -1,0 +1,86 @@
+version = 1
+default_context = "work"
+
+[settings]
+require_billing_confirmation_on_change = false
+show_run_banner = false
+telemetry = false
+
+[binaries]
+claude = "__CLAUDE_BIN__"
+codex = "__CODEX_BIN__"
+
+[profiles."claude:personal"]
+provider = "claude"
+billing_domain = "claude-subscription"
+auth = "subscription-token"
+state_dir = "__ROOT__/data/vendor-state/claude/personal"
+secret_ref = "keyring://ctxlane/frozen-claude-personal"
+account_hint = "personal@example.test"
+expected_organization = "org-personal"
+
+[profiles."claude:api"]
+provider = "claude"
+billing_domain = "anthropic-api"
+auth = "api-key"
+state_dir = "__ROOT__/data/vendor-state/claude/api"
+secret_ref = "keyring://ctxlane/frozen-claude-api"
+account_hint = "api@example.test"
+
+[profiles."claude:ci"]
+provider = "claude"
+billing_domain = "anthropic-api"
+auth = "wif"
+state_dir = "__ROOT__/data/vendor-state/claude/ci"
+account_hint = "ci@example.test"
+expected_organization = "org-ci"
+
+[profiles."claude:ci".wif]
+organization_id = "org-runtime"
+federation_rule_id = "rule-runtime"
+service_account_id = "service-runtime"
+workspace_id = "workspace-runtime"
+identity_token_file = "__TOKEN__"
+
+[profiles."codex:work"]
+provider = "codex"
+billing_domain = "chatgpt-subscription"
+auth = "chatgpt-oauth"
+state_dir = "__ROOT__/data/vendor-state/codex/work"
+account_hint = "work@example.test"
+expected_workspace_id = "workspace-work"
+credential_store = "file"
+trusted_runners_only = false
+
+[profiles."codex:api"]
+provider = "codex"
+billing_domain = "openai-api"
+auth = "api-key"
+state_dir = "__ROOT__/data/vendor-state/codex/api"
+secret_ref = "keyring://ctxlane/frozen-codex-api"
+account_hint = "openai-api@example.test"
+credential_store = "keyring"
+trusted_runners_only = false
+
+[profiles."codex:ci"]
+provider = "codex"
+billing_domain = "chatgpt-subscription"
+auth = "access-token"
+state_dir = "__ROOT__/data/vendor-state/codex/ci"
+secret_ref = "keyring://ctxlane/frozen-codex-ci"
+account_hint = "codex-ci@example.test"
+expected_workspace_id = "workspace-ci"
+credential_store = "auto"
+trusted_runners_only = true
+
+[contexts.work]
+claude = "claude:personal"
+codex = "codex:work"
+
+[contexts.ci]
+claude = "claude:ci"
+codex = "codex:ci"
+
+[[bindings]]
+path = "__BINDING__"
+context = "work"

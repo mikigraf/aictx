@@ -8,13 +8,14 @@ use std::{
 use ctxlane::{
     Error,
     config::{AppPaths, MetadataStore, ensure_secure_directory},
+    management::{ProfileDraft, add_profile, rename_profile},
     migration::{
         MigrationPlan, RecoveryOutcome, acquire_migration_startup_guard, migration_journal_path,
         migration_operation_lock_path, recover_incomplete,
     },
     model::{
-        BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Context, Name, Profile,
-        ProfileId,
+        AutomationPolicy, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config,
+        Context, Name, Profile, ProfileId, ProfileUid,
     },
 };
 use serde::Serialize;
@@ -52,34 +53,51 @@ impl Fixture {
         let binding_path = temporary.path().join("company-project");
         fs::create_dir(&binding_path)
             .unwrap_or_else(|error| panic!("create bound project: {error}"));
+        let claude_state = legacy.profile_state_dir(claude_id.provider(), claude_id.name());
+        let codex_state = legacy.profile_state_dir(codex_id.provider(), codex_id.name());
 
         store
             .update_config(|config| {
+                let claude_profile_uid = ProfileUid::for_state_dir(
+                    &config.installation_uid,
+                    claude_id.provider(),
+                    &claude_state,
+                )?;
+                let codex_profile_uid = ProfileUid::for_state_dir(
+                    &config.installation_uid,
+                    codex_id.provider(),
+                    &codex_state,
+                )?;
                 config.profiles.insert(
                     claude_id.clone(),
                     Profile::Claude {
+                        profile_uid: claude_profile_uid,
                         billing_domain: BillingDomain::ClaudeSubscription,
                         auth: ClaudeAuth::SubscriptionToken,
-                        state_dir: legacy.profile_state_dir(claude_id.provider(), claude_id.name()),
+                        state_dir: claude_state.clone(),
                         secret_ref: Some(
                             "keyring://aictx/claude-personal-opaque-handle".to_owned(),
                         ),
                         account_hint: Some("personal@example.test".to_owned()),
                         expected_organization: None,
                         wif: None,
+                        automation: AutomationPolicy::default(),
                     },
                 );
                 config.profiles.insert(
                     codex_id.clone(),
                     Profile::Codex {
+                        profile_uid: codex_profile_uid,
                         billing_domain: BillingDomain::ChatgptSubscription,
                         auth: CodexAuth::ChatgptOauth,
-                        state_dir: legacy.profile_state_dir(codex_id.provider(), codex_id.name()),
+                        state_dir: codex_state.clone(),
                         secret_ref: None,
                         account_hint: Some("work@example.test".to_owned()),
                         expected_workspace_id: Some("workspace-123".to_owned()),
                         credential_store: CodexCredentialStore::File,
                         trusted_runners_only: false,
+                        wif: None,
+                        automation: AutomationPolicy::default(),
                     },
                 );
                 config.contexts.insert(
@@ -104,8 +122,6 @@ impl Fixture {
             })
             .unwrap_or_else(|error| panic!("configure legacy state: {error}"));
 
-        let claude_state = legacy.profile_state_dir(claude_id.provider(), claude_id.name());
-        let codex_state = legacy.profile_state_dir(codex_id.provider(), codex_id.name());
         ensure_secure_directory(&claude_state)
             .unwrap_or_else(|error| panic!("create Claude state: {error}"));
         ensure_secure_directory(&codex_state)
@@ -539,213 +555,8 @@ fn malformed_toml_errors_redact_parser_input_and_private_metadata() {
     assert!(display.contains("parser details and input were redacted"));
 }
 
-#[test]
-fn verified_recovery_reconstructs_and_checks_the_complete_target() {
-    let intact = Fixture::new();
-    MigrationPlan::inspect(&intact.legacy, &intact.target)
-        .unwrap_or_else(|error| panic!("inspect intact migration: {error}"))
-        .execute()
-        .unwrap_or_else(|error| panic!("execute intact migration: {error}"));
-    install_recovery_journal(&intact, "verified");
-    assert_eq!(
-        recover_incomplete(&intact.legacy, &intact.target)
-            .unwrap_or_else(|error| panic!("finalize intact migration: {error}")),
-        RecoveryOutcome::Finalized
-    );
-
-    let corrupted = Fixture::new();
-    MigrationPlan::inspect(&corrupted.legacy, &corrupted.target)
-        .unwrap_or_else(|error| panic!("inspect corrupt migration: {error}"))
-        .execute()
-        .unwrap_or_else(|error| panic!("execute corrupt migration: {error}"));
-    install_recovery_journal(&corrupted, "verified");
-    write_private(
-        &corrupted
-            .target
-            .data_dir
-            .join("vendor-state/claude/personal/session.json"),
-        b"corrupted\n",
-    );
-    assert!(recover_incomplete(&corrupted.legacy, &corrupted.target).is_err());
-    assert!(migration_journal_path(&corrupted.target).is_file());
-
-    let missing = Fixture::new();
-    MigrationPlan::inspect(&missing.legacy, &missing.target)
-        .unwrap_or_else(|error| panic!("inspect missing-target migration: {error}"))
-        .execute()
-        .unwrap_or_else(|error| panic!("execute missing-target migration: {error}"));
-    install_recovery_journal(&missing, "verified");
-    fs::remove_dir_all(&missing.target.state_dir)
-        .unwrap_or_else(|error| panic!("remove committed target anchor: {error}"));
-    assert!(recover_incomplete(&missing.legacy, &missing.target).is_err());
-    assert!(migration_journal_path(&missing.target).is_file());
-}
-
-#[test]
-fn recovery_rolls_back_only_journal_owned_partial_targets() {
-    let fixture = Fixture::new();
-    let transaction_id = "deadbeef-1234";
-    let mut targets = [
-        fixture.target.config_dir.clone(),
-        fixture.target.data_dir.clone(),
-        fixture.target.state_dir.clone(),
-    ];
-    targets.sort();
-    let anchors = targets
-        .iter()
-        .enumerate()
-        .map(|(index, target)| RecoveryAnchor {
-            target: target.clone(),
-            stage: target.with_file_name(format!(
-                ".{}.ctxlane-migration-stage-{transaction_id}-{index}",
-                target
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .unwrap_or("ctxlane")
-            )),
-            committed: index == 1,
-        })
-        .collect::<Vec<_>>();
-
-    for (index, anchor) in anchors.iter().enumerate() {
-        let owned = if index == 1 {
-            &anchor.target
-        } else {
-            &anchor.stage
-        };
-        ensure_secure_directory(owned)
-            .unwrap_or_else(|error| panic!("create recovery artifact: {error}"));
-        write_private(
-            &owned.join(".ctxlane-migration-owner"),
-            format!("{transaction_id}\n").as_bytes(),
-        );
-        write_private(&owned.join("partial-data"), b"partial\n");
-    }
-
-    let journal = RecoveryJournal {
-        version: 1,
-        transaction_id,
-        legacy: RecoveryPaths::from(&fixture.legacy),
-        target: RecoveryPaths::from(&fixture.target),
-        phase: "committing",
-        anchors,
-    };
-    let journal_text = toml::to_string_pretty(&journal)
-        .unwrap_or_else(|error| panic!("serialize recovery journal: {error}"));
-    let journal_path = migration_journal_path(&fixture.target);
-    write_private(&journal_path, format!("{journal_text}\n").as_bytes());
-    let collision = fixture
-        .target
-        .data_dir
-        .with_file_name(".data.ctxlane-migration-rollback-deadbeef-1234-1-0");
-    ensure_secure_directory(&collision)
-        .unwrap_or_else(|error| panic!("create archive collision: {error}"));
-    write_private(&collision.join("sentinel"), b"keep\n");
-
-    let outcome = recover_incomplete(&fixture.legacy, &fixture.target)
-        .unwrap_or_else(|error| panic!("recover partial migration: {error}"));
-    let RecoveryOutcome::RolledBack { archives } = outcome else {
-        panic!("partial migration should be rolled back");
-    };
-    assert_eq!(archives.len(), 1);
-    assert_ne!(archives[0], collision);
-    assert_eq!(
-        fs::read(collision.join("sentinel"))
-            .unwrap_or_else(|error| panic!("read collision sentinel: {error}")),
-        b"keep\n"
-    );
-    assert_eq!(
-        fs::read(archives[0].join("partial-data"))
-            .unwrap_or_else(|error| panic!("read archived partial target: {error}")),
-        b"partial\n"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::symlink_metadata(&archives[0])
-            .unwrap_or_else(|error| panic!("inspect private archive: {error}"))
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o700);
-    }
-    assert!(!journal_path.exists());
-    assert!(targets.iter().all(|target| !target.exists()));
-    fixture.assert_legacy_metadata_unchanged();
-}
-
-fn install_recovery_journal(fixture: &Fixture, phase: &str) {
-    let transaction_id = "deadbeef-9876";
-    let mut targets = [
-        fixture.target.config_dir.clone(),
-        fixture.target.data_dir.clone(),
-        fixture.target.state_dir.clone(),
-    ];
-    targets.sort();
-    let anchors = targets
-        .iter()
-        .enumerate()
-        .map(|(index, target)| RecoveryAnchor {
-            target: target.clone(),
-            stage: target.with_file_name(format!(
-                ".{}.ctxlane-migration-stage-{transaction_id}-{index}",
-                target
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .unwrap_or("ctxlane")
-            )),
-            committed: true,
-        })
-        .collect();
-    let journal = RecoveryJournal {
-        version: 1,
-        transaction_id,
-        legacy: RecoveryPaths::from(&fixture.legacy),
-        target: RecoveryPaths::from(&fixture.target),
-        phase,
-        anchors,
-    };
-    let text = toml::to_string_pretty(&journal)
-        .unwrap_or_else(|error| panic!("serialize recovery journal: {error}"));
-    write_private(
-        &migration_journal_path(&fixture.target),
-        format!("{text}\n").as_bytes(),
-    );
-}
-
-#[derive(Serialize)]
-struct RecoveryJournal<'a> {
-    version: u32,
-    transaction_id: &'a str,
-    legacy: RecoveryPaths,
-    target: RecoveryPaths,
-    phase: &'a str,
-    anchors: Vec<RecoveryAnchor>,
-}
-
-#[derive(Serialize)]
-struct RecoveryPaths {
-    config: PathBuf,
-    data: PathBuf,
-    state: PathBuf,
-}
-
-impl From<&AppPaths> for RecoveryPaths {
-    fn from(paths: &AppPaths) -> Self {
-        Self {
-            config: paths.config_dir.clone(),
-            data: paths.data_dir.clone(),
-            state: paths.state_dir.clone(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct RecoveryAnchor {
-    target: PathBuf,
-    stage: PathBuf,
-    committed: bool,
-}
-
+#[path = "migration_core/recovery.rs"]
+mod recovery;
 fn assert_migrated_profiles(config: &Config, target: &AppPaths) {
     let profiles = config
         .profiles

@@ -19,10 +19,12 @@ use crate::{
     binary::{ExternalProgram, resolve_external_binary, sanitize_search_path},
     brand::is_wrapper_environment_key,
     config::{
-        AppPaths, MetadataStore, ProfileLockGuard, acquire_profile_lock, ensure_secure_directory,
-        validate_sensitive_file, write_secure_text,
+        AppPaths, MetadataStore, ProfileLockGuard, acquire_ordered_profile_locks,
+        ensure_secure_directory, validate_sensitive_file, write_secure_text,
     },
-    model::{ClaudeAuth, CodexAuth, Config, Profile, ProfileId, Provider},
+    model::{
+        ClaudeAuth, CodexAuth, Config, Profile, ProfileId, Provider, validate_wif_token_location,
+    },
     secret::{SecretProvider, parse_profile_secret_ref, write_secret_to_stdin},
 };
 
@@ -57,6 +59,9 @@ pub const BLOCKED_ENVIRONMENT: &[&str] = &[
     "ANTHROPIC_BEDROCK_BASE_URL",
     "ANTHROPIC_VERTEX_BASE_URL",
     "OPENAI_API_KEY",
+    "OPENAI_FEDERATION_RULE_ID",
+    "OPENAI_IDENTITY_TOKEN_FILE",
+    "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
     "OPENAI_ORGANIZATION",
     "OPENAI_PROJECT",
     "OPENAI_ORG_ID",
@@ -213,6 +218,18 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
+    if matches!(
+        profile,
+        Profile::Codex {
+            auth: CodexAuth::Wif,
+            ..
+        }
+    ) {
+        return Err(Error::VendorIncompatible(
+            "Codex WIF enrollment is configured, but native runtime qualification is not enabled in this release"
+                .to_owned(),
+        ));
+    }
     let mut output = sanitized_inherited_environment(base)?;
     apply_profile_environment(profile, secret, &mut output)?;
     Ok(output)
@@ -293,8 +310,34 @@ fn apply_profile_environment(
                 }
             }
         }
-        Profile::Codex { state_dir, .. } => {
+        Profile::Codex {
+            auth,
+            state_dir,
+            wif,
+            ..
+        } => {
             output.insert("CODEX_HOME".into(), state_dir.as_os_str().to_owned());
+            if *auth == CodexAuth::Wif {
+                let wif = wif.as_ref().ok_or_else(|| {
+                    Error::InvalidConfig("Codex WIF profile is missing metadata".to_owned())
+                })?;
+                output.insert(
+                    "OPENAI_FEDERATION_RULE_ID".into(),
+                    wif.federation_rule_id.clone().into(),
+                );
+                output.insert(
+                    "OPENAI_IDENTITY_TOKEN_FILE".into(),
+                    wif.identity_token_file.as_os_str().to_owned(),
+                );
+                if let Some(context) = &wif.workload_identity_context {
+                    let encoded = serde_json::to_string(context).map_err(|_| {
+                        Error::InvalidConfig(
+                            "Codex workload identity context could not be encoded".to_owned(),
+                        )
+                    })?;
+                    output.insert("OPENAI_WORKLOAD_IDENTITY_CONTEXT".into(), encoded.into());
+                }
+            }
         }
     }
 
@@ -310,18 +353,29 @@ pub fn run_profile(
     secrets: &dyn SecretProvider,
     options: &RunOptions,
 ) -> Result<i32> {
-    let exclusive_run_lock = matches!(
+    require_authoritative_config(config)?;
+    let alias_path = paths.profile_lock(profile.provider(), profile_id.name());
+    let lifecycle_path = paths.profile_lifecycle_lock(profile.profile_uid());
+    let resource_path = paths.profile_resource_lock(profile.profile_uid());
+    let locks = acquire_ordered_profile_locks([
+        (alias_path, false),
+        (lifecycle_path.clone(), false),
+        (resource_path, true),
+    ])?;
+    let lifecycle = locks.guard(&lifecycle_path)?;
+    ensure_profile_is_current(paths, profile_id, profile)?;
+    if matches!(
         profile,
         Profile::Codex {
-            auth: CodexAuth::ChatgptOauth | CodexAuth::ApiKey | CodexAuth::AccessToken,
+            auth: CodexAuth::Wif,
             ..
         }
-    );
-    let lifecycle = acquire_profile_lock(
-        &paths.profile_lock(profile.provider(), profile_id.name()),
-        exclusive_run_lock,
-    )?;
-    ensure_profile_is_current(paths, profile_id, profile)?;
+    ) {
+        return Err(Error::VendorIncompatible(
+            "Codex WIF enrollment is configured, but native runtime qualification is not enabled in this release"
+                .to_owned(),
+        ));
+    }
     ensure_secure_directory(profile.state_dir())?;
     let program = resolve_vendor_binary(config, profile.provider())?;
 
@@ -335,12 +389,17 @@ pub fn run_profile(
                 .as_ref()
                 .ok_or_else(|| Error::InvalidConfig("missing WIF metadata".to_owned()))?
                 .identity_token_file;
+            validate_wif_token_location(profile_id, token_file)?;
             validate_sensitive_file(token_file)?;
         }
         Profile::Claude { .. } => {}
+        Profile::Codex {
+            auth: CodexAuth::Wif,
+            ..
+        } => unreachable!("Codex WIF is refused before vendor-state preparation"),
         Profile::Codex { .. } => {
             validate_codex_settings(profile.state_dir(), &options.cwd)?;
-            ensure_codex_config(paths, profile_id, profile, &lifecycle)?;
+            ensure_codex_config(paths, profile_id, profile, lifecycle)?;
         }
     }
 
@@ -358,7 +417,7 @@ pub fn run_profile(
         }
     ) && options.non_interactive
     {
-        codex_login_status(config, paths, profile_id, profile, &lifecycle)?;
+        codex_login_status(config, paths, profile_id, profile, lifecycle)?;
     }
 
     let secret = if profile.requires_static_secret() {
@@ -379,10 +438,12 @@ pub fn run_profile(
         let login_flag = match auth {
             CodexAuth::ApiKey => "--with-api-key",
             CodexAuth::AccessToken => "--with-access-token",
-            CodexAuth::ChatgptOauth => unreachable!("matched only static Codex auth modes"),
+            CodexAuth::Wif | CodexAuth::ChatgptOauth => {
+                unreachable!("matched only static Codex auth modes")
+            }
         };
         let login_code = codex_static_login(
-            config, paths, profile_id, profile, selected, login_flag, &lifecycle,
+            config, paths, profile_id, profile, selected, login_flag, lifecycle,
         )?;
         if login_code != 0 {
             return Ok(login_code);
@@ -397,7 +458,7 @@ pub fn run_profile(
         let selected = secret.as_ref().ok_or_else(|| {
             Error::InvalidConfig("Claude static profile resolved no credential".to_owned())
         })?;
-        validate_claude_local_auth_route(config, profile_id, profile, *auth, selected, &lifecycle)?;
+        validate_claude_local_auth_route(config, profile_id, profile, *auth, selected, lifecycle)?;
     }
 
     let environment = build_environment(
@@ -679,10 +740,16 @@ pub fn credential_state(
     secrets: &dyn SecretProvider,
     non_interactive: bool,
 ) -> Result<CredentialState> {
-    let lifecycle = acquire_profile_lock(
-        &paths.profile_lock(profile.provider(), profile_id.name()),
-        false,
-    )?;
+    require_authoritative_config(config)?;
+    let alias_path = paths.profile_lock(profile.provider(), profile_id.name());
+    let lifecycle_path = paths.profile_lifecycle_lock(profile.profile_uid());
+    let resource_path = paths.profile_resource_lock(profile.profile_uid());
+    let locks = acquire_ordered_profile_locks([
+        (alias_path, false),
+        (lifecycle_path.clone(), false),
+        (resource_path, true),
+    ])?;
+    let lifecycle = locks.guard(&lifecycle_path)?;
     ensure_profile_is_current(paths, profile_id, profile)?;
     enforce_pull_request_static_secret_policy(profile)?;
     match profile {
@@ -695,6 +762,7 @@ pub fn credential_state(
                 .as_ref()
                 .ok_or_else(|| Error::InvalidConfig("missing WIF metadata".to_owned()))?
                 .identity_token_file;
+            validate_wif_token_location(profile_id, path)?;
             if !path.exists() {
                 return Ok(CredentialState::Unavailable);
             }
@@ -714,7 +782,7 @@ pub fn credential_state(
                 Err(error) => return Err(error),
             };
             let status = validate_claude_local_auth_route(
-                config, profile_id, profile, *auth, &secret, &lifecycle,
+                config, profile_id, profile, *auth, &secret, lifecycle,
             );
             drop(secret);
             status?;
@@ -722,6 +790,22 @@ pub fn credential_state(
             // route. A successful response proves that the CLI recognized the
             // intended auth method, but it does not prove that Anthropic will
             // accept the credential.
+            Ok(CredentialState::Unverified)
+        }
+        Profile::Codex {
+            auth: CodexAuth::Wif,
+            wif,
+            ..
+        } => {
+            let path = &wif
+                .as_ref()
+                .ok_or_else(|| Error::InvalidConfig("missing Codex WIF metadata".to_owned()))?
+                .identity_token_file;
+            validate_wif_token_location(profile_id, path)?;
+            if !path.exists() {
+                return Ok(CredentialState::Unavailable);
+            }
+            validate_sensitive_file(path)?;
             Ok(CredentialState::Unverified)
         }
         Profile::Codex {
@@ -744,7 +828,7 @@ pub fn credential_state(
             if !secrets.exists_compatible(&reference, non_interactive)? {
                 return Ok(CredentialState::Unavailable);
             }
-            match codex_login_status(config, paths, profile_id, profile, &lifecycle) {
+            match codex_login_status(config, paths, profile_id, profile, lifecycle) {
                 Ok(()) => Ok(CredentialState::Available),
                 Err(Error::CredentialUnavailable { .. }) => Ok(CredentialState::Unverified),
                 Err(error) => Err(error),
@@ -756,13 +840,24 @@ pub fn credential_state(
             ..
         } => {
             validate_current_codex_settings(profile)?;
-            match codex_login_status(config, paths, profile_id, profile, &lifecycle) {
+            match codex_login_status(config, paths, profile_id, profile, lifecycle) {
                 Ok(()) if expected_workspace_id.is_some() => Ok(CredentialState::Available),
                 Ok(()) => Ok(CredentialState::Unverified),
                 Err(Error::CredentialUnavailable { .. }) => Ok(CredentialState::Unavailable),
                 Err(error) => Err(error),
             }
         }
+    }
+}
+
+fn require_authoritative_config(config: &Config) -> Result<()> {
+    if config.is_authoritative() {
+        Ok(())
+    } else {
+        Err(Error::InvalidConfig(
+            "non-authoritative legacy diagnostic metadata cannot prepare or inspect vendor execution"
+                .to_owned(),
+        ))
     }
 }
 
@@ -902,6 +997,12 @@ fn ensure_codex_config(
     let forced_login = match auth {
         CodexAuth::ApiKey => "api",
         CodexAuth::ChatgptOauth | CodexAuth::AccessToken => "chatgpt",
+        CodexAuth::Wif => {
+            return Err(Error::PolicyRefused(
+                "Codex WIF settings must be supplied only through the official environment contract"
+                    .to_owned(),
+            ));
+        }
     };
     document["forced_login_method"] = value(forced_login);
     document["cli_auth_credentials_store"] = value(credential_store.to_string());
@@ -1932,13 +2033,24 @@ fn is_vendor_environment_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::PathBuf,
+    };
 
     use tempfile::TempDir;
 
-    use crate::model::{BillingDomain, CodexCredentialStore, WifConfig};
+    use crate::model::{
+        AutomationPolicy, BillingDomain, CodexCredentialStore, CodexWifConfig, ProfileUid,
+        WifConfig,
+    };
 
     use super::*;
+
+    fn uid(index: u32) -> ProfileUid {
+        ProfileUid::parse(format!("profile_{index:026}"))
+            .unwrap_or_else(|error| panic!("profile UID: {error}"))
+    }
 
     // This fixture deliberately leaves a finite-lived descendant holding stdout open so the
     // caller can prove that output capture never waits for a process it does not own.
@@ -2109,6 +2221,7 @@ mod tests {
 
     fn claude_profile(auth: ClaudeAuth) -> Profile {
         Profile::Claude {
+            profile_uid: uid(1),
             billing_domain: if auth == ClaudeAuth::SubscriptionToken {
                 BillingDomain::ClaudeSubscription
             } else {
@@ -2126,11 +2239,13 @@ mod tests {
                 workspace_id: Some("workspace".to_owned()),
                 identity_token_file: PathBuf::from("/tmp/token"),
             }),
+            automation: AutomationPolicy::default(),
         }
     }
 
     fn codex_api_profile() -> Profile {
         Profile::Codex {
+            profile_uid: uid(2),
             billing_domain: BillingDomain::OpenaiApi,
             auth: CodexAuth::ApiKey,
             state_dir: PathBuf::from("/tmp/ctxlane-codex"),
@@ -2139,6 +2254,8 @@ mod tests {
             expected_workspace_id: None,
             credential_store: CodexCredentialStore::File,
             trusted_runners_only: false,
+            wif: None,
+            automation: AutomationPolicy::default(),
         }
     }
 
@@ -2263,6 +2380,41 @@ mod tests {
             environment.get(OsStr::new("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")),
             Some(&OsString::from("1"))
         );
+    }
+
+    #[test]
+    fn codex_wif_environment_prep_refuses_before_reading_the_base_environment() {
+        let profile = Profile::Codex {
+            profile_uid: uid(9),
+            billing_domain: BillingDomain::ChatgptSubscription,
+            auth: CodexAuth::Wif,
+            state_dir: PathBuf::from("/private/CREDENTIAL_CANARY_state"),
+            secret_ref: None,
+            account_hint: None,
+            expected_workspace_id: None,
+            credential_store: CodexCredentialStore::File,
+            trusted_runners_only: false,
+            wif: Some(CodexWifConfig {
+                federation_rule_id: "idpm_CREDENTIAL_CANARY_rule".to_owned(),
+                identity_token_file: PathBuf::from("/private/CREDENTIAL_CANARY_token"),
+                expected_workspace: "chatgpt-workspace:CREDENTIAL_CANARY".to_owned(),
+                expected_principal: "service-account:CREDENTIAL_CANARY".to_owned(),
+                allowed_environments: BTreeSet::from(["local-development".to_owned()]),
+                allowed_workload_labels: BTreeMap::new(),
+                workload_identity_context: None,
+                minimum_codex_version: "0.148.0".to_owned(),
+            }),
+            automation: AutomationPolicy::default(),
+        };
+        let base = std::iter::once_with(|| -> (&str, &str) {
+            panic!("Codex WIF refusal must not inspect inherited environment")
+        });
+        let Err(error) = build_environment(&profile, None, base) else {
+            panic!("Codex WIF environment must be refused");
+        };
+        assert!(matches!(error, Error::VendorIncompatible(_)));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("CREDENTIAL_CANARY"));
     }
 
     #[test]

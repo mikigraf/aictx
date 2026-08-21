@@ -5,7 +5,7 @@ use clap::CommandFactory;
 use crate::{
     Error, Result,
     cli::{Cli, Shell},
-    model::{Config, Context, Name, Provider},
+    model::{CodexAuth, Config, Context, Name, Profile, Provider},
 };
 
 #[must_use]
@@ -101,13 +101,30 @@ function codex {{
     })
 }
 
-#[must_use]
 pub fn environment_lines(
     config: &Config,
     context_name: &Name,
     context: &Context,
     shell: Shell,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
+    if context
+        .profile(Provider::Codex)
+        .and_then(|profile_id| config.profiles.get(profile_id))
+        .is_some_and(|profile| {
+            matches!(
+                profile,
+                Profile::Codex {
+                    auth: CodexAuth::Wif,
+                    ..
+                }
+            )
+        })
+    {
+        return Err(Error::VendorIncompatible(
+            "Codex WIF enrollment is configured, but environment export is unavailable until native runtime qualification is enabled"
+                .to_owned(),
+        ));
+    }
     let mut values = vec![("CTXLANE_CONTEXT", context_name.to_string())];
     if let Some(profile_id) = context.profile(Provider::Claude)
         && let Some(profile) = config.profiles.get(profile_id)
@@ -123,14 +140,14 @@ pub fn environment_lines(
         values.push(("CODEX_HOME", profile.state_dir().display().to_string()));
     }
 
-    values
+    Ok(values
         .into_iter()
         .map(|(key, value)| match shell {
             Shell::Bash | Shell::Zsh => format!("export {key}={}", quote_posix(&value)),
             Shell::Fish => format!("set -gx {key} {}", quote_fish(&value)),
             Shell::Powershell => format!("$Env:{key} = {}", quote_powershell(&value)),
         })
-        .collect()
+        .collect())
 }
 
 pub fn generate_completions(shell: clap_complete::Shell) {
@@ -152,6 +169,13 @@ fn quote_powershell(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use crate::model::{
+        AutomationPolicy, BillingDomain, CodexCredentialStore, CodexWifConfig, ProfileId,
+        ProfileUid,
+    };
+
     use super::*;
 
     #[test]
@@ -196,5 +220,48 @@ mod tests {
             powershell
                 .contains("& 'C:/trusted/ctxlane.exe' --root 'C:/safe/root''s state' run codex")
         );
+    }
+
+    #[test]
+    fn environment_export_refuses_unqualified_codex_wif() {
+        let profile_id: ProfileId = "codex:factory"
+            .parse()
+            .unwrap_or_else(|error| panic!("profile ID: {error}"));
+        let profile = Profile::Codex {
+            profile_uid: ProfileUid::parse("profile_00000000000000000000000001")
+                .unwrap_or_else(|error| panic!("profile UID: {error}")),
+            billing_domain: BillingDomain::ChatgptSubscription,
+            auth: CodexAuth::Wif,
+            state_dir: "/private/CREDENTIAL_CANARY_state".into(),
+            secret_ref: None,
+            account_hint: None,
+            expected_workspace_id: None,
+            credential_store: CodexCredentialStore::File,
+            trusted_runners_only: false,
+            wif: Some(CodexWifConfig {
+                federation_rule_id: "idpm_CREDENTIAL_CANARY_rule".to_owned(),
+                identity_token_file: "/private/CREDENTIAL_CANARY_token".into(),
+                expected_workspace: "chatgpt-workspace:CREDENTIAL_CANARY".to_owned(),
+                expected_principal: "service-account:CREDENTIAL_CANARY".to_owned(),
+                allowed_environments: BTreeSet::from(["local-development".to_owned()]),
+                allowed_workload_labels: BTreeMap::new(),
+                workload_identity_context: None,
+                minimum_codex_version: "0.148.0".to_owned(),
+            }),
+            automation: AutomationPolicy::default(),
+        };
+        let mut config = Config::new().unwrap_or_else(|error| panic!("config: {error}"));
+        config.profiles.insert(profile_id.clone(), profile);
+        let context = Context {
+            claude: None,
+            codex: Some(profile_id),
+        };
+        let name = Name::parse("factory").unwrap_or_else(|error| panic!("name: {error}"));
+        let Err(error) = environment_lines(&config, &name, &context, Shell::Bash) else {
+            panic!("Codex WIF environment export must fail");
+        };
+        assert!(matches!(error, Error::VendorIncompatible(_)));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("CREDENTIAL_CANARY"));
     }
 }

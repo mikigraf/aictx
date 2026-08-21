@@ -12,8 +12,11 @@ use super::{
 };
 use crate::{
     Error, Result,
-    config::{AppPaths, ensure_secure_directory, write_secure_text},
-    model::{Config, MutableState},
+    config::{
+        AppPaths, decode_config_for_migration, ensure_secure_directory,
+        expected_legacy_v1_target_config, write_secure_text,
+    },
+    model::{Config, InstallationUid, MutableState},
 };
 
 pub(super) const JOURNAL_VERSION: u32 = 1;
@@ -25,6 +28,8 @@ const STAGE_FRAGMENT: &str = ".ctxlane-migration-stage-";
 pub(super) struct MigrationJournal {
     pub(super) version: u32,
     pub(super) transaction_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) installation_uid: Option<InstallationUid>,
     pub(super) legacy: PathSignature,
     pub(super) target: PathSignature,
     pub(super) phase: JournalPhase,
@@ -227,6 +232,7 @@ fn prepare(
         let journal = MigrationJournal {
             version: JOURNAL_VERSION,
             transaction_id: transaction_id.to_owned(),
+            installation_uid: Some(plan.migrated_config.installation_uid.clone()),
             legacy: PathSignature::from(&plan.legacy),
             target: PathSignature::from(&plan.target),
             phase: JournalPhase::Staging,
@@ -386,6 +392,97 @@ pub(super) fn verify_committed_target(
         &marker_paths,
     )?;
     Ok(())
+}
+
+/// Verify a target committed by the last schema-v1 migrator.
+///
+/// Old verified journals did not persist the randomly chosen config-v2
+/// installation identity because their target was still schema v1. Recovery
+/// therefore verifies the exact frozen v1 serialization and copy manifest,
+/// finalizes the journal, and leaves ordinary metadata loading to perform the
+/// separately locked v1-to-v2 upgrade.
+pub(super) fn verify_legacy_v1_committed_target(
+    legacy: &AppPaths,
+    target: &AppPaths,
+    anchors: &[JournalAnchor],
+    transaction_id: &str,
+) -> Result<()> {
+    let source_config = filesystem::read_sensitive_bytes(&legacy.config_file)?;
+    let expected_config =
+        expected_legacy_v1_target_config(&legacy.config_file, &source_config, target)?;
+    let actual_config = filesystem::read_sensitive_bytes(&target.config_file)?;
+    if actual_config != expected_config {
+        return Err(Error::InvalidConfig(
+            "committed schema-v1 migration configuration does not match its frozen source"
+                .to_owned(),
+        ));
+    }
+
+    let source_state = filesystem::read_optional_sensitive_bytes(&legacy.state_file)?;
+    let state: MutableState = source_state.as_deref().map_or_else(
+        || Ok(MutableState::default()),
+        |bytes| filesystem::parse_toml(&legacy.state_file, bytes),
+    )?;
+    let expected_state = format!("{}\n", toml::to_string_pretty(&state)?);
+    let actual_state = filesystem::read_sensitive_bytes(&target.state_file)?;
+    if actual_state != expected_state.as_bytes() {
+        return Err(Error::InvalidConfig(
+            "committed schema-v1 migration state does not match its frozen source".to_owned(),
+        ));
+    }
+
+    let recovery_uid = InstallationUid::parse("installation_00000000000000000000000001")?;
+    let config =
+        decode_config_for_migration(&target.config_file, &actual_config, Some(&recovery_uid))?;
+    validate_managed_metadata(&config, &state, target, "migrated")?;
+
+    let (vendor_entries, _) = filesystem::vendor_manifest(&legacy.data_dir.join("vendor-state"))?;
+    filesystem::verify_vendor_copy(
+        &vendor_entries,
+        &legacy.data_dir.join("vendor-state"),
+        &target.data_dir.join("vendor-state"),
+    )?;
+    let marker_paths = verified_marker_paths(anchors, transaction_id, false)?;
+    filesystem::verify_exact_target_layout(
+        target,
+        &vendor_entries,
+        &anchors
+            .iter()
+            .map(|anchor| anchor.target.clone())
+            .collect::<Vec<_>>(),
+        &marker_paths,
+    )
+}
+
+fn verified_marker_paths(
+    anchors: &[JournalAnchor],
+    transaction_id: &str,
+    require_markers: bool,
+) -> Result<Vec<PathBuf>> {
+    let mut marker_paths = Vec::new();
+    for anchor in anchors {
+        let marker = anchor.target.join(OWNER_MARKER);
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => {
+                validate_owner_marker(&anchor.target, transaction_id)?;
+                marker_paths.push(marker);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound && !require_markers => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::InvalidConfig(format!(
+                    "migration ownership marker is missing from {}",
+                    anchor.target.display()
+                )));
+            }
+            Err(source) => {
+                return Err(Error::ReadFile {
+                    path: marker,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(marker_paths)
 }
 
 pub(super) fn validate_owner_marker(path: &Path, transaction_id: &str) -> Result<()> {

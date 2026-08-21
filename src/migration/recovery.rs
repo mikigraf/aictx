@@ -36,17 +36,35 @@ pub(super) fn recover(legacy: &AppPaths, target: &AppPaths) -> Result<RecoveryOu
     let mut migration: MigrationJournal = filesystem::parse_toml(&path, &bytes)?;
     validate(&migration, legacy, target)?;
     if migration.phase == JournalPhase::Verified {
-        let plan =
-            MigrationPlan::inspect_source(legacy, target, filesystem::target_anchors(target))?;
+        let recovery_uid = if let Some(uid) = migration.installation_uid.clone() {
+            uid
+        } else {
+            crate::model::InstallationUid::parse("installation_00000000000000000000000001")?
+        };
+        let plan = MigrationPlan::inspect_source_with_installation_uid(
+            legacy,
+            target,
+            filesystem::target_anchors(target),
+            Some(&recovery_uid),
+        )?;
         let _profile_locks = plan.acquire_legacy_profile_locks()?;
         let _metadata_lock = filesystem::acquire_legacy_metadata_lock(legacy)?;
         plan.revalidate_source()?;
-        journal::verify_committed_target(
-            &plan,
-            &migration.anchors,
-            &migration.transaction_id,
-            false,
-        )?;
+        if migration.installation_uid.is_some() {
+            journal::verify_committed_target(
+                &plan,
+                &migration.anchors,
+                &migration.transaction_id,
+                false,
+            )?;
+        } else {
+            journal::verify_legacy_v1_committed_target(
+                legacy,
+                target,
+                &migration.anchors,
+                &migration.transaction_id,
+            )?;
+        }
         for anchor in &migration.anchors {
             journal::remove_owner_marker_if_present(&anchor.target, &migration.transaction_id)?;
             remove_owned_tree_if_present(&anchor.stage, &migration.transaction_id)?;

@@ -567,6 +567,7 @@ dependencies = [
  "crossterm",
  "directories",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "keyring",
  "portable-pty",
  "ratatui",

@@ -10,7 +10,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: u32 = 1;
+mod automation;
+mod profile_uid;
+mod validation;
+mod wif;
+
+pub use automation::{
+    AutomationConcurrencyMode, AutomationPolicy, AutomationProfileView, AutomationRole,
+    SharedStateIsolationRequirement,
+};
+pub use profile_uid::{InstallationUid, ProfileUid};
+pub(crate) use wif::validate_wif_token_location;
+pub use wif::{ClaudeWifConfig, CodexWifConfig, WorkloadIdentityContext};
+
+/// Current persisted configuration schema.
+pub const CONFIG_SCHEMA_VERSION: u32 = 2;
+/// Current mutable-state schema. Configuration migration does not rewrite it.
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+/// Compatibility alias for callers which refer to the configuration schema.
+pub const SCHEMA_VERSION: u32 = CONFIG_SCHEMA_VERSION;
+/// Compatibility alias for the original Claude WIF metadata name.
+pub type WifConfig = ClaudeWifConfig;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Name(String);
@@ -203,6 +223,7 @@ impl fmt::Display for ClaudeAuth {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexAuth {
+    Wif,
     ChatgptOauth,
     ApiKey,
     AccessToken,
@@ -211,6 +232,7 @@ pub enum CodexAuth {
 impl fmt::Display for CodexAuth {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Wif => "wif",
             Self::ChatgptOauth => "chatgpt-oauth",
             Self::ApiKey => "api-key",
             Self::AccessToken => "access-token",
@@ -258,21 +280,11 @@ impl fmt::Display for CodexCredentialStore {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WifConfig {
-    pub organization_id: String,
-    pub federation_rule_id: String,
-    pub service_account_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    pub identity_token_file: PathBuf,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "provider", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Profile {
     Claude {
+        profile_uid: ProfileUid,
         billing_domain: BillingDomain,
         auth: ClaudeAuth,
         state_dir: PathBuf,
@@ -283,9 +295,11 @@ pub enum Profile {
         #[serde(skip_serializing_if = "Option::is_none")]
         expected_organization: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        wif: Option<WifConfig>,
+        wif: Option<ClaudeWifConfig>,
+        automation: AutomationPolicy,
     },
     Codex {
+        profile_uid: ProfileUid,
         billing_domain: BillingDomain,
         auth: CodexAuth,
         state_dir: PathBuf,
@@ -299,10 +313,20 @@ pub enum Profile {
         credential_store: CodexCredentialStore,
         #[serde(default)]
         trusted_runners_only: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wif: Option<CodexWifConfig>,
+        automation: AutomationPolicy,
     },
 }
 
 impl Profile {
+    #[must_use]
+    pub const fn profile_uid(&self) -> &ProfileUid {
+        match self {
+            Self::Claude { profile_uid, .. } | Self::Codex { profile_uid, .. } => profile_uid,
+        }
+    }
+
     #[must_use]
     pub const fn provider(&self) -> Provider {
         match self {
@@ -354,6 +378,42 @@ impl Profile {
     }
 
     #[must_use]
+    pub const fn automation(&self) -> &AutomationPolicy {
+        match self {
+            Self::Claude { automation, .. } | Self::Codex { automation, .. } => automation,
+        }
+    }
+
+    pub const fn automation_mut(&mut self) -> &mut AutomationPolicy {
+        match self {
+            Self::Claude { automation, .. } | Self::Codex { automation, .. } => automation,
+        }
+    }
+
+    #[must_use]
+    pub fn automation_view(&self, id: &ProfileId) -> AutomationProfileView {
+        let policy = self.automation();
+        AutomationProfileView {
+            profile_uid: self.profile_uid().clone(),
+            profile_ref: id.clone(),
+            provider: self.provider(),
+            auth_mode: self.auth_label(),
+            eligible: policy.eligible,
+            environment_count: policy.environments.len(),
+            roles: policy.roles.clone(),
+            caller_subject_count: policy.caller_subjects.len(),
+            lease_ttl_seconds: policy.lease_ttl_seconds,
+            max_session_seconds: policy.max_session_seconds,
+            max_concurrent_leases: policy.max_concurrent_leases,
+            concurrency_mode: policy.concurrency_mode,
+            shared_state_isolation_requirement: policy.shared_state_isolation_requirement,
+            require_workload_identity: policy.require_workload_identity,
+            authentication_exception_acknowledged: policy.authentication_exception_acknowledged,
+            isolation_exception_acknowledged: policy.isolation_exception_acknowledged,
+        }
+    }
+
+    #[must_use]
     pub const fn requires_static_secret(&self) -> bool {
         matches!(
             self,
@@ -387,6 +447,52 @@ impl Profile {
             } => expected_organization.as_deref(),
             Self::Codex { .. } => None,
         }
+    }
+}
+
+impl fmt::Debug for Profile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("Profile");
+        debug
+            .field("profile_uid", self.profile_uid())
+            .field("provider", &self.provider())
+            .field("billing_domain", &self.billing_domain())
+            .field("auth", &self.auth_label())
+            .field("state_dir", &"[redacted]")
+            .field("secret_ref_present", &self.secret_ref().is_some())
+            .field("account_hint_present", &self.account_hint().is_some())
+            .field("automation", self.automation());
+        match self {
+            Self::Claude {
+                expected_organization,
+                wif,
+                ..
+            } => {
+                debug
+                    .field(
+                        "expected_organization_present",
+                        &expected_organization.is_some(),
+                    )
+                    .field("wif", wif);
+            }
+            Self::Codex {
+                expected_workspace_id,
+                credential_store,
+                trusted_runners_only,
+                wif,
+                ..
+            } => {
+                debug
+                    .field(
+                        "expected_workspace_present",
+                        &expected_workspace_id.is_some(),
+                    )
+                    .field("credential_store", credential_store)
+                    .field("trusted_runners_only", trusted_runners_only)
+                    .field("wif", wif);
+            }
+        }
+        debug.finish()
     }
 }
 
@@ -461,6 +567,7 @@ impl Default for BinaryConfig {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
+    pub installation_uid: InstallationUid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_context: Option<Name>,
     #[serde(default)]
@@ -469,367 +576,60 @@ pub struct Config {
     pub binaries: BinaryConfig,
     #[serde(default)]
     pub profiles: BTreeMap<ProfileId, Profile>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired_profile_uids: BTreeSet<ProfileUid>,
     #[serde(default)]
     pub contexts: BTreeMap<Name, Context>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    #[serde(skip)]
+    authority: ConfigAuthority,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConfigAuthority {
+    #[default]
+    Persisted,
+    ProjectedLegacy,
+}
+
+impl Config {
+    pub fn new() -> Result<Self> {
+        Ok(Self::with_installation_uid(InstallationUid::generate()?))
+    }
+
+    pub(crate) fn with_installation_uid(installation_uid: InstallationUid) -> Self {
         Self {
-            version: SCHEMA_VERSION,
+            version: CONFIG_SCHEMA_VERSION,
+            installation_uid,
             default_context: None,
             settings: Settings::default(),
             binaries: BinaryConfig::default(),
             profiles: BTreeMap::new(),
+            retired_profile_uids: BTreeSet::new(),
             contexts: BTreeMap::new(),
             bindings: Vec::new(),
+            authority: ConfigAuthority::Persisted,
         }
     }
-}
 
-impl Config {
-    pub fn validate(&self) -> Result<()> {
-        if self.version != SCHEMA_VERSION {
-            return Err(Error::InvalidConfig(format!(
-                "unsupported schema version {}; this build supports version {SCHEMA_VERSION}",
-                self.version
-            )));
-        }
-        if self.settings.telemetry {
-            return Err(Error::InvalidConfig(
-                "telemetry must remain disabled; ctxlane does not implement telemetry".to_owned(),
-            ));
-        }
-        for (provider, binary) in [
-            ("claude", &self.binaries.claude),
-            ("codex", &self.binaries.codex),
-        ] {
-            validate_persisted_path(&format!("{provider} binary"), binary)?;
-            if binary.as_os_str().is_empty()
-                || (!binary.is_absolute() && binary.components().count() != 1)
-            {
-                return Err(Error::InvalidConfig(format!(
-                    "{provider} binary must be an absolute path or a bare executable name"
-                )));
-            }
-            if binary.is_absolute() {
-                reject_relative_components(&format!("{provider} binary"), binary)?;
-            }
-        }
-
-        let mut profile_names = BTreeSet::new();
-        let mut state_dirs = BTreeSet::new();
-        for (id, profile) in &self.profiles {
-            if !profile_names.insert((id.provider(), id.name().as_str().to_ascii_lowercase())) {
-                return Err(Error::InvalidConfig(format!(
-                    "profile `{id}` collides with another same-provider profile name after ASCII case folding"
-                )));
-            }
-            if id.provider() != profile.provider() {
-                return Err(Error::InvalidConfig(format!(
-                    "profile key `{id}` does not match provider `{}`",
-                    profile.provider()
-                )));
-            }
-            if !profile.state_dir().is_absolute() {
-                return Err(Error::InvalidConfig(format!(
-                    "profile `{id}` state_dir must be absolute"
-                )));
-            }
-            validate_persisted_path(&format!("profile `{id}` state_dir"), profile.state_dir())?;
-            if profile.state_dir().components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::CurDir | std::path::Component::ParentDir
-                )
-            }) {
-                return Err(Error::InvalidConfig(format!(
-                    "profile `{id}` state_dir must not contain `.` or `..` components"
-                )));
-            }
-            if !state_dirs.insert(profile.state_dir().to_string_lossy().to_ascii_lowercase()) {
-                return Err(Error::InvalidConfig(format!(
-                    "profile `{id}` shares or ASCII-case-fold aliases mutable state directory {} with another profile",
-                    profile.state_dir().display()
-                )));
-            }
-            validate_profile(id, profile)?;
-        }
-
-        for (name, context) in &self.contexts {
-            if context.claude.is_none() && context.codex.is_none() {
-                return Err(Error::InvalidConfig(format!(
-                    "context `{name}` must reference at least one profile"
-                )));
-            }
-            for (provider, profile_id) in [
-                (Provider::Claude, context.claude.as_ref()),
-                (Provider::Codex, context.codex.as_ref()),
-            ] {
-                if let Some(profile_id) = profile_id {
-                    if profile_id.provider() != provider {
-                        return Err(Error::InvalidConfig(format!(
-                            "context `{name}` has a {provider} slot pointing to `{profile_id}`"
-                        )));
-                    }
-                    if !self.profiles.contains_key(profile_id) {
-                        return Err(Error::InvalidConfig(format!(
-                            "context `{name}` references missing profile `{profile_id}`"
-                        )));
-                    }
-                }
-            }
-        }
-
-        if let Some(default) = &self.default_context
-            && !self.contexts.contains_key(default)
-        {
-            return Err(Error::InvalidConfig(format!(
-                "default context `{default}` does not exist"
-            )));
-        }
-
-        let mut binding_paths = BTreeSet::new();
-        for binding in &self.bindings {
-            validate_persisted_path("binding path", &binding.path)?;
-            if !binding.path.is_absolute() {
-                return Err(Error::InvalidConfig(format!(
-                    "binding path {} must be absolute",
-                    binding.path.display()
-                )));
-            }
-            reject_relative_components("binding path", &binding.path)?;
-            if !binding_paths.insert(binding.path.clone()) {
-                return Err(Error::InvalidConfig(format!(
-                    "duplicate binding for {}",
-                    binding.path.display()
-                )));
-            }
-            if !self.contexts.contains_key(&binding.context) {
-                return Err(Error::InvalidConfig(format!(
-                    "binding {} references missing context `{}`",
-                    binding.path.display(),
-                    binding.context
-                )));
-            }
-        }
-
-        Ok(())
+    #[must_use]
+    pub const fn authority(&self) -> ConfigAuthority {
+        self.authority
     }
-}
 
-fn validate_profile(id: &ProfileId, profile: &Profile) -> Result<()> {
-    match profile {
-        Profile::Claude {
-            billing_domain,
-            auth,
-            secret_ref,
-            account_hint,
-            expected_organization,
-            wif,
-            ..
-        } => {
-            validate_optional_persisted_metadata(id, "account_hint", account_hint.as_deref())?;
-            validate_optional_persisted_metadata(
-                id,
-                "expected_organization",
-                expected_organization.as_deref(),
-            )?;
-            let expected_billing = match auth {
-                ClaudeAuth::SubscriptionToken => BillingDomain::ClaudeSubscription,
-                ClaudeAuth::ApiKey | ClaudeAuth::Wif => BillingDomain::AnthropicApi,
-            };
-            if *billing_domain != expected_billing {
-                return Err(Error::InvalidConfig(format!(
-                    "profile `{id}` auth `{auth}` requires billing domain `{expected_billing}`"
-                )));
-            }
-            match auth {
-                ClaudeAuth::SubscriptionToken | ClaudeAuth::ApiKey => {
-                    validate_secret_ref(id, secret_ref.as_deref())?;
-                    if wif.is_some() {
-                        return Err(Error::InvalidConfig(format!(
-                            "profile `{id}` has WIF metadata but does not use WIF"
-                        )));
-                    }
-                }
-                ClaudeAuth::Wif => {
-                    if secret_ref.is_some() {
-                        return Err(Error::InvalidConfig(format!(
-                            "WIF profile `{id}` must not persist a static secret"
-                        )));
-                    }
-                    let wif = wif.as_ref().ok_or_else(|| {
-                        Error::InvalidConfig(format!("WIF profile `{id}` is missing WIF metadata"))
-                    })?;
-                    for (field, value) in [
-                        ("organization_id", wif.organization_id.as_str()),
-                        ("federation_rule_id", wif.federation_rule_id.as_str()),
-                        ("service_account_id", wif.service_account_id.as_str()),
-                    ] {
-                        validate_persisted_metadata(&format!("WIF profile `{id}` {field}"), value)?;
-                    }
-                    if let Some(workspace) = wif.workspace_id.as_deref() {
-                        validate_persisted_metadata(
-                            &format!("WIF profile `{id}` workspace_id"),
-                            workspace,
-                        )?;
-                    }
-                    validate_persisted_path(
-                        &format!("WIF profile `{id}` identity_token_file"),
-                        &wif.identity_token_file,
-                    )?;
-                    if !wif.identity_token_file.is_absolute() {
-                        return Err(Error::InvalidConfig(format!(
-                            "WIF profile `{id}` identity_token_file must be absolute"
-                        )));
-                    }
-                    reject_relative_components(
-                        &format!("WIF profile `{id}` identity_token_file"),
-                        &wif.identity_token_file,
-                    )?;
-                }
-            }
-        }
-        Profile::Codex {
-            billing_domain,
-            auth,
-            secret_ref,
-            account_hint,
-            expected_workspace_id,
-            trusted_runners_only,
-            ..
-        } => {
-            validate_optional_persisted_metadata(id, "account_hint", account_hint.as_deref())?;
-            validate_optional_persisted_metadata(
-                id,
-                "expected_workspace_id",
-                expected_workspace_id.as_deref(),
-            )?;
-            let expected_billing = match auth {
-                CodexAuth::ChatgptOauth | CodexAuth::AccessToken => {
-                    BillingDomain::ChatgptSubscription
-                }
-                CodexAuth::ApiKey => BillingDomain::OpenaiApi,
-            };
-            if *billing_domain != expected_billing {
-                return Err(Error::InvalidConfig(format!(
-                    "profile `{id}` auth `{auth}` requires billing domain `{expected_billing}`"
-                )));
-            }
-            match auth {
-                CodexAuth::ChatgptOauth => {
-                    if secret_ref.is_some() {
-                        return Err(Error::InvalidConfig(format!(
-                            "ChatGPT OAuth profile `{id}` must leave credentials vendor-managed"
-                        )));
-                    }
-                }
-                CodexAuth::ApiKey | CodexAuth::AccessToken => {
-                    validate_secret_ref(id, secret_ref.as_deref())?;
-                }
-            }
-            if *auth == CodexAuth::AccessToken {
-                if expected_workspace_id.as_deref().is_none_or(str::is_empty) {
-                    return Err(Error::InvalidConfig(format!(
-                        "Codex access-token profile `{id}` requires expected_workspace_id"
-                    )));
-                }
-                if !trusted_runners_only {
-                    return Err(Error::InvalidConfig(format!(
-                        "Codex access-token profile `{id}` must set trusted_runners_only"
-                    )));
-                }
-            }
-            if *auth == CodexAuth::ApiKey && expected_workspace_id.is_some() {
-                return Err(Error::InvalidConfig(format!(
-                    "Codex API-key profile `{id}` must not set expected_workspace_id"
-                )));
-            }
-        }
+    #[must_use]
+    pub const fn is_authoritative(&self) -> bool {
+        matches!(self.authority, ConfigAuthority::Persisted)
     }
-    Ok(())
-}
 
-fn validate_optional_persisted_metadata(
-    id: &ProfileId,
-    field: &str,
-    value: Option<&str>,
-) -> Result<()> {
-    if let Some(value) = value {
-        validate_persisted_metadata(&format!("profile `{id}` {field}"), value)?;
+    pub(crate) const fn mark_projected_legacy(&mut self) {
+        self.authority = ConfigAuthority::ProjectedLegacy;
     }
-    Ok(())
-}
 
-fn validate_persisted_metadata(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 512
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        return Err(Error::InvalidConfig(format!(
-            "{label} must be 1-512 trimmed characters and contain no control characters"
-        )));
+    pub(crate) const fn mark_persisted(&mut self) {
+        self.authority = ConfigAuthority::Persisted;
     }
-    Ok(())
-}
-
-fn validate_persisted_path(label: &str, path: &Path) -> Result<()> {
-    if path
-        .as_os_str()
-        .to_string_lossy()
-        .chars()
-        .any(char::is_control)
-    {
-        return Err(Error::InvalidConfig(format!(
-            "{label} must contain no control characters"
-        )));
-    }
-    Ok(())
-}
-
-fn reject_relative_components(label: &str, path: &Path) -> Result<()> {
-    if path.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::CurDir | std::path::Component::ParentDir
-        )
-    }) {
-        return Err(Error::InvalidConfig(format!(
-            "{label} must not contain `.` or `..` components"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_secret_ref(id: &ProfileId, secret_ref: Option<&str>) -> Result<()> {
-    let secret_ref = secret_ref.ok_or_else(|| {
-        Error::InvalidConfig(format!("profile `{id}` requires a secret reference"))
-    })?;
-    if secret_ref.chars().any(char::is_control) {
-        return Err(Error::InvalidConfig(format!(
-            "profile `{id}` secret_ref contains a forbidden control character"
-        )));
-    }
-    if let Some(rest) = secret_ref.strip_prefix("keyring://") {
-        let Some((service, account)) = rest.split_once('/') else {
-            return Err(Error::InvalidConfig(format!(
-                "profile `{id}` has an invalid keyring secret_ref"
-            )));
-        };
-        if service.is_empty() || account.is_empty() || account.contains('/') {
-            return Err(Error::InvalidConfig(format!(
-                "profile `{id}` has an invalid keyring secret_ref"
-            )));
-        }
-        return Ok(());
-    }
-    Err(Error::InvalidConfig(format!(
-        "profile `{id}` secret_ref must use `keyring://service/account`"
-    )))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -844,19 +644,19 @@ pub struct MutableState {
 impl Default for MutableState {
     fn default() -> Self {
         Self {
-            version: SCHEMA_VERSION,
+            version: STATE_SCHEMA_VERSION,
             current_context: None,
         }
     }
 }
 
 const fn schema_version() -> u32 {
-    SCHEMA_VERSION
+    STATE_SCHEMA_VERSION
 }
 
 impl MutableState {
     pub fn validate(&self, config: &Config) -> Result<()> {
-        if self.version != SCHEMA_VERSION {
+        if self.version != STATE_SCHEMA_VERSION {
             return Err(Error::InvalidConfig(format!(
                 "unsupported state schema version {}",
                 self.version
@@ -874,128 +674,5 @@ impl MutableState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_are_path_safe() {
-        assert!(Name::parse("work-2").is_ok());
-        assert!(Name::parse("../work").is_err());
-        assert!(Name::parse("with space").is_err());
-        assert!(Name::parse("").is_err());
-    }
-
-    #[test]
-    fn profile_ids_round_trip() {
-        let parsed: ProfileId = "claude:personal".parse().unwrap_or_else(|error| {
-            panic!("valid profile ID should parse: {error}");
-        });
-        assert_eq!(parsed.provider(), Provider::Claude);
-        assert_eq!(parsed.name().as_str(), "personal");
-        assert_eq!(parsed.to_string(), "claude:personal");
-    }
-
-    #[test]
-    fn default_config_round_trips() {
-        let config = Config::default();
-        let text = toml::to_string_pretty(&config).unwrap_or_else(|error| {
-            panic!("default config should serialize: {error}");
-        });
-        let decoded: Config = toml::from_str(&text).unwrap_or_else(|error| {
-            panic!("default config should deserialize: {error}");
-        });
-        assert_eq!(decoded, config);
-        assert!(decoded.validate().is_ok());
-    }
-
-    #[test]
-    fn profile_names_and_state_directories_are_ascii_case_fold_unique() {
-        let root = std::env::temp_dir().join("ctxlane-model-case-fold-test");
-        let profile = |state_dir: PathBuf| Profile::Codex {
-            billing_domain: BillingDomain::ChatgptSubscription,
-            auth: CodexAuth::ChatgptOauth,
-            state_dir,
-            secret_ref: None,
-            account_hint: None,
-            expected_workspace_id: None,
-            credential_store: CodexCredentialStore::File,
-            trusted_runners_only: false,
-        };
-
-        let mut names = Config::default();
-        names.profiles.insert(
-            ProfileId::new(
-                Provider::Codex,
-                Name::parse("Work").unwrap_or_else(|error| panic!("name: {error}")),
-            ),
-            profile(root.join("Work")),
-        );
-        names.profiles.insert(
-            ProfileId::new(
-                Provider::Codex,
-                Name::parse("work").unwrap_or_else(|error| panic!("name: {error}")),
-            ),
-            profile(root.join("work-elsewhere")),
-        );
-        let name_error = match names.validate() {
-            Err(error) => error.to_string(),
-            Ok(()) => panic!("case-folded profile names should be rejected"),
-        };
-        assert!(name_error.contains("ASCII case folding"));
-
-        let mut directories = Config::default();
-        directories.profiles.insert(
-            ProfileId::new(
-                Provider::Codex,
-                Name::parse("first").unwrap_or_else(|error| panic!("name: {error}")),
-            ),
-            profile(root.join("VendorState")),
-        );
-        directories.profiles.insert(
-            ProfileId::new(
-                Provider::Codex,
-                Name::parse("second").unwrap_or_else(|error| panic!("name: {error}")),
-            ),
-            profile(root.join("vendorstate")),
-        );
-        let directory_error = match directories.validate() {
-            Err(error) => error.to_string(),
-            Ok(()) => panic!("case-folded state directories should be rejected"),
-        };
-        assert!(directory_error.contains("ASCII-case-fold aliases"));
-    }
-
-    #[test]
-    fn persisted_metadata_and_paths_reject_control_characters() {
-        let root = std::env::temp_dir().join("ctxlane-model-control-test");
-        let profile_id = ProfileId::new(
-            Provider::Codex,
-            Name::parse("work").unwrap_or_else(|error| panic!("name: {error}")),
-        );
-        let mut config = Config::default();
-        config.profiles.insert(
-            profile_id,
-            Profile::Codex {
-                billing_domain: BillingDomain::ChatgptSubscription,
-                auth: CodexAuth::ChatgptOauth,
-                state_dir: root.join("state"),
-                secret_ref: None,
-                account_hint: Some("visible\nterminal-control".to_owned()),
-                expected_workspace_id: None,
-                credential_store: CodexCredentialStore::File,
-                trusted_runners_only: false,
-            },
-        );
-        let Err(error) = config.validate() else {
-            panic!("control characters in persisted profile metadata should be rejected");
-        };
-        assert!(error.to_string().contains("control characters"));
-
-        let mut config = Config::default();
-        config.binaries.codex = root.join("codex\u{1b}[31m");
-        let Err(error) = config.validate() else {
-            panic!("control characters in persisted paths should be rejected");
-        };
-        assert!(error.to_string().contains("control characters"));
-    }
-}
+#[path = "model/tests.rs"]
+mod tests;

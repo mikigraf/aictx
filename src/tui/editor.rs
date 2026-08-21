@@ -4,7 +4,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     Error, Result,
-    model::{AuthArg, CodexCredentialStore, Config, Context, Name, Profile, ProfileId, Provider},
+    model::{
+        AuthArg, CodexAuth, CodexCredentialStore, Config, Context, Name, Profile, ProfileId,
+        Provider,
+    },
 };
 
 use super::input::{Choice, FieldValue, TextInput};
@@ -281,6 +284,10 @@ impl Form {
                 METADATA_LIMIT,
             )),
             Profile::Codex {
+                auth: CodexAuth::Wif,
+                ..
+            } => {}
+            Profile::Codex {
                 expected_workspace_id,
                 credential_store,
                 ..
@@ -465,17 +472,23 @@ impl Form {
                 id: id.clone(),
                 expected: expected.clone(),
                 account: optional_edit(self.text(FieldId::Account)?),
-                organization_or_workspace: if expected.provider() == Provider::Claude {
-                    optional_edit(self.text(FieldId::Organization)?)
-                } else {
-                    optional_edit(self.text(FieldId::Workspace)?)
+                organization_or_workspace: match expected {
+                    Profile::Claude { .. } => optional_edit(self.text(FieldId::Organization)?),
+                    Profile::Codex {
+                        auth: CodexAuth::Wif,
+                        ..
+                    } => OptionalEdit::Keep,
+                    Profile::Codex { .. } => optional_edit(self.text(FieldId::Workspace)?),
                 },
-                credential_store: if expected.provider() == Provider::Codex {
-                    Some(parse_credential_store(
+                credential_store: match expected {
+                    Profile::Codex {
+                        auth: CodexAuth::Wif,
+                        ..
+                    }
+                    | Profile::Claude { .. } => None,
+                    Profile::Codex { .. } => Some(parse_credential_store(
                         self.choice(FieldId::CredentialStore)?,
-                    )?)
-                } else {
-                    None
+                    )?),
                 },
             }),
             FormOperation::ProfileRename { id, expected } => Ok(Submission::ProfileRename {

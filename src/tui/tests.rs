@@ -7,12 +7,17 @@ use crate::{
     config::AppPaths,
     management,
     model::{
-        AuthArg, BillingDomain, Binding, ClaudeAuth, CodexAuth, CodexCredentialStore, Context,
-        Profile, Provider, SCHEMA_VERSION, WifConfig,
+        AuthArg, AutomationPolicy, BillingDomain, Binding, ClaudeAuth, CodexAuth,
+        CodexCredentialStore, Context, Profile, ProfileUid, Provider, SCHEMA_VERSION, WifConfig,
     },
 };
 
 use super::*;
+
+fn uid(index: u32) -> ProfileUid {
+    ProfileUid::parse(format!("profile_{index:026}"))
+        .unwrap_or_else(|error| panic!("profile UID: {error}"))
+}
 
 fn test_app() -> App {
     let work = Name::parse("work").unwrap_or_else(|error| panic!("valid name: {error}"));
@@ -20,10 +25,11 @@ fn test_app() -> App {
     let profile_id: ProfileId = "claude:work"
         .parse()
         .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
-    let mut config = Config::default();
+    let mut config = Config::new().unwrap_or_else(|error| panic!("config: {error}"));
     config.profiles.insert(
         profile_id.clone(),
         Profile::Claude {
+            profile_uid: uid(1),
             billing_domain: BillingDomain::AnthropicApi,
             auth: ClaudeAuth::ApiKey,
             state_dir: PathBuf::from("/tmp/ctxlane-test-state"),
@@ -31,6 +37,7 @@ fn test_app() -> App {
             account_hint: Some("secret-account@example.test".to_owned()),
             expected_organization: Some("secret-org".to_owned()),
             wif: None,
+            automation: AutomationPolicy::default(),
         },
     );
     config.contexts = BTreeMap::from([
@@ -92,28 +99,45 @@ fn activation_app() -> (TempDir, MetadataStore, App, Name, Name) {
 
     store
         .update_config(|config| {
+            let personal_state =
+                paths.profile_state_dir(personal_id.provider(), personal_id.name());
+            let work_state = paths.profile_state_dir(work_id.provider(), work_id.name());
+            let personal_profile_uid = ProfileUid::for_state_dir(
+                &config.installation_uid,
+                personal_id.provider(),
+                &personal_state,
+            )?;
+            let work_profile_uid = ProfileUid::for_state_dir(
+                &config.installation_uid,
+                work_id.provider(),
+                &work_state,
+            )?;
             config.profiles.insert(
                 personal_id.clone(),
                 Profile::Claude {
+                    profile_uid: personal_profile_uid,
                     billing_domain: BillingDomain::ClaudeSubscription,
                     auth: ClaudeAuth::SubscriptionToken,
-                    state_dir: paths.profile_state_dir(personal_id.provider(), personal_id.name()),
+                    state_dir: personal_state,
                     secret_ref: Some("keyring://ctxlane/claude-personal".to_owned()),
                     account_hint: None,
                     expected_organization: None,
                     wif: None,
+                    automation: AutomationPolicy::default(),
                 },
             );
             config.profiles.insert(
                 work_id.clone(),
                 Profile::Claude {
+                    profile_uid: work_profile_uid,
                     billing_domain: BillingDomain::AnthropicApi,
                     auth: ClaudeAuth::ApiKey,
-                    state_dir: paths.profile_state_dir(work_id.provider(), work_id.name()),
+                    state_dir: work_state,
                     secret_ref: Some("keyring://ctxlane/claude-work".to_owned()),
                     account_hint: None,
                     expected_organization: None,
                     wif: None,
+                    automation: AutomationPolicy::default(),
                 },
             );
             config.contexts.insert(
@@ -340,9 +364,15 @@ fn stale_account_profile_modal_requires_reviewing_the_updated_change() {
         .profile_state_dir(codex_id.provider(), codex_id.name());
     store
         .update_config(|config| {
+            let codex_profile_uid = ProfileUid::for_state_dir(
+                &config.installation_uid,
+                codex_id.provider(),
+                &codex_state,
+            )?;
             config.profiles.insert(
                 codex_id.clone(),
                 Profile::Codex {
+                    profile_uid: codex_profile_uid,
                     billing_domain: BillingDomain::OpenaiApi,
                     auth: CodexAuth::ApiKey,
                     state_dir: codex_state,
@@ -351,6 +381,8 @@ fn stale_account_profile_modal_requires_reviewing_the_updated_change() {
                     expected_workspace_id: None,
                     credential_store: CodexCredentialStore::File,
                     trusted_runners_only: false,
+                    wif: None,
+                    automation: AutomationPolicy::default(),
                 },
             );
             config
@@ -924,6 +956,7 @@ fn profile_mutation_views_never_reveal_persisted_identity_values() {
     app.config.profiles.insert(
         wif_id,
         Profile::Claude {
+            profile_uid: uid(5),
             billing_domain: BillingDomain::AnthropicApi,
             auth: ClaudeAuth::Wif,
             state_dir: PathBuf::from("/private/wif-state-canary"),
@@ -937,6 +970,7 @@ fn profile_mutation_views_never_reveal_persisted_identity_values() {
                 workspace_id: Some("wif-workspace-canary".to_owned()),
                 identity_token_file: PathBuf::from("/private/wif-token-file-canary"),
             }),
+            automation: AutomationPolicy::default(),
         },
     );
     let codex_id: ProfileId = "codex:work"
@@ -945,6 +979,7 @@ fn profile_mutation_views_never_reveal_persisted_identity_values() {
     app.config.profiles.insert(
         codex_id,
         Profile::Codex {
+            profile_uid: uid(6),
             billing_domain: BillingDomain::OpenaiApi,
             auth: CodexAuth::AccessToken,
             state_dir: PathBuf::from("/private/codex-state-canary"),
@@ -953,6 +988,8 @@ fn profile_mutation_views_never_reveal_persisted_identity_values() {
             expected_workspace_id: Some("codex-workspace-canary".to_owned()),
             credential_store: CodexCredentialStore::Keyring,
             trusted_runners_only: true,
+            wif: None,
+            automation: AutomationPolicy::default(),
         },
     );
 

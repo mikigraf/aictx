@@ -469,7 +469,7 @@ fn config_schema_rejects_unknown_fields_and_telemetry() {
     let valid = fs::read_to_string(&config_path)
         .unwrap_or_else(|error| panic!("read generated config: {error}"));
 
-    let unknown = valid.replacen("version = 1\n", "version = 1\nunknown = true\n", 1);
+    let unknown = valid.replacen("version = 2\n", "version = 2\nunknown = true\n", 1);
     fs::write(&config_path, unknown)
         .unwrap_or_else(|error| panic!("write config with unknown field: {error}"));
     let output = ctxlane(&root)
@@ -477,7 +477,9 @@ fn config_schema_rejects_unknown_fields_and_telemetry() {
         .output()
         .unwrap_or_else(|error| panic!("load unknown config: {error}"));
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("parser details and input were redacted"));
+    assert!(!error.contains("unknown = true"));
 
     let output = ctxlane(&root)
         .arg("doctor")

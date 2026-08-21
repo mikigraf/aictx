@@ -7,11 +7,12 @@ use std::{
 use crate::{
     Error, Result,
     config::{
-        AppPaths, MetadataStore, ProfileLockGuard, acquire_profile_lock, ensure_secure_directory,
+        AppPaths, MetadataStore, OrderedProfileLocks, acquire_ordered_profile_locks,
+        acquire_profile_lock, ensure_secure_directory,
     },
     model::{
-        BillingDomain, Binding, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Name,
-        Profile, ProfileId, Provider, WifConfig,
+        AutomationPolicy, BillingDomain, Binding, ClaudeAuth, CodexAuth, CodexCredentialStore,
+        CodexWifConfig, Context, Name, Profile, ProfileId, ProfileUid, Provider, WifConfig,
     },
     resolver::{canonical_directory, context_not_found},
     secret::SecretRef,
@@ -45,6 +46,7 @@ pub enum ProfileDraft {
         expected_workspace_id: Option<String>,
         credential_store: CodexCredentialStore,
         trusted_runners_only: bool,
+        wif: Option<CodexWifConfig>,
     },
 }
 
@@ -69,6 +71,8 @@ impl ProfileDraft {
 pub struct ClaudeProfileEdit {
     pub account_hint: ValueEdit<String>,
     pub expected_organization: ValueEdit<String>,
+    /// Explicit local-operator replacement. Interactive callers leave this unchanged.
+    pub automation: Option<AutomationPolicy>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -77,6 +81,8 @@ pub struct CodexProfileEdit {
     pub expected_workspace_id: ValueEdit<String>,
     pub credential_store: Option<CodexCredentialStore>,
     pub trusted_runners_only: Option<bool>,
+    /// Explicit local-operator replacement. Interactive callers leave this unchanged.
+    pub automation: Option<AutomationPolicy>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,6 +94,7 @@ pub enum ProfileEdit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileReceipt {
     pub id: ProfileId,
+    pub profile_uid: ProfileUid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,10 +118,20 @@ pub fn add_profile(store: &MetadataStore, draft: ProfileDraft) -> Result<Profile
     let paths = store.paths();
     let id = ProfileId::new(draft.provider(), draft.name().clone());
     let _profile_lock = acquire_profile_lock(&paths.profile_lock(id.provider(), id.name()), true)?;
-    store.update_config(|config| {
+    let profile_uid = store.update_config(|config| {
         reject_profile_name_collision(config.profiles.keys(), &id, None)?;
         let state_dir = allocate_profile_state_dir(config.profiles.values(), paths, id.provider())?;
-        let profile = profile_from_draft(&id, state_dir, draft)?;
+        let profile_uid =
+            ProfileUid::for_state_dir(&config.installation_uid, id.provider(), &state_dir)?;
+        if config.retired_profile_uids.contains(&profile_uid)
+            || config
+                .profiles
+                .values()
+                .any(|profile| profile.profile_uid() == &profile_uid)
+        {
+            return Err(Error::ConfigBusy);
+        }
+        let profile = profile_from_draft(&id, profile_uid.clone(), state_dir, draft)?;
         config.profiles.insert(id.clone(), profile);
 
         // Validate every draft field before creating its private state directory. Once the
@@ -133,9 +150,9 @@ pub fn add_profile(store: &MetadataStore, draft: ProfileDraft) -> Result<Profile
             )));
         }
         ensure_secure_directory(state_dir)?;
-        Ok(())
+        Ok(profile_uid)
     })?;
-    Ok(ProfileReceipt { id })
+    Ok(ProfileReceipt { id, profile_uid })
 }
 
 pub fn edit_profile(
@@ -145,13 +162,24 @@ pub fn edit_profile(
     edit: ProfileEdit,
 ) -> Result<ProfileReceipt> {
     let paths = store.paths();
-    let _profile_lock = acquire_profile_lock(&paths.profile_lock(id.provider(), id.name()), true)?;
+    // Keep the legacy alias lock in the same exclusive lifecycle fence so a schema-v1
+    // runner that only knows the alias lock cannot overlap a metadata edit after upgrade.
+    let _profile_locks = acquire_resource_locks(
+        [
+            paths.profile_lock(id.provider(), id.name()),
+            paths.profile_lifecycle_lock(expected.profile_uid()),
+        ]
+        .into_iter(),
+    )?;
     store.update_config(|config| {
         let profile = expected_profile_mut(config, id, expected)?;
         apply_profile_edit(profile, edit)?;
         Ok(())
     })?;
-    Ok(ProfileReceipt { id: id.clone() })
+    Ok(ProfileReceipt {
+        id: id.clone(),
+        profile_uid: expected.profile_uid().clone(),
+    })
 }
 
 pub fn rename_profile(
@@ -162,7 +190,14 @@ pub fn rename_profile(
 ) -> Result<ProfileReceipt> {
     let paths = store.paths();
     let replacement = ProfileId::new(old.provider(), new_name);
-    let _profile_locks = acquire_profile_locks(paths, [old, &replacement])?;
+    let _profile_locks = acquire_resource_locks(
+        [
+            paths.profile_lock(old.provider(), old.name()),
+            paths.profile_lock(replacement.provider(), replacement.name()),
+            paths.profile_lifecycle_lock(expected.profile_uid()),
+        ]
+        .into_iter(),
+    )?;
     store.update_config(|config| {
         let current = config.profiles.get(old).ok_or(Error::ConfigBusy)?;
         if current != expected {
@@ -184,7 +219,10 @@ pub fn rename_profile(
         }
         Ok(())
     })?;
-    Ok(ProfileReceipt { id: replacement })
+    Ok(ProfileReceipt {
+        id: replacement,
+        profile_uid: expected.profile_uid().clone(),
+    })
 }
 
 pub fn remove_profile(
@@ -202,7 +240,13 @@ pub(crate) fn remove_profile_with<T>(
     after_remove: impl FnOnce(&Profile) -> Result<T>,
 ) -> Result<(ProfileRemovalReceipt, T)> {
     let paths = store.paths();
-    let _profile_lock = acquire_profile_lock(&paths.profile_lock(id.provider(), id.name()), true)?;
+    let _profile_locks = acquire_resource_locks(
+        [
+            paths.profile_lock(id.provider(), id.name()),
+            paths.profile_lifecycle_lock(expected.profile_uid()),
+        ]
+        .into_iter(),
+    )?;
     store.update_config(|config| {
         let current = config.profiles.get(id).ok_or(Error::ConfigBusy)?;
         if current != expected {
@@ -210,6 +254,9 @@ pub(crate) fn remove_profile_with<T>(
         }
         ensure_profile_unreferenced(config, id)?;
         config.profiles.remove(id).ok_or(Error::ConfigBusy)?;
+        config
+            .retired_profile_uids
+            .insert(expected.profile_uid().clone());
         Ok(())
     })?;
 
@@ -218,6 +265,9 @@ pub(crate) fn remove_profile_with<T>(
         Err(operation_error) => {
             let restore = store.update_config(|config| {
                 if config.profiles.contains_key(id) {
+                    return Err(Error::ConfigBusy);
+                }
+                if !config.retired_profile_uids.remove(expected.profile_uid()) {
                     return Err(Error::ConfigBusy);
                 }
                 config.profiles.insert(id.clone(), expected.clone());
@@ -438,7 +488,12 @@ pub fn remove_binding(store: &MetadataStore, expected: &Binding) -> Result<Bindi
     })
 }
 
-fn profile_from_draft(id: &ProfileId, state_dir: PathBuf, draft: ProfileDraft) -> Result<Profile> {
+fn profile_from_draft(
+    id: &ProfileId,
+    profile_uid: ProfileUid,
+    state_dir: PathBuf,
+    draft: ProfileDraft,
+) -> Result<Profile> {
     match draft {
         ProfileDraft::Claude {
             auth,
@@ -460,10 +515,15 @@ fn profile_from_draft(id: &ProfileId, state_dir: PathBuf, draft: ProfileDraft) -
                             "WIF profiles do not store static secrets".to_owned(),
                         ));
                     }
+                    let metadata = wif.as_ref().ok_or_else(|| {
+                        Error::InvalidInput("WIF profiles require WIF metadata".to_owned())
+                    })?;
+                    metadata.validate_enrollment(id)?;
                     None
                 }
             };
             Ok(Profile::Claude {
+                profile_uid,
                 billing_domain: match auth {
                     ClaudeAuth::SubscriptionToken => BillingDomain::ClaudeSubscription,
                     ClaudeAuth::ApiKey | ClaudeAuth::Wif => BillingDomain::AnthropicApi,
@@ -474,6 +534,7 @@ fn profile_from_draft(id: &ProfileId, state_dir: PathBuf, draft: ProfileDraft) -
                 account_hint,
                 expected_organization,
                 wif,
+                automation: AutomationPolicy::default(),
             })
         }
         ProfileDraft::Codex {
@@ -483,6 +544,7 @@ fn profile_from_draft(id: &ProfileId, state_dir: PathBuf, draft: ProfileDraft) -
             expected_workspace_id,
             credential_store,
             trusted_runners_only,
+            wif,
             ..
         } => {
             let secret_ref = match auth {
@@ -491,19 +553,29 @@ fn profile_from_draft(id: &ProfileId, state_dir: PathBuf, draft: ProfileDraft) -
                         .unwrap_or_else(|| SecretRef::default_for(id))
                         .to_string(),
                 ),
-                CodexAuth::ChatgptOauth => {
+                CodexAuth::ChatgptOauth | CodexAuth::Wif => {
                     if secret_ref.is_some() {
                         return Err(Error::InvalidInput(
-                            "ChatGPT OAuth credentials must remain vendor-managed".to_owned(),
+                            "vendor-managed authentication must not persist a static secret"
+                                .to_owned(),
                         ));
+                    }
+                    if auth == CodexAuth::Wif {
+                        let metadata = wif.as_ref().ok_or_else(|| {
+                            Error::InvalidInput(
+                                "Codex WIF profiles require WIF metadata".to_owned(),
+                            )
+                        })?;
+                        metadata.validate_enrollment(id)?;
                     }
                     None
                 }
             };
             Ok(Profile::Codex {
+                profile_uid,
                 billing_domain: match auth {
                     CodexAuth::ApiKey => BillingDomain::OpenaiApi,
-                    CodexAuth::ChatgptOauth | CodexAuth::AccessToken => {
+                    CodexAuth::Wif | CodexAuth::ChatgptOauth | CodexAuth::AccessToken => {
                         BillingDomain::ChatgptSubscription
                     }
                 },
@@ -514,6 +586,8 @@ fn profile_from_draft(id: &ProfileId, state_dir: PathBuf, draft: ProfileDraft) -
                 expected_workspace_id,
                 credential_store,
                 trusted_runners_only,
+                wif,
+                automation: AutomationPolicy::default(),
             })
         }
     }
@@ -525,12 +599,16 @@ fn apply_profile_edit(profile: &mut Profile, edit: ProfileEdit) -> Result<()> {
             Profile::Claude {
                 account_hint,
                 expected_organization,
+                automation,
                 ..
             },
             ProfileEdit::Claude(edit),
         ) => {
             apply_value_edit(account_hint, edit.account_hint);
             apply_value_edit(expected_organization, edit.expected_organization);
+            if let Some(replacement) = edit.automation {
+                *automation = replacement;
+            }
             Ok(())
         }
         (
@@ -539,6 +617,7 @@ fn apply_profile_edit(profile: &mut Profile, edit: ProfileEdit) -> Result<()> {
                 expected_workspace_id,
                 credential_store,
                 trusted_runners_only,
+                automation,
                 ..
             },
             ProfileEdit::Codex(edit),
@@ -550,6 +629,9 @@ fn apply_profile_edit(profile: &mut Profile, edit: ProfileEdit) -> Result<()> {
             }
             if let Some(value) = edit.trusted_runners_only {
                 *trusted_runners_only = value;
+            }
+            if let Some(replacement) = edit.automation {
+                *automation = replacement;
             }
             Ok(())
         }
@@ -629,20 +711,10 @@ fn allocate_profile_state_dir<'a>(
     Err(Error::ConfigBusy)
 }
 
-fn acquire_profile_locks<const N: usize>(
-    paths: &AppPaths,
-    profiles: [&ProfileId; N],
-) -> Result<Vec<ProfileLockGuard>> {
-    let mut lock_paths = profiles
-        .map(|profile| paths.profile_lock(profile.provider(), profile.name()))
-        .into_iter()
-        .collect::<Vec<_>>();
-    lock_paths.sort();
-    lock_paths.dedup();
-    lock_paths
-        .iter()
-        .map(|path| acquire_profile_lock(path, true))
-        .collect()
+fn acquire_resource_locks(
+    lock_paths: impl Iterator<Item = PathBuf>,
+) -> Result<OrderedProfileLocks> {
+    acquire_ordered_profile_locks(lock_paths.map(|path| (path, true)))
 }
 
 fn ensure_profile_unreferenced(config: &crate::model::Config, id: &ProfileId) -> Result<()> {
@@ -657,69 +729,5 @@ fn ensure_profile_unreferenced(config: &crate::model::Config, id: &ProfileId) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use tempfile::TempDir;
-
-    use super::*;
-
-    #[test]
-    fn failed_post_remove_cleanup_restores_metadata_and_allows_retry() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
-        let store = MetadataStore::new(paths);
-        store
-            .initialize()
-            .unwrap_or_else(|error| panic!("initialize: {error}"));
-        let receipt = add_profile(
-            &store,
-            ProfileDraft::Claude {
-                name: Name::parse("work").unwrap_or_else(|error| panic!("name: {error}")),
-                auth: ClaudeAuth::ApiKey,
-                secret_ref: None,
-                account_hint: None,
-                expected_organization: None,
-                wif: None,
-            },
-        )
-        .unwrap_or_else(|error| panic!("add profile: {error}"));
-        let expected = store
-            .load_config()
-            .unwrap_or_else(|error| panic!("load profile: {error}"))
-            .profiles
-            .get(&receipt.id)
-            .cloned()
-            .unwrap_or_else(|| panic!("profile exists"));
-        let marker = expected.state_dir().join("session.json");
-        fs::write(&marker, "still here")
-            .unwrap_or_else(|error| panic!("write state marker: {error}"));
-
-        let failed = remove_profile_with(&store, &receipt.id, &expected, |_| {
-            Err::<(), _>(Error::CredentialStore(
-                "injected cleanup failure".to_owned(),
-            ))
-        });
-        assert!(matches!(failed, Err(Error::CredentialStore(_))));
-        assert_eq!(
-            store
-                .load_config()
-                .unwrap_or_else(|error| panic!("load restored profile: {error}"))
-                .profiles
-                .get(&receipt.id),
-            Some(&expected)
-        );
-        assert_eq!(
-            fs::read_to_string(&marker)
-                .unwrap_or_else(|error| panic!("read state marker: {error}")),
-            "still here"
-        );
-
-        let removed = remove_profile(&store, &receipt.id, &expected)
-            .unwrap_or_else(|error| panic!("retry removal: {error}"));
-        assert_eq!(
-            removed.detached_state.as_deref(),
-            Some(expected.state_dir())
-        );
-    }
-}
+#[path = "management/tests.rs"]
+mod tests;

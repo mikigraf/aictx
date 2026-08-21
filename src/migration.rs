@@ -15,8 +15,8 @@ use std::{fmt, fs::File, path::Path};
 
 use crate::{
     Error, Result,
-    config::{AppPaths, ProfileLockGuard, acquire_profile_lock},
-    model::{Config, MutableState, Profile},
+    config::{AppPaths, ProfileLockGuard, acquire_profile_lock, decode_config_for_migration},
+    model::{Config, InstallationUid, MutableState, Profile},
 };
 use filesystem::{VendorEntry, VendorEntryKind};
 
@@ -179,12 +179,24 @@ impl MigrationPlan {
         target: &AppPaths,
         anchors: Vec<std::path::PathBuf>,
     ) -> Result<Self> {
+        Self::inspect_source_with_installation_uid(legacy, target, anchors, None)
+    }
+
+    fn inspect_source_with_installation_uid(
+        legacy: &AppPaths,
+        target: &AppPaths,
+        anchors: Vec<std::path::PathBuf>,
+        installation_uid: Option<&InstallationUid>,
+    ) -> Result<Self> {
         filesystem::validate_distinct_layouts(legacy, target)?;
         legacy.validate_layout()?;
         let source_config_bytes = filesystem::read_sensitive_bytes(&legacy.config_file)?;
         let source_state_bytes = filesystem::read_optional_sensitive_bytes(&legacy.state_file)?;
-        let source_config: Config =
-            filesystem::parse_toml(&legacy.config_file, &source_config_bytes)?;
+        let source_config = decode_config_for_migration(
+            &legacy.config_file,
+            &source_config_bytes,
+            installation_uid,
+        )?;
         let state: MutableState = source_state_bytes.as_deref().map_or_else(
             || Ok(MutableState::default()),
             |bytes| filesystem::parse_toml(&legacy.state_file, bytes),
@@ -193,6 +205,7 @@ impl MigrationPlan {
 
         let mut migrated_config = source_config;
         rewrite_profile_state_directories(&mut migrated_config, target);
+        migrated_config.mark_persisted();
         validate_managed_metadata(&migrated_config, &state, target, "migrated")?;
 
         let (vendor_entries, skipped_locks) =
@@ -258,17 +271,24 @@ impl MigrationPlan {
     }
 
     fn acquire_legacy_profile_locks(&self) -> Result<Vec<ProfileLockGuard>> {
-        self.migrated_config
+        let mut lock_paths = self
+            .migrated_config
             .profiles
-            .keys()
-            .map(|profile_id| {
-                acquire_profile_lock(
-                    &self
-                        .legacy
+            .iter()
+            .flat_map(|(profile_id, profile)| {
+                [
+                    self.legacy
                         .profile_lock(profile_id.provider(), profile_id.name()),
-                    true,
-                )
+                    self.legacy.profile_lifecycle_lock(profile.profile_uid()),
+                    self.legacy.profile_resource_lock(profile.profile_uid()),
+                ]
             })
+            .collect::<Vec<_>>();
+        lock_paths.sort();
+        lock_paths.dedup();
+        lock_paths
+            .iter()
+            .map(|path| acquire_profile_lock(path, true))
             .collect()
     }
 
@@ -328,10 +348,17 @@ pub fn recover_incomplete(legacy: &AppPaths, target: &AppPaths) -> Result<Recove
 
 fn rewrite_profile_state_directories(config: &mut Config, target: &AppPaths) {
     for (profile_id, profile) in &mut config.profiles {
-        let target_state = target.profile_state_dir(profile_id.provider(), profile_id.name());
+        let leaf = profile
+            .state_dir()
+            .file_name()
+            .map(std::ffi::OsStr::to_owned);
+        let target_state =
+            leaf.map(|leaf| target.profile_state_root(profile_id.provider()).join(leaf));
         match profile {
             Profile::Claude { state_dir, .. } | Profile::Codex { state_dir, .. } => {
-                *state_dir = target_state;
+                if let Some(target_state) = target_state {
+                    *state_dir = target_state;
+                }
             }
         }
     }
@@ -346,11 +373,10 @@ fn validate_managed_metadata(
     config.validate()?;
     state.validate(config)?;
     for (profile_id, profile) in &config.profiles {
-        let expected = paths.profile_state_dir(profile_id.provider(), profile_id.name());
-        if profile.state_dir() != expected {
+        if !paths.is_managed_profile_state_dir(profile_id.provider(), profile.state_dir()) {
             return Err(Error::InvalidConfig(format!(
-                "{label} profile `{profile_id}` state_dir must be {}",
-                expected.display()
+                "{label} profile `{profile_id}` state_dir must be a managed immediate child beneath {}",
+                paths.profile_state_root(profile_id.provider()).display()
             )));
         }
     }

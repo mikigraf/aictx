@@ -320,8 +320,8 @@ mod tests {
     use crate::{
         config::{AppPaths, MetadataStore},
         model::{
-            BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Name, Profile,
-            ProfileId,
+            AutomationPolicy, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Context,
+            Name, Profile, ProfileId, ProfileUid,
         },
     };
 
@@ -349,9 +349,20 @@ mod tests {
 
         store
             .update_config(|config| {
+                let personal_profile_uid = ProfileUid::for_state_dir(
+                    &config.installation_uid,
+                    personal_id.provider(),
+                    &personal_state,
+                )?;
+                let work_profile_uid = ProfileUid::for_state_dir(
+                    &config.installation_uid,
+                    work_id.provider(),
+                    &work_state,
+                )?;
                 config.profiles.insert(
                     personal_id.clone(),
                     Profile::Claude {
+                        profile_uid: personal_profile_uid,
                         billing_domain: BillingDomain::ClaudeSubscription,
                         auth: ClaudeAuth::SubscriptionToken,
                         state_dir: personal_state,
@@ -359,11 +370,13 @@ mod tests {
                         account_hint: None,
                         expected_organization: None,
                         wif: None,
+                        automation: AutomationPolicy::default(),
                     },
                 );
                 config.profiles.insert(
                     work_id.clone(),
                     Profile::Claude {
+                        profile_uid: work_profile_uid,
                         billing_domain: BillingDomain::AnthropicApi,
                         auth: ClaudeAuth::ApiKey,
                         state_dir: work_state,
@@ -371,6 +384,7 @@ mod tests {
                         account_hint: None,
                         expected_organization: None,
                         wif: None,
+                        automation: AutomationPolicy::default(),
                     },
                 );
                 config.contexts.insert(
@@ -488,9 +502,15 @@ mod tests {
             .profile_state_dir(codex_id.provider(), codex_id.name());
         store
             .update_config(|config| {
+                let codex_profile_uid = ProfileUid::for_state_dir(
+                    &config.installation_uid,
+                    codex_id.provider(),
+                    &codex_state,
+                )?;
                 config.profiles.insert(
                     codex_id.clone(),
                     Profile::Codex {
+                        profile_uid: codex_profile_uid,
                         billing_domain: BillingDomain::ChatgptSubscription,
                         auth: CodexAuth::ChatgptOauth,
                         state_dir: codex_state,
@@ -499,6 +519,8 @@ mod tests {
                         expected_workspace_id: None,
                         credential_store: CodexCredentialStore::File,
                         trusted_runners_only: false,
+                        wif: None,
+                        automation: AutomationPolicy::default(),
                     },
                 );
                 config.contexts.insert(
@@ -656,9 +678,15 @@ mod tests {
 
         store
             .update_config(|config| {
+                let codex_profile_uid = ProfileUid::for_state_dir(
+                    &config.installation_uid,
+                    codex_id.provider(),
+                    &codex_state,
+                )?;
                 config.profiles.insert(
                     codex_id.clone(),
                     Profile::Codex {
+                        profile_uid: codex_profile_uid,
                         billing_domain: BillingDomain::OpenaiApi,
                         auth: CodexAuth::ApiKey,
                         state_dir: codex_state,
@@ -667,6 +695,8 @@ mod tests {
                         expected_workspace_id: None,
                         credential_store: CodexCredentialStore::File,
                         trusted_runners_only: false,
+                        wif: None,
+                        automation: AutomationPolicy::default(),
                     },
                 );
                 config

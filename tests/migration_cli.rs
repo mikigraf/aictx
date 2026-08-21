@@ -8,7 +8,7 @@ use std::{
 use ctxlane::{
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     migration::migration_journal_path,
-    model::{Name, Profile, ProfileId, Provider},
+    model::{Name, Profile, ProfileId, ProfileUid, Provider},
 };
 use serde::Serialize;
 use tempfile::TempDir;
@@ -130,13 +130,26 @@ impl Fixture {
         }
         legacy_store
             .update_config(|config| {
+                let installation_uid = config.installation_uid.clone();
                 for (id, _, legacy_path) in &moves {
+                    let immutable_uid =
+                        ProfileUid::for_state_dir(&installation_uid, id.provider(), legacy_path)?;
                     let profile = config
                         .profiles
                         .get_mut(id)
                         .unwrap_or_else(|| panic!("fixture profile {id}"));
                     match profile {
-                        Profile::Claude { state_dir, .. } | Profile::Codex { state_dir, .. } => {
+                        Profile::Claude {
+                            profile_uid,
+                            state_dir,
+                            ..
+                        }
+                        | Profile::Codex {
+                            profile_uid,
+                            state_dir,
+                            ..
+                        } => {
+                            *profile_uid = immutable_uid;
                             state_dir.clone_from(legacy_path);
                         }
                     }

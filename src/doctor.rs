@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::{
     config::{AppPaths, validate_secure_directory, validate_sensitive_file},
-    model::{ClaudeAuth, CodexAuth, Config, Profile, Provider},
+    model::{ClaudeAuth, CodexAuth, Config, Profile, Provider, validate_wif_token_location},
     runner::{
         is_blocked_key, resolve_vendor_binary, validate_claude_settings, validate_codex_settings,
         vendor_version,
@@ -172,6 +172,21 @@ pub fn inspect(
         if provider_filter.is_some_and(|filter| filter != profile.provider()) {
             continue;
         }
+        append_automation_policy(&mut report, profile_id, profile);
+        if matches!(
+            profile,
+            Profile::Codex {
+                auth: CodexAuth::Wif,
+                ..
+            }
+        ) {
+            report.push(
+                CheckLevel::Failure,
+                format!("{profile_id} native WIF runtime"),
+                "Codex WIF enrollment is stored, but native runtime qualification is unavailable in this release",
+            );
+            continue;
+        }
         match validate_secure_directory(profile.state_dir()) {
             Ok(()) => report.push(
                 CheckLevel::Pass,
@@ -191,7 +206,9 @@ pub fn inspect(
             ..
         } = profile
         {
-            match validate_sensitive_file(&wif.identity_token_file) {
+            match validate_wif_token_location(profile_id, &wif.identity_token_file)
+                .and_then(|()| validate_sensitive_file(&wif.identity_token_file))
+            {
                 Ok(()) => report.push(
                     CheckLevel::Pass,
                     format!("{profile_id} identity source"),
@@ -270,6 +287,46 @@ pub fn inspect(
     report
 }
 
+fn append_automation_policy(
+    report: &mut DoctorReport,
+    profile_id: &crate::model::ProfileId,
+    profile: &Profile,
+) {
+    let policy = profile.automation();
+    if policy.eligible {
+        report.push(
+            CheckLevel::Warning,
+            format!("{profile_id} automation policy"),
+            format!(
+                "eligible metadata is configured for {} environment(s), {} role(s), and {} caller(s); automation runtime is not available in this release, so this is not a readiness result",
+                policy.environments.len(),
+                policy.roles.len(),
+                policy.caller_subjects.len()
+            ),
+        );
+    } else {
+        report.push(
+            CheckLevel::Pass,
+            format!("{profile_id} automation policy"),
+            "disabled; this profile is not automation-eligible",
+        );
+    }
+    if policy.authentication_exception_acknowledged {
+        report.push(
+            CheckLevel::Warning,
+            format!("{profile_id} authentication exception"),
+            "a dedicated non-WIF authentication exception is acknowledged in local operator policy",
+        );
+    }
+    if policy.isolation_exception_acknowledged {
+        report.push(
+            CheckLevel::Warning,
+            format!("{profile_id} isolation exception"),
+            "a copied-credential isolation exception is acknowledged in local operator policy",
+        );
+    }
+}
+
 fn needs_keyring(config: &Config, provider_filter: Option<Provider>) -> bool {
     config
         .profiles
@@ -292,21 +349,33 @@ fn suffix(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::PathBuf,
+    };
 
-    use crate::model::{BillingDomain, ClaudeAuth, CodexCredentialStore, ProfileId};
+    use crate::model::{
+        AutomationPolicy, BillingDomain, ClaudeAuth, CodexCredentialStore, CodexWifConfig,
+        ProfileId, ProfileUid,
+    };
 
     use super::*;
 
+    fn uid(index: u32) -> ProfileUid {
+        ProfileUid::parse(format!("profile_{index:026}"))
+            .unwrap_or_else(|error| panic!("profile UID: {error}"))
+    }
+
     #[test]
     fn provider_filter_limits_keyring_diagnostics() {
-        let mut config = Config::default();
+        let mut config = Config::new().unwrap_or_else(|error| panic!("config: {error}"));
         let profile_id: ProfileId = "claude:work"
             .parse()
             .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
         config.profiles.insert(
             profile_id,
             Profile::Claude {
+                profile_uid: uid(1),
                 billing_domain: BillingDomain::AnthropicApi,
                 auth: ClaudeAuth::ApiKey,
                 state_dir: PathBuf::from("unused-test-state"),
@@ -314,6 +383,7 @@ mod tests {
                 account_hint: None,
                 expected_organization: None,
                 wif: None,
+                automation: AutomationPolicy::default(),
             },
         );
         let codex_id: ProfileId = "codex:work"
@@ -322,6 +392,7 @@ mod tests {
         config.profiles.insert(
             codex_id,
             Profile::Codex {
+                profile_uid: uid(2),
                 billing_domain: BillingDomain::ChatgptSubscription,
                 auth: CodexAuth::ChatgptOauth,
                 state_dir: PathBuf::from("unused-test-state-2"),
@@ -330,11 +401,106 @@ mod tests {
                 expected_workspace_id: None,
                 credential_store: CodexCredentialStore::File,
                 trusted_runners_only: false,
+                wif: None,
+                automation: AutomationPolicy::default(),
             },
         );
 
         assert!(needs_keyring(&config, None));
         assert!(needs_keyring(&config, Some(Provider::Claude)));
         assert!(!needs_keyring(&config, Some(Provider::Codex)));
+    }
+
+    #[test]
+    fn codex_wif_is_explicitly_unqualified_without_exposing_enrollment_metadata() {
+        let mut config = Config::new().unwrap_or_else(|error| panic!("config: {error}"));
+        let profile_id: ProfileId = "codex:factory"
+            .parse()
+            .unwrap_or_else(|error| panic!("profile: {error}"));
+        config.profiles.insert(
+            profile_id,
+            Profile::Codex {
+                profile_uid: uid(3),
+                billing_domain: BillingDomain::ChatgptSubscription,
+                auth: CodexAuth::Wif,
+                state_dir: PathBuf::from("/private/CREDENTIAL_CANARY_state"),
+                secret_ref: None,
+                account_hint: None,
+                expected_workspace_id: None,
+                credential_store: CodexCredentialStore::File,
+                trusted_runners_only: false,
+                wif: Some(CodexWifConfig {
+                    federation_rule_id: "idpm_CREDENTIAL_CANARY_rule".to_owned(),
+                    identity_token_file: PathBuf::from("/private/CREDENTIAL_CANARY_token"),
+                    expected_workspace: "chatgpt-workspace:CREDENTIAL_CANARY".to_owned(),
+                    expected_principal: "service-account:CREDENTIAL_CANARY".to_owned(),
+                    allowed_environments: BTreeSet::from(["production".to_owned()]),
+                    allowed_workload_labels: BTreeMap::new(),
+                    workload_identity_context: None,
+                    minimum_codex_version: "0.148.0".to_owned(),
+                }),
+                automation: AutomationPolicy::default(),
+            },
+        );
+        let paths = AppPaths::for_root(PathBuf::from("/tmp/ctxlane-doctor-wif"));
+        let report = inspect(&config, &paths, Path::new("/tmp"), Some(Provider::Codex));
+        let rendered = serde_json::to_string(&report.checks)
+            .unwrap_or_else(|error| panic!("serialize report: {error}"));
+        assert!(rendered.contains("native WIF runtime"));
+        assert!(rendered.contains("qualification is unavailable"));
+        assert!(!rendered.contains("CREDENTIAL_CANARY"));
+        assert!(report.has_failures());
+    }
+
+    #[test]
+    fn automation_policy_reports_only_counts_and_explicit_exception_classes() {
+        let profile_id: ProfileId = "codex:factory"
+            .parse()
+            .unwrap_or_else(|error| panic!("profile: {error}"));
+        let automation = AutomationPolicy {
+            eligible: true,
+            environments: BTreeSet::from([
+                "local-development".to_owned(),
+                "CREDENTIAL_CANARY_ENVIRONMENT".to_owned(),
+            ]),
+            roles: BTreeSet::from([crate::model::AutomationRole::PrReviewer]),
+            caller_subjects: BTreeSet::from([
+                "caller:CREDENTIAL_CANARY_CALLER".to_owned(),
+                "caller:local-controller".to_owned(),
+            ]),
+            require_workload_identity: false,
+            authentication_exception_acknowledged: true,
+            isolation_exception_acknowledged: true,
+            ..AutomationPolicy::default()
+        };
+        let profile = Profile::Codex {
+            profile_uid: uid(4),
+            billing_domain: BillingDomain::ChatgptSubscription,
+            auth: CodexAuth::ChatgptOauth,
+            state_dir: PathBuf::from("unused-test-state"),
+            secret_ref: None,
+            account_hint: None,
+            expected_workspace_id: None,
+            credential_store: CodexCredentialStore::File,
+            trusted_runners_only: false,
+            wif: None,
+            automation,
+        };
+        let mut report = DoctorReport::default();
+        append_automation_policy(&mut report, &profile_id, &profile);
+        assert_eq!(report.checks.len(), 3);
+        assert_eq!(report.checks[0].level, CheckLevel::Warning);
+        assert!(report.checks[0].detail.contains("2 environment(s)"));
+        assert!(report.checks[0].detail.contains("1 role(s)"));
+        assert!(report.checks[0].detail.contains("2 caller(s)"));
+        assert!(report.checks[0].detail.contains("not a readiness result"));
+        assert_eq!(
+            report.checks[1].name,
+            "codex:factory authentication exception"
+        );
+        assert_eq!(report.checks[2].name, "codex:factory isolation exception");
+        let rendered = serde_json::to_string(&report.checks)
+            .unwrap_or_else(|error| panic!("serialize checks: {error}"));
+        assert!(!rendered.contains("CREDENTIAL_CANARY"));
     }
 }

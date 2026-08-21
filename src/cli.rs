@@ -54,6 +54,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Initialize versioned metadata and secure application directories.
@@ -152,6 +153,7 @@ pub struct ProfileArgs {
     pub command: ProfileCommand,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
     /// Add a provider profile with a validated authentication/billing combination.
@@ -175,7 +177,7 @@ pub enum ProfileCommand {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  ctxlane profile add claude personal --auth subscription\n  ctxlane profile add codex work --auth subscription\n  ctxlane profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --identity-token-file /run/secrets/anthropic.jwt"
+    after_long_help = "Examples:\n  ctxlane profile add claude personal --auth subscription\n  ctxlane profile add codex work --auth subscription\n  ctxlane profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --service-account-id svc_123 --identity-token-file /run/secrets/anthropic.jwt\n  ctxlane profile add codex factory --auth wif --federation-rule-id idpm_rule --identity-token-file /run/secrets/openai.jwt --workspace chatgpt-workspace:factory --principal service-account:factory --environment production --minimum-codex-version 0.148.0"
 )]
 pub struct ProfileAddArgs {
     /// Vendor that owns the profile: `claude` or `codex`.
@@ -205,11 +207,11 @@ pub struct ProfileAddArgs {
     pub workspace: Option<String>,
 
     /// Anthropic WIF organization ID.
-    #[arg(long, requires = "federation_rule_id")]
+    #[arg(long)]
     pub organization_id: Option<String>,
 
-    /// Anthropic WIF federation rule ID.
-    #[arg(long, requires = "organization_id")]
+    /// Provider WIF federation rule ID.
+    #[arg(long)]
     pub federation_rule_id: Option<String>,
 
     /// Anthropic WIF service account ID.
@@ -219,6 +221,38 @@ pub struct ProfileAddArgs {
     /// File populated by the upstream identity provider with an OIDC identity token.
     #[arg(long)]
     pub identity_token_file: Option<PathBuf>,
+
+    /// Expected normalized Codex WIF principal (`user:...` or `service-account:...`).
+    #[arg(long)]
+    pub principal: Option<String>,
+
+    /// Environment allowed to use a Codex WIF profile. Repeat for multiple values.
+    #[arg(long = "environment", value_name = "NAME")]
+    pub environments: Vec<String>,
+
+    /// Required Codex WIF workload label in `KEY=VALUE` form. Repeat as needed.
+    #[arg(long = "workload-label", value_name = "KEY=VALUE")]
+    pub workload_labels: Vec<String>,
+
+    /// Optional non-authoritative Codex workload-context instance ID.
+    #[arg(long)]
+    pub workload_instance_id: Option<String>,
+
+    /// Optional non-authoritative Codex workload-context display name.
+    #[arg(long, requires = "workload_instance_id")]
+    pub workload_display_name: Option<String>,
+
+    /// Optional non-authoritative Codex context label in `KEY=VALUE` form.
+    #[arg(
+        long = "workload-context-label",
+        value_name = "KEY=VALUE",
+        requires = "workload_instance_id"
+    )]
+    pub workload_context_labels: Vec<String>,
+
+    /// Minimum qualified Codex CLI version in canonical `x.y.z` form.
+    #[arg(long)]
+    pub minimum_codex_version: Option<String>,
 
     /// Codex's vendor-owned credential storage policy inside the isolated `CODEX_HOME`.
     #[arg(long, value_enum, default_value_t)]

@@ -320,7 +320,7 @@ mod tests {
     use super::*;
 
     fn config_with_contexts() -> Config {
-        let mut config = Config::default();
+        let mut config = Config::new().unwrap_or_else(|error| panic!("config: {error}"));
         let personal = Name::parse("personal")
             .unwrap_or_else(|error| panic!("valid name should parse: {error}"));
         let work =

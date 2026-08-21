@@ -263,7 +263,12 @@ fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
     assert!(
         malformed_run
             .output
-            .contains("failed to parse TOML metadata")
+            .contains("failed to parse configuration")
+            && malformed_run
+                .output
+                .contains("parser details and input were redacted"),
+        "PTY output:\n{}",
+        malformed_run.output
     );
     assert_eq!(
         fs::read_to_string(&malformed_config)
