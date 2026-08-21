@@ -11,11 +11,16 @@ use crate::{
     Error, Result, activation,
     binary::is_in_current_repository,
     cli::{
-        Cli, Command, ContextCommand, CredentialCommand, InitArgs, LoginArgs, ProfileAddArgs,
-        ProfileCommand,
+        Cli, Command, ContextCommand, CredentialCommand, InitArgs, LoginArgs, MigrateCommand,
+        ProfileAddArgs, ProfileCommand,
     },
     config::{AppPaths, MetadataStore, acquire_profile_lock, ensure_secure_directory},
     doctor,
+    identity::{LEGACY_AICTX, TARGET_CTXLANE},
+    migration::{
+        MigrationPlan, MigrationSummary, RecoveryOutcome, migration_journal_path,
+        recover_incomplete,
+    },
     model::{
         AuthArg, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Context, Name,
         Profile, ProfileId, Provider, WifConfig,
@@ -238,6 +243,133 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             shell::generate_completions(args.shell);
             Ok(0)
         }
+        Some(Command::Migrate(args)) => execute_migration(cli.root.as_deref(), args.command),
+    }
+}
+
+fn execute_migration(target_root: Option<&Path>, command: MigrateCommand) -> Result<i32> {
+    match command {
+        MigrateCommand::Aictx(args) => {
+            let (legacy, target) = resolve_migration_paths(target_root, args.from_root.as_deref())?;
+            let plan = MigrationPlan::inspect(&legacy, &target)?;
+            if args.dry_run {
+                println!("Migration plan (dry run; no files were changed).");
+                print_migration_paths(&legacy, &target);
+                print_migration_summary(plan.summary());
+                return Ok(0);
+            }
+
+            let receipt = plan.execute()?;
+            println!("Copied the aictx store into the ctxlane layout.");
+            print_migration_paths(&legacy, &target);
+            print_migration_summary(receipt.summary());
+            print_safe_path("new config", receipt.config_file());
+            print_safe_path("new state", receipt.state_file());
+            print_source_preservation_receipt();
+            Ok(0)
+        }
+        MigrateCommand::Recover(args) => {
+            let (legacy, target) = resolve_migration_paths(target_root, args.from_root.as_deref())?;
+            match recover_incomplete(&legacy, &target)? {
+                RecoveryOutcome::NothingToRecover => {
+                    println!("No incomplete aictx-to-ctxlane migration was found.");
+                }
+                RecoveryOutcome::RolledBack => {
+                    println!("Rolled back the incomplete aictx-to-ctxlane migration.");
+                    print_source_preservation_receipt();
+                }
+                RecoveryOutcome::Finalized => {
+                    println!("Finalized the verified aictx-to-ctxlane migration.");
+                    println!("The migrated ctxlane store was kept.");
+                    print_source_preservation_receipt();
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn resolve_migration_paths(
+    target_root: Option<&Path>,
+    legacy_root: Option<&Path>,
+) -> Result<(AppPaths, AppPaths)> {
+    if target_root.is_some() && legacy_root.is_none() {
+        return Err(Error::InvalidInput(
+            "`--from-root <ABSOLUTE_PATH>` is required when global `--root` selects the ctxlane migration target"
+                .to_owned(),
+        ));
+    }
+    if let Some(root) = legacy_root {
+        validate_from_root(root)?;
+    }
+    let legacy = AppPaths::discover_for(LEGACY_AICTX, legacy_root)?;
+    let target = AppPaths::discover_for(TARGET_CTXLANE, target_root)?;
+    Ok((legacy, target))
+}
+
+fn validate_from_root(root: &Path) -> Result<()> {
+    if !root.is_absolute() {
+        return Err(Error::InvalidInput(format!(
+            "`--from-root` must be absolute: {}",
+            terminal_safe(&root.display().to_string())
+        )));
+    }
+    if root.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(Error::InvalidInput(format!(
+            "`--from-root` must not contain `.` or `..` path components: {}",
+            terminal_safe(&root.display().to_string())
+        )));
+    }
+    Ok(())
+}
+
+fn print_migration_paths(legacy: &AppPaths, target: &AppPaths) {
+    print_safe_path("old config", &legacy.config_dir);
+    print_safe_path("old data", &legacy.data_dir);
+    print_safe_path("old state", &legacy.state_dir);
+    print_safe_path("new config", &target.config_dir);
+    print_safe_path("new data", &target.data_dir);
+    print_safe_path("new state", &target.state_dir);
+}
+
+fn print_migration_summary(summary: MigrationSummary) {
+    println!("  profiles: {}", summary.profile_count());
+    println!("  vendor files: {}", summary.vendor_file_count());
+    println!("  vendor directories: {}", summary.vendor_directory_count());
+    println!("  skipped lock entries: {}", summary.skipped_lock_count());
+}
+
+fn print_safe_path(label: &str, path: &Path) {
+    println!("  {label}: {}", terminal_safe(&path.display().to_string()));
+}
+
+fn print_source_preservation_receipt() {
+    println!("The old aictx store remains available.");
+    println!("Its metadata, vendor state, and credentials were not changed.");
+}
+
+/// Refuse ordinary startup while a ctxlane migration journal needs recovery.
+///
+/// This helper is intentionally not active while `aictx` remains the current
+/// runtime identity. The ctxlane entry point can call it before loading target
+/// metadata after the rename is complete.
+pub fn guard_against_incomplete_migration(target: &AppPaths) -> Result<()> {
+    let journal = migration_journal_path(target);
+    match fs::symlink_metadata(&journal) {
+        Ok(_) => Err(Error::PolicyRefused(format!(
+            "an incomplete migration journal exists at {}; run `ctxlane migrate recover` before using ctxlane",
+            terminal_safe(&journal.display().to_string())
+        ))),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::ReadFile {
+            path: journal,
+            source,
+        }),
     }
 }
 

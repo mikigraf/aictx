@@ -90,6 +90,46 @@ pub enum Command {
     ShellInit(ShellInitArgs),
     /// Generate static shell completion definitions.
     Completions(CompletionsArgs),
+    /// Copy an existing aictx store without moving or deleting source data.
+    Migrate(MigrateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct MigrateArgs {
+    #[command(subcommand)]
+    pub command: MigrateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MigrateCommand {
+    /// Inspect or copy the legacy aictx store without moving or deleting source data.
+    Aictx(MigrateAictxArgs),
+    /// Clean up or finalize an interrupted aictx-to-ctxlane migration.
+    Recover(MigrateRecoverArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  aictx migrate aictx --dry-run\n  aictx migrate aictx\n  aictx --root /new/ctxlane migrate aictx --from-root /old/aictx"
+)]
+pub struct MigrateAictxArgs {
+    /// Read the legacy aictx store from this absolute root.
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    pub from_root: Option<PathBuf>,
+
+    /// Validate and describe the copy without creating target files.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  aictx migrate recover\n  aictx --root /new/ctxlane migrate recover --from-root /old/aictx"
+)]
+pub struct MigrateRecoverArgs {
+    /// Read the legacy aictx store from this absolute root.
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    pub from_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
