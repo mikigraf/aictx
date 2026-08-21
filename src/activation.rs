@@ -329,7 +329,7 @@ mod tests {
 
     fn fixture() -> (TempDir, MetadataStore, Name, Name) {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("aictx"));
+        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
         let store = MetadataStore::new(paths.clone());
         store
             .initialize()
@@ -355,7 +355,7 @@ mod tests {
                         billing_domain: BillingDomain::ClaudeSubscription,
                         auth: ClaudeAuth::SubscriptionToken,
                         state_dir: personal_state,
-                        secret_ref: Some("keyring://aictx/claude-personal".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/claude-personal".to_owned()),
                         account_hint: None,
                         expected_organization: None,
                         wif: None,
@@ -367,7 +367,7 @@ mod tests {
                         billing_domain: BillingDomain::AnthropicApi,
                         auth: ClaudeAuth::ApiKey,
                         state_dir: work_state,
-                        secret_ref: Some("keyring://aictx/claude-work".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/claude-work".to_owned()),
                         account_hint: None,
                         expected_organization: None,
                         wif: None,
@@ -662,7 +662,7 @@ mod tests {
                         billing_domain: BillingDomain::OpenaiApi,
                         auth: CodexAuth::ApiKey,
                         state_dir: codex_state,
-                        secret_ref: Some("keyring://aictx/codex-work".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/codex-work".to_owned()),
                         account_hint: None,
                         expected_workspace_id: None,
                         credential_store: CodexCredentialStore::File,

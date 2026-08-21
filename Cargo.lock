@@ -23,31 +23,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aictx"
-version = "0.1.0"
-dependencies = [
- "atomic-write-file",
- "clap",
- "clap_complete",
- "crossterm",
- "directories",
- "keyring",
- "portable-pty",
- "ratatui",
- "rpassword",
- "rustix",
- "secrecy",
- "serde",
- "serde_json",
- "signal-hook 0.4.4",
- "tempfile",
- "thiserror 2.0.20",
- "toml",
- "toml_edit",
- "which",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -568,6 +543,31 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "ctxlane"
+version = "0.2.0"
+dependencies = [
+ "atomic-write-file",
+ "clap",
+ "clap_complete",
+ "crossterm",
+ "directories",
+ "keyring",
+ "portable-pty",
+ "ratatui",
+ "rpassword",
+ "rustix",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "signal-hook 0.4.4",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml",
+ "toml_edit",
+ "which",
 ]
 
 [[package]]

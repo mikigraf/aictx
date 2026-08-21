@@ -1,10 +1,10 @@
 use std::{path::Path, process::Command};
 
-use aictx::Error;
+use ctxlane::Error;
 use tempfile::TempDir;
 
-fn aictx(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aictx"));
+fn ctxlane(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root").arg(root);
     command
 }
@@ -37,21 +37,21 @@ fn exit_codes_remain_stable_by_error_category() {
 #[test]
 fn recovery_hints_cover_actionable_error_categories() {
     let cases = [
-        (Error::NotInitialized, "aictx init"),
+        (Error::NotInitialized, "ctxlane init"),
         (
             Error::ProfileNotFound("claude:missing".to_owned()),
-            "aictx profile list",
+            "ctxlane profile list",
         ),
         (
             Error::ContextNotFound("missing".to_owned()),
-            "aictx context list",
+            "ctxlane context list",
         ),
         (
             Error::CredentialUnavailable {
                 profile: "codex:work".to_owned(),
                 reason: "missing".to_owned(),
             },
-            "aictx login codex:work",
+            "ctxlane login codex:work",
         ),
         (
             Error::InteractionRequired("terminal needed".to_owned()),
@@ -63,7 +63,7 @@ fn recovery_hints_cover_actionable_error_categories() {
         ),
         (
             Error::VendorIncompatible("missing CLI".to_owned()),
-            "aictx doctor",
+            "ctxlane doctor",
         ),
         (
             Error::InvalidConfig("bad metadata".to_owned()),
@@ -94,7 +94,7 @@ fn credential_renderer_uses_only_valid_profile_ids_in_commands() {
     }
     .render_for_terminal();
     assert!(valid.contains("credential unavailable for codex:work"));
-    assert!(valid.contains("`aictx login codex:work`"));
+    assert!(valid.contains("`ctxlane login codex:work`"));
 
     let opaque_handle = "codex-work-opaque-keyring-handle";
     let opaque = Error::CredentialUnavailable {
@@ -103,8 +103,8 @@ fn credential_renderer_uses_only_valid_profile_ids_in_commands() {
     }
     .render_for_terminal();
     assert!(!opaque.contains(opaque_handle));
-    assert!(opaque.contains("aictx: credential unavailable: no credential is stored"));
-    assert!(opaque.contains("`aictx login <provider:name>`"));
+    assert!(opaque.contains("ctxlane: credential unavailable: no credential is stored"));
+    assert!(opaque.contains("`ctxlane login <provider:name>`"));
 }
 
 #[test]
@@ -121,32 +121,32 @@ fn terminal_renderer_escapes_control_characters() {
 #[test]
 fn main_prints_one_error_and_one_hint() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
-    let output = aictx(&root)
+    let root = temporary.path().join("ctxlane");
+    let output = ctxlane(&root)
         .args(["profile", "list"])
         .output()
-        .unwrap_or_else(|error| panic!("run aictx: {error}"));
+        .unwrap_or_else(|error| panic!("run ctxlane: {error}"));
 
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr)
         .unwrap_or_else(|error| panic!("stderr should be UTF-8: {error}"));
-    assert_eq!(stderr.matches("aictx:").count(), 1);
+    assert_eq!(stderr.matches("ctxlane:").count(), 1);
     assert_eq!(stderr.matches("Hint:").count(), 1);
-    assert!(stderr.contains("aictx: aictx is not initialized"));
-    assert!(stderr.contains("Hint: Run `aictx init`"));
+    assert!(stderr.contains("ctxlane: ctxlane is not initialized"));
+    assert!(stderr.contains("Hint: Run `ctxlane init`"));
 }
 
 #[test]
 fn main_preserves_missing_resource_exit_code_and_hint() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
-    let init = aictx(&root)
+    let root = temporary.path().join("ctxlane");
+    let init = ctxlane(&root)
         .arg("init")
         .output()
-        .unwrap_or_else(|error| panic!("initialize aictx: {error}"));
+        .unwrap_or_else(|error| panic!("initialize ctxlane: {error}"));
     assert!(init.status.success());
 
-    let output = aictx(&root)
+    let output = ctxlane(&root)
         .args(["profile", "show", "claude:missing"])
         .output()
         .unwrap_or_else(|error| panic!("show missing profile: {error}"));
@@ -154,48 +154,48 @@ fn main_preserves_missing_resource_exit_code_and_hint() {
     let stderr = String::from_utf8(output.stderr)
         .unwrap_or_else(|error| panic!("stderr should be UTF-8: {error}"));
     assert!(stderr.contains("profile not found: claude:missing"));
-    assert!(stderr.contains("Hint: Run `aictx profile list`"));
+    assert!(stderr.contains("Hint: Run `ctxlane profile list`"));
 }
 
 #[test]
 fn close_context_and_profile_typos_include_safe_suggestions() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     for arguments in [
         vec!["init"],
         vec!["profile", "add", "claude", "personal", "--auth", "api-key"],
         vec!["context", "add", "personal", "--claude", "claude:personal"],
     ] {
-        let output = aictx(&root)
+        let output = ctxlane(&root)
             .args(arguments)
             .output()
             .unwrap_or_else(|error| panic!("prepare typo contract: {error}"));
         assert!(output.status.success());
     }
 
-    let context = aictx(&root)
+    let context = ctxlane(&root)
         .args(["use", "persnal"])
         .output()
         .unwrap_or_else(|error| panic!("run misspelled context: {error}"));
     assert_eq!(context.status.code(), Some(10));
     let context_error = String::from_utf8_lossy(&context.stderr);
     assert!(context_error.contains("did you mean `personal`?"));
-    assert!(context_error.contains("aictx context list"));
+    assert!(context_error.contains("ctxlane context list"));
 
-    let profile = aictx(&root)
+    let profile = ctxlane(&root)
         .args(["profile", "show", "claude:persnal"])
         .output()
         .unwrap_or_else(|error| panic!("run misspelled profile: {error}"));
     assert_eq!(profile.status.code(), Some(10));
     let profile_error = String::from_utf8_lossy(&profile.stderr);
     assert!(profile_error.contains("did you mean `claude:personal`?"));
-    assert!(profile_error.contains("aictx profile list"));
+    assert!(profile_error.contains("ctxlane profile list"));
 }
 
 #[test]
 fn every_public_help_surface_is_parseable_and_actionable() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let surfaces: &[&[&str]] = &[
         &["--help"],
         &["help"],
@@ -228,7 +228,7 @@ fn every_public_help_surface_is_parseable_and_actionable() {
     ];
 
     for arguments in surfaces {
-        let output = aictx(&root)
+        let output = ctxlane(&root)
             .args(*arguments)
             .output()
             .unwrap_or_else(|error| panic!("run help surface {arguments:?}: {error}"));
@@ -245,16 +245,16 @@ fn every_public_help_surface_is_parseable_and_actionable() {
         );
     }
 
-    let init = aictx(&root)
+    let init = ctxlane(&root)
         .args(["init", "--help"])
         .output()
         .unwrap_or_else(|error| panic!("run init help: {error}"));
     let init = String::from_utf8_lossy(&init.stdout);
     assert!(init.contains("--guided"));
     assert!(init.contains("claude setup-token"));
-    assert!(init.contains("aictx run --profile claude:personal"));
+    assert!(init.contains("ctxlane run --profile claude:personal"));
 
-    let login = aictx(&root)
+    let login = ctxlane(&root)
         .args(["login", "--help"])
         .output()
         .unwrap_or_else(|error| panic!("run login help: {error}"));
@@ -262,7 +262,7 @@ fn every_public_help_surface_is_parseable_and_actionable() {
     assert!(login.contains("claude:personal"));
     assert!(login.contains("Examples:"));
 
-    let profile_add = aictx(&root)
+    let profile_add = ctxlane(&root)
         .args(["profile", "add", "--help"])
         .output()
         .unwrap_or_else(|error| panic!("run profile-add help: {error}"));

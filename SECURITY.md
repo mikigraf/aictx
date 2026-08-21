@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-Before the first stable release, security fixes are made on the latest `0.1.x` line only. Upgrade to the newest patch release before reporting a problem that may already be fixed.
+Before the first stable release, security fixes are made on the latest `0.2.x` line only. Upgrade to the newest patch release before reporting a problem that may already be fixed.
 
 | Version | Supported |
 | --- | --- |
-| latest `0.1.x` | yes |
-| older pre-release/patch versions | no |
+| latest `0.2.x` | yes |
+| `aictx` `0.1.x` and older builds | no |
 
 No deployment should treat the current implementation as qualified for its OS, native keyring, and vendor versions without completing the checks in [docs/compatibility.md](docs/compatibility.md).
 
@@ -21,7 +21,7 @@ If that private channel is unavailable, do not post exploit details publicly. Co
 
 Include only sanitized evidence:
 
-- affected `aictx` version/commit and operating system;
+- affected `ctxlane` version/commit and operating system;
 - vendor CLI name/version, without account output;
 - the security invariant that failed;
 - minimal reproduction using fake credentials and, preferably, fake vendor executables;
@@ -50,7 +50,7 @@ Treat any real credential included in an issue, log, screenshot, artifact, or te
 4. replace affected local vendor state;
 5. report the product defect with a synthetic reproduction.
 
-`aictx logout` is local cleanup and is not sufficient remote revocation.
+`ctxlane logout` is local cleanup and is not sufficient remote revocation.
 
 ## Release security
 

@@ -213,7 +213,7 @@ fn canonicalize_with_missing(path: &Path) -> Result<std::path::PathBuf> {
         .any(|component| component == std::path::Component::ParentDir)
     {
         return Err(Error::InvalidInput(format!(
-            "cannot resolve missing binding path {} while it contains `..`; use the absolute path shown by `aictx bindings`",
+            "cannot resolve missing binding path {} while it contains `..`; use the absolute path shown by `ctxlane bindings`",
             path.display()
         )));
     }

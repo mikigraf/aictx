@@ -9,7 +9,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use aictx::{
+use ctxlane::{
     Error, Result,
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     model::{
@@ -23,11 +23,11 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 const RECORD_FILE: &str = "native-vendor-record.json";
-const STATIC_SECRET_CANARY: &str = "aictx-native-fixture-static-secret-v1";
-const TRUSTED_PUSH_CHILD: &str = "AICTX_NATIVE_VENDOR_TRUSTED_PUSH_CHILD";
+const STATIC_SECRET_CANARY: &str = "ctxlane-native-fixture-static-secret-v1";
+const TRUSTED_PUSH_CHILD: &str = "CTXLANE_NATIVE_VENDOR_TRUSTED_PUSH_CHILD";
 
-fn aictx(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aictx"));
+fn ctxlane(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root").arg(root);
     command.env("CI", "true");
     command.env("GITHUB_EVENT_NAME", "push");
@@ -67,7 +67,7 @@ fn rerun_as_trusted_push(test_name: &str) -> bool {
 fn run_ok(command: &mut Command) -> Output {
     let output = command
         .output()
-        .unwrap_or_else(|error| panic!("run aictx: {error}"));
+        .unwrap_or_else(|error| panic!("run ctxlane: {error}"));
     assert!(
         output.status.success(),
         "command failed\nstdout: {}\nstderr: {}",
@@ -80,7 +80,7 @@ fn run_ok(command: &mut Command) -> Output {
 fn trusted_vendor(temporary: &TempDir, name: &str) -> PathBuf {
     let suffix = env::consts::EXE_SUFFIX;
     let destination = temporary.path().join(format!("{name}{suffix}"));
-    fs::copy(env!("CARGO_BIN_EXE_aictx-test-vendor"), &destination)
+    fs::copy(env!("CARGO_BIN_EXE_ctxlane-test-vendor"), &destination)
         .unwrap_or_else(|error| panic!("copy native vendor fixture: {error}"));
     #[cfg(unix)]
     {
@@ -161,7 +161,7 @@ fn native_version_preflight_rejects_exit_oversize_and_terminal_controls() {
         };
         let mut config = Config::default();
         config.binaries.claude = executable;
-        let error = match vendor_version(&config, aictx::model::Provider::Claude) {
+        let error = match vendor_version(&config, ctxlane::model::Provider::Claude) {
             Ok(version) => panic!("{name} unexpectedly reported version {version}"),
             Err(error) => error,
         };
@@ -176,14 +176,14 @@ fn native_version_preflight_rejects_exit_oversize_and_terminal_controls() {
 #[test]
 fn native_wif_cli_flow_preserves_arguments_selectors_and_exit_status() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let fake_claude = trusted_vendor(&temporary, "claude");
     let identity_token = temporary.path().join("identity.jwt");
     private_file(&identity_token, "synthetic-identity-token");
 
-    run_ok(aictx(&root).arg("init"));
+    run_ok(ctxlane(&root).arg("init"));
     run_ok(
-        aictx(&root).args([
+        ctxlane(&root).args([
             "profile",
             "add",
             "claude",
@@ -203,7 +203,7 @@ fn native_wif_cli_flow_preserves_arguments_selectors_and_exit_status() {
         ]),
     );
 
-    run_ok(aictx(&root).arg("--claude-bin").arg(&fake_claude).args([
+    run_ok(ctxlane(&root).arg("--claude-bin").arg(&fake_claude).args([
         "--non-interactive",
         "run",
         "--profile",
@@ -230,7 +230,7 @@ fn native_wif_cli_flow_preserves_arguments_selectors_and_exit_status() {
     assert_eq!(captured["has_anthropic_api_key"], false);
     assert_eq!(captured["has_openai_api_key"], false);
 
-    let exited = aictx(&root)
+    let exited = ctxlane(&root)
         .arg("--claude-bin")
         .arg(&fake_claude)
         .args([
@@ -250,10 +250,10 @@ fn native_wif_cli_flow_preserves_arguments_selectors_and_exit_status() {
 #[test]
 fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let fake_codex = trusted_vendor(&temporary, "codex");
-    run_ok(aictx(&root).arg("init"));
-    run_ok(aictx(&root).args([
+    run_ok(ctxlane(&root).arg("init"));
+    run_ok(ctxlane(&root).args([
         "profile",
         "add",
         "codex",
@@ -264,7 +264,7 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
         "ws_test",
     ]));
 
-    run_ok(aictx(&root).arg("--codex-bin").arg(&fake_codex).args([
+    run_ok(ctxlane(&root).arg("--codex-bin").arg(&fake_codex).args([
         "--non-interactive",
         "run",
         "--profile",
@@ -287,7 +287,7 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
     assert!(codex_config.contains("shell_environment_policy"));
 
     let logout = run_ok(
-        aictx(&root)
+        ctxlane(&root)
             .arg("--codex-bin")
             .arg(&fake_codex)
             .args(["logout", "codex:work"]),
@@ -299,7 +299,7 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
 
     fs::write(state_dir.join("native-vendor-logout-fail"), b"fail")
         .unwrap_or_else(|error| panic!("write logout-failure marker: {error}"));
-    let failed_logout = aictx(&root)
+    let failed_logout = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args(["logout", "codex:work"])
@@ -317,7 +317,7 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
         b"unavailable",
     )
     .unwrap_or_else(|error| panic!("write unavailable-login marker: {error}"));
-    let doctor = aictx(&root)
+    let doctor = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
@@ -338,7 +338,7 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
             .iter()
             .any(|check| check["level"] == "failure" && check["name"] == "codex:work credential")
     }));
-    let unavailable = aictx(&root)
+    let unavailable = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
@@ -360,10 +360,10 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
 #[test]
 fn native_pull_request_policy_refuses_long_lived_profile_before_vendor_execution() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let fake_codex = trusted_vendor(&temporary, "codex-pr-policy");
-    run_ok(aictx(&root).arg("init"));
-    run_ok(aictx(&root).args([
+    run_ok(ctxlane(&root).arg("init"));
+    run_ok(ctxlane(&root).args([
         "profile",
         "add",
         "codex",
@@ -376,7 +376,7 @@ fn native_pull_request_policy_refuses_long_lived_profile_before_vendor_execution
 
     let record_path = root.join("data/vendor-state/codex/work").join(RECORD_FILE);
     for event in ["pull_request", "pull_request_target"] {
-        let refused = aictx(&root)
+        let refused = ctxlane(&root)
             .arg("--codex-bin")
             .arg(&fake_codex)
             .env("GITHUB_EVENT_NAME", event)
@@ -412,7 +412,7 @@ struct StaticSecret {
 
 impl SecretProvider for StaticSecret {
     fn get(&self, reference: &SecretRef, _non_interactive: bool) -> Result<SecretString> {
-        assert_eq!(reference.to_string(), "keyring://aictx/claude-api");
+        assert_eq!(reference.to_string(), "keyring://ctxlane/claude-api");
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(SecretString::from(STATIC_SECRET_CANARY))
     }
@@ -425,7 +425,7 @@ fn native_static_claude_preflight_gates_the_main_process() {
     }
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let paths = AppPaths::for_root(temporary.path().join("aictx"));
+    let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
     let store = MetadataStore::new(paths.clone());
     store
         .initialize()
@@ -441,7 +441,7 @@ fn native_static_claude_preflight_gates_the_main_process() {
         billing_domain: BillingDomain::AnthropicApi,
         auth: ClaudeAuth::ApiKey,
         state_dir: state_dir.clone(),
-        secret_ref: Some("keyring://aictx/claude-api".to_owned()),
+        secret_ref: Some("keyring://ctxlane/claude-api".to_owned()),
         account_hint: None,
         expected_organization: None,
         wif: None,
@@ -541,7 +541,7 @@ struct CodexStaticSecret {
 
 impl SecretProvider for CodexStaticSecret {
     fn get(&self, reference: &SecretRef, _non_interactive: bool) -> Result<SecretString> {
-        assert_eq!(reference.to_string(), "keyring://aictx/codex-api");
+        assert_eq!(reference.to_string(), "keyring://ctxlane/codex-api");
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(SecretString::from(STATIC_SECRET_CANARY))
     }
@@ -556,7 +556,7 @@ fn native_codex_api_key_uses_stdin_login_and_keeps_secret_out_of_main_child() {
     }
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let paths = AppPaths::for_root(temporary.path().join("aictx"));
+    let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
     let store = MetadataStore::new(paths.clone());
     store
         .initialize()
@@ -572,7 +572,7 @@ fn native_codex_api_key_uses_stdin_login_and_keeps_secret_out_of_main_child() {
         billing_domain: BillingDomain::OpenaiApi,
         auth: CodexAuth::ApiKey,
         state_dir: state_dir.clone(),
-        secret_ref: Some("keyring://aictx/codex-api".to_owned()),
+        secret_ref: Some("keyring://ctxlane/codex-api".to_owned()),
         account_hint: None,
         expected_workspace_id: None,
         credential_store: CodexCredentialStore::File,

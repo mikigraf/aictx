@@ -11,7 +11,7 @@ use std::{
 use secrecy::ExposeSecret;
 
 const RECORD_FILE: &str = "native-vendor-record.json";
-const STATIC_SECRET_CANARY: &str = "aictx-native-fixture-static-secret-v1";
+const STATIC_SECRET_CANARY: &str = "ctxlane-native-fixture-static-secret-v1";
 const SYNTHETIC_SETUP_TOKEN: &str =
     "opaque-fixture:Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~";
 
@@ -90,7 +90,7 @@ fn run() -> io::Result<i32> {
 }
 
 fn prompt_setup_token() -> i32 {
-    match aictx::secret::prompt_claude_setup_token("Synthetic Claude setup-token", false) {
+    match ctxlane::secret::prompt_claude_setup_token("Synthetic Claude setup-token", false) {
         Ok(secret) if secret.expose_secret() == SYNTHETIC_SETUP_TOKEN => {
             println!("synthetic setup-token accepted");
             0
@@ -123,7 +123,7 @@ fn version() -> io::Result<i32> {
         println!("fake-vendor\u{1b}[31m");
         return Ok(0);
     }
-    println!("aictx-test-vendor 1.0");
+    println!("ctxlane-test-vendor 1.0");
     Ok(0)
 }
 
@@ -197,9 +197,9 @@ fn write_record(arguments: &[OsString]) -> io::Result<()> {
             .map(|value| value.to_string_lossy().into_owned()),
         "anthropic_identity_token_file": env::var_os("ANTHROPIC_IDENTITY_TOKEN_FILE")
             .map(|value| value.to_string_lossy().into_owned()),
-        "aictx_profile": env::var_os("AICTX_PROFILE")
+        "ctxlane_profile": env::var_os("CTXLANE_PROFILE")
             .map(|value| value.to_string_lossy().into_owned()),
-        "aictx_context": env::var_os("AICTX_CONTEXT")
+        "ctxlane_context": env::var_os("CTXLANE_CONTEXT")
             .map(|value| value.to_string_lossy().into_owned()),
     });
     fs::write(state_directory().join(RECORD_FILE), record.to_string())

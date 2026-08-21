@@ -1,10 +1,10 @@
-# aictx
+# ctxlane
 
 **Use the right AI coding account, every time.**
 
-`aictx` safely switches and isolates personal, work, and CI identities across Claude Code and Codex.
+Switch between Claude Code and Codex accounts with isolated local state. `ctxlane` is a local account launcher for personal, work, and CI identities. It runs the official vendor CLIs without adding a proxy.
 
-Each profile gets its own vendor state directory and configured authentication route. Select a profile directly or through a directory binding, then `aictx` applies that configuration when it starts Claude Code or Codex.
+Each profile gets its own vendor state directory and configured authentication route. Select a profile directly or through a directory binding, then `ctxlane` applies that configuration when it starts Claude Code or Codex.
 
 ```text
 personal project  -> personal Claude + personal Codex
@@ -14,11 +14,11 @@ CI runner         -> CI profile      + separate state
 
 In the CLI, a **profile** represents one configured provider account or authentication route. A **context** groups a Claude profile, a Codex profile, or both.
 
-## Why aictx
+## Why ctxlane
 
 Claude Code and Codex normally use a default login and state directory. On a machine with personal, company, customer, or CI accounts, a normal command can reuse the wrong cached login or charge the wrong billing destination.
 
-`aictx` reduces the risk of accidental account and billing crossover on the same machine. For managed accounts, confirm the final billing destination through the vendor's account controls.
+`ctxlane` reduces the risk of accidental account and billing crossover on the same machine. For managed accounts, confirm the final billing destination through the vendor's account controls.
 
 - **Separate profile state:** each profile gets its own `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 - **One context across tools:** switch Claude Code and Codex accounts together.
@@ -26,42 +26,44 @@ Claude Code and Codex normally use a default login and state directory. On a mac
 - **Keyring-backed secrets:** wrapper-managed static credentials stay in the native OS credential store, outside repository files and shell configuration.
 - **Clean vendor launch:** known competing selectors are removed, and inspected project settings that can override routing or load commands are refused.
 - **Official vendor CLIs:** Claude Code and Codex still handle login, refresh, and model requests.
-- **Local-only design:** `aictx` has no API proxy or remote credential service. The vendor CLIs still contact Claude or OpenAI.
+- **Local-only design:** `ctxlane` has no API proxy or remote credential service. The vendor CLIs still contact Claude or OpenAI.
 
 ## Quick start
 
 ### Install
 
 ```bash
-brew install mikigraf/tap/aictx
+brew install mikigraf/tap/ctxlane
 ```
 
 Install at least one supported vendor CLI: Claude Code or Codex.
 
+If you used version 0.1, follow [Migration from v0.1](docs/migration-from-v0.1.md) before normal setup. `ctxlane` does not import the old local store automatically.
+
 ### Claude Code
 
 ```bash
-aictx init --guided
-aictx run --profile claude:personal claude -- \
+ctxlane init --guided
+ctxlane run --profile claude:personal claude -- \
   -p "explain this repository"
 ```
 
-Guided setup initializes `aictx`, creates or reuses the `claude:personal` account profile, runs the official `claude setup-token` flow, and stores the pasted token in the native OS credential store.
+Guided setup initializes `ctxlane`, creates or reuses the `claude:personal` account profile, runs the official `claude setup-token` flow, and stores the pasted token in the native OS credential store.
 
 ### Codex
 
 ```bash
-aictx init
-aictx profile add codex personal --auth subscription
-aictx login codex:personal
-aictx run --profile codex:personal codex -- \
+ctxlane init
+ctxlane profile add codex personal --auth subscription
+ctxlane login codex:personal
+ctxlane run --profile codex:personal codex -- \
   exec "explain this repository"
 ```
 
 Codex uses its vendor-managed ChatGPT OAuth flow. The compatibility spelling below selects the same saved `chatgpt-oauth` mode:
 
 ```bash
-aictx profile add codex personal --auth subscription-token
+ctxlane profile add codex personal --auth subscription-token
 ```
 
 ### Switch both together
@@ -69,18 +71,18 @@ aictx profile add codex personal --auth subscription-token
 Create one context after both profiles exist:
 
 ```bash
-aictx context add personal \
+ctxlane context add personal \
   --claude claude:personal \
   --codex codex:personal
-aictx use personal
+ctxlane use personal
 
-aictx run claude -- -p "explain this repository"
-aictx run codex -- exec "run the tests"
+ctxlane run claude -- -p "explain this repository"
+ctxlane run codex -- exec "run the tests"
 ```
 
 After a context is active, you do not need `--profile` on every run.
 
-Run `aictx` with no subcommand to open the terminal context picker.
+Run `ctxlane` with no subcommand to open the terminal context picker.
 
 ## Install or update from source
 
@@ -94,8 +96,8 @@ cargo install --path . --locked --force
 From a new checkout:
 
 ```bash
-git clone https://github.com/mikigraf/aictx.git
-cd aictx
+git clone https://github.com/mikigraf/ctxlane.git
+cd ctxlane
 cargo install --path . --locked
 ```
 
@@ -103,28 +105,28 @@ cargo install --path . --locked
 
 Claude and Codex expose different subscription login flows:
 
-- `claude setup-token` prints a token but does not save it for `aictx`. The token is needed on later runs, so `aictx` stores it in Keychain on macOS, Credential Manager on Windows, or Secret Service on Linux. The `aictx` configuration stores only a `keyring://...` reference.
-- Codex subscription login is browser OAuth managed by Codex. With the default `file` credential-store policy, Codex keeps its login state inside that profile's private `CODEX_HOME`. The `keyring` and `auto` policies remain vendor- and OS-defined. `aictx` does not ask you to paste or store a ChatGPT OAuth token.
+- `claude setup-token` prints a token but does not save it for `ctxlane`. The token is needed on later runs, so `ctxlane` stores it in Keychain on macOS, Credential Manager on Windows, or Secret Service on Linux. The `ctxlane` configuration stores only a `keyring://...` reference.
+- Codex subscription login is browser OAuth managed by Codex. With the default `file` credential-store policy, Codex keeps its login state inside that profile's private `CODEX_HOME`. The `keyring` and `auto` policies remain vendor- and OS-defined. `ctxlane` does not ask you to paste or store a ChatGPT OAuth token.
 
 This is why the shared command uses `--auth subscription`, while the saved provider modes remain `subscription-token` for Claude and `chatgpt-oauth` for Codex.
 
 For API keys, WIF, managed access tokens, custom profile names, and other options, see [Authentication support](#authentication-support) and the [Command reference](docs/command-reference.md).
 
-`aictx` refuses recognized options and inspected startup settings that can change the selected route, bypass isolated state, or load repository commands. This startup policy is not a sandbox.
+`ctxlane` refuses recognized options and inspected startup settings that can change the selected route, bypass isolated state, or load repository commands. This startup policy is not a sandbox.
 
 ## Interactive mode
 
-After `aictx init`, run `aictx` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
+After `ctxlane init`, run `ctxlane` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
 
 ```bash
-aictx
+ctxlane
 ```
 
 The dashboard shows contexts, active and default selection, directory resolution, profile IDs, authentication modes, and billing domains. It never reads secret values or starts a vendor login. Profile creation, login, logout, and vendor runs stay in the explicit CLI commands.
 
 Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. Changing any selected provider profile opens a confirmation dialog before state is written, even when both profiles use the same billing type.
 
-The dashboard opens only when standard input and output are terminals. Bare `aictx --non-interactive` and redirected use fail instead of entering raw terminal mode. Non-interactive commands remain available for scripts, while browser login, terminal prompts, and native-keyring access fail closed when interaction is disabled.
+The dashboard opens only when standard input and output are terminals. Bare `ctxlane --non-interactive` and redirected use fail instead of entering raw terminal mode. Non-interactive commands remain available for scripts, while browser login, terminal prompts, and native-keyring access fail closed when interaction is disabled.
 
 ## Context resolution
 
@@ -135,7 +137,7 @@ personal -> claude:personal + codex:personal
 work     -> claude:work     + codex:work
 ```
 
-For each run, `aictx` uses the first available choice in this order:
+For each run, `ctxlane` uses the first available choice in this order:
 
 1. `--profile`
 2. `--context`
@@ -143,16 +145,16 @@ For each run, `aictx` uses the first available choice in this order:
 4. the active context
 5. the default context
 
-`aictx use work` updates only the small mutable state file. It does not copy credentials or rewrite vendor homes. The result shows the selected global context and, when a directory binding takes precedence, the different context and provider profiles effective in the current directory.
+`ctxlane use work` updates only the small mutable state file. It does not copy credentials or rewrite vendor homes. The result shows the selected global context and, when a directory binding takes precedence, the different context and provider profiles effective in the current directory.
 
 Bind a directory tree when one checkout should always use the same context:
 
 ```bash
-aictx bind "$HOME/src/company" work
-aictx bindings
+ctxlane bind "$HOME/src/company" work
+ctxlane bindings
 ```
 
-Bindings live in global user metadata. Repository `.aictx.toml` files are ignored.
+Bindings live in global user metadata. Repository `.ctxlane.toml` files are ignored.
 
 ## Authentication support
 
@@ -167,7 +169,7 @@ Use `--auth subscription` when creating either a Claude or Codex subscription pr
 | Codex | `api-key` | OpenAI API | native OS keyring, then official stdin login into the isolated vendor store |
 | Codex | `access-token` | ChatGPT subscription or workspace | native OS keyring, then official stdin login, with workspace and trusted-runner rules |
 
-Static secrets managed by `aictx` are stored in the native OS keyring. Configuration contains only a reference:
+Static secrets managed by `ctxlane` are stored in the native OS keyring. Configuration contains only a reference:
 
 ```text
 keyring://service/account
@@ -178,8 +180,8 @@ Paste only the raw Claude setup token. The hidden prompt accepts wrapped paste i
 If Claude rejects a stored token, replace the local copy:
 
 ```bash
-aictx logout claude:personal
-aictx init --guided
+ctxlane logout claude:personal
+ctxlane init --guided
 ```
 
 If Claude creates a setup token but capture or keyring storage fails, revoke that remote token in your Claude account settings under **Settings > Claude Code** before retrying. Local replacement or logout does not revoke an already-created remote token.
@@ -192,47 +194,47 @@ Read [Configuration](docs/configuration.md) for every supported profile field an
 
 | Command | Purpose |
 | --- | --- |
-| `aictx init --guided` | Set up the personal Claude subscription profile and credential |
-| `aictx` | Open the interactive context dashboard |
-| `aictx status --verbose` | Show resolved profiles and non-secret identity metadata |
-| `aictx current` | Print the context selected for the current directory |
-| `aictx use <context>` | Change the global active context |
-| `aictx profile list` | List provider profiles |
-| `aictx context list` | List contexts |
-| `aictx credential check --all` | Check credential availability without printing values |
-| `aictx doctor [--provider <provider>] [--json]` | Check metadata, permissions, binaries, unsafe settings, and per-profile authentication readiness |
-| `aictx logout <profile>` | Clear supported local authentication state |
+| `ctxlane init --guided` | Set up the personal Claude subscription profile and credential |
+| `ctxlane` | Open the interactive context dashboard |
+| `ctxlane status --verbose` | Show resolved profiles and non-secret identity metadata |
+| `ctxlane current` | Print the context selected for the current directory |
+| `ctxlane use <context>` | Change the global active context |
+| `ctxlane profile list` | List provider profiles |
+| `ctxlane context list` | List contexts |
+| `ctxlane credential check --all` | Check credential availability without printing values |
+| `ctxlane doctor [--provider <provider>] [--json]` | Check metadata, permissions, binaries, unsafe settings, and per-profile authentication readiness |
+| `ctxlane logout <profile>` | Clear supported local authentication state |
 
 See the full [Command reference](docs/command-reference.md).
 
-Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative. Use `aictx --help` and `aictx <command> --help` for current syntax and examples.
+Wrapper errors keep stable exit categories and print a short `Hint:` line when a safe recovery action is known. During profile or context resolution, a close misspelling also prints a safe `did you mean ...?` suggestion. The installed binary is authoritative. Use `ctxlane --help` and `ctxlane <command> --help` for current syntax and examples.
 
 Interactive `doctor` may inspect configured static credentials through the OS keyring and check vendor-owned login state. It always reports a successful local Claude route check as a warning because it neither makes nor records model requests. A successful model request is separate remote-validity evidence. With `--non-interactive`, doctor skips static OS-keyring reads and reports a warning instead of risking an unlock or consent prompt. `--json` returns a top-level `ok` value and a `checks` array. Every check has `level`, `name`, and `detail`. Warnings alone do not make `ok` false.
 
 ## Shell integration
 
-Install small forwarding functions so `claude` and `codex` still run through `aictx`:
+Install small forwarding functions so `claude` and `codex` still run through `ctxlane`:
 
 ```bash
 # Bash
-eval "$(aictx shell-init bash)"
+eval "$(ctxlane shell-init bash)"
 
 # Zsh
-eval "$(aictx shell-init zsh)"
+eval "$(ctxlane shell-init zsh)"
 
 # Fish
-aictx shell-init fish | source
+ctxlane shell-init fish | source
 ```
 
 PowerShell:
 
 ```powershell
-Invoke-Expression (& aictx shell-init powershell | Out-String)
+Invoke-Expression (& ctxlane shell-init powershell | Out-String)
 ```
 
-Review generated shell code before adding it to a startup file. The shims pin the canonical `aictx` path and any explicit `--root`. Regenerate them after either path moves.
+Review generated shell code before adding it to a startup file. The shims pin the canonical `ctxlane` path and any explicit `--root`. Regenerate them after either path moves.
 
-`aictx env` emits non-secret selectors only. Running a vendor directly after evaluating that output bypasses environment cleaning, repository checks, lifecycle locks, workspace setup, and static-secret delivery. Use `aictx run` or a generated shim for authenticated work.
+`ctxlane env` emits non-secret selectors only. Running a vendor directly after evaluating that output bypasses environment cleaning, repository checks, lifecycle locks, workspace setup, and static-secret delivery. Use `ctxlane run` or a generated shim for authenticated work.
 
 ## Automation
 
@@ -241,7 +243,7 @@ Use `--non-interactive` in CI. It fails before a browser, prompt, terminal dashb
 Long-lived Claude subscription tokens, cached Codex OAuth, and Codex access tokens require `--trusted-runner` in CI or non-interactive mode. Static-token profiles still cannot read the native keyring in `--non-interactive` mode. For example, a pre-authorized Codex OAuth profile can run on a controlled private runner:
 
 ```bash
-aictx --non-interactive run \
+ctxlane --non-interactive run \
   --profile codex:ci \
   --trusted-runner \
   codex -- exec "review this change"
@@ -253,18 +255,18 @@ Read [CI and automation](docs/ci.md) before adding credentials to a workflow.
 
 ## Security boundary
 
-`aictx` keeps secret values out of wrapper metadata, command arguments, normal status output, and shell startup files. It reconstructs the vendor child environment, rejects repository-local executables, applies platform-specific path checks, and scans supported repository settings before credentials reach a vendor process.
+`ctxlane` keeps secret values out of wrapper metadata, command arguments, normal status output, and shell startup files. It reconstructs the vendor child environment, rejects repository-local executables, applies platform-specific path checks, and scans supported repository settings before credentials reach a vendor process.
 
 The boundary has limits:
 
 - Local logout clears supported local state. It does not prove remote revocation.
-- Switching Claude's own native macOS Keychain login state is outside version `0.1.0`. This does not refer to setup tokens that `aictx` stores in Keychain.
+- Switching Claude's own native macOS Keychain login state is outside version `0.2.0`. This does not refer to setup tokens that `ctxlane` stores in Keychain.
 - Codex `keyring` and `auto` store isolation is defined by Codex and the operating system.
 - Startup repository checks are not a sandbox. Claude can discover some descendant `.claude` definitions later in an interactive session.
 - Same-user malware, a compromised vendor CLI, and administrator or root access are outside the protection boundary.
 - Windows vendor executables must be native `.exe` files. Script launchers such as `.cmd` and `.bat` are refused.
 
-Static Claude checks use the official local `claude auth status --json` output to verify the selected method and optional organization evidence. This is local routing evidence. It does not make a model request or prove remote validity, expiry, or revocation. The first successful model request is the remote validity check at that point in time. WIF is passed to the official Claude client through documented selectors. `aictx` does not exchange or refresh WIF tokens.
+Static Claude checks use the official local `claude auth status --json` output to verify the selected method and optional organization evidence. This is local routing evidence. It does not make a model request or prove remote validity, expiry, or revocation. The first successful model request is the remote validity check at that point in time. WIF is passed to the official Claude client through documented selectors. `ctxlane` does not exchange or refresh WIF tokens.
 
 Read the [Threat model](THREAT_MODEL.md) and [Security policy](SECURITY.md) before an enterprise rollout.
 
@@ -294,6 +296,7 @@ Read [Testing](docs/testing.md) for the exact automated layers, commands, covera
 - [CI and automation](docs/ci.md)
 - [Testing](docs/testing.md)
 - [Compatibility and validation status](docs/compatibility.md)
+- [Migration from v0.1](docs/migration-from-v0.1.md)
 - [Threat model](THREAT_MODEL.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)

@@ -2,7 +2,7 @@
 
 ## Security objective
 
-`aictx` reduces accidental account, identity, and billing crossover when one OS user runs the official Claude Code and Codex CLIs for personal, work, or automation. It aims to ensure that only the selected credential and isolated state reach the selected vendor child process.
+`ctxlane` reduces accidental account, identity, and billing crossover when one OS user runs the official Claude Code and Codex CLIs for personal, work, or automation. It aims to ensure that only the selected credential and isolated state reach the selected vendor child process.
 
 The primary protected assets are API keys, subscription/setup tokens, Codex access tokens, vendor-managed OAuth state, WIF identity tokens, and the integrity of profile/context selection.
 
@@ -10,11 +10,11 @@ The primary protected assets are API keys, subscription/setup tokens, Codex acce
 
 Trusted components:
 
-- the local `aictx` binary and its dependencies;
+- the local `ctxlane` binary and its dependencies;
 - the selected official vendor executable;
 - the operating system, current user account, filesystem/ACL implementation, and native keyring;
 - the upstream identity provider and official Claude client for WIF;
-- user-owned global `aictx` metadata.
+- user-owned global `ctxlane` metadata.
 
 Untrusted or potentially hostile inputs:
 
@@ -30,9 +30,9 @@ Untrusted or potentially hostile inputs:
 | Threat | Consequence | Implemented mitigation | Residual risk |
 | --- | --- | --- | --- |
 | shell history/log/argv disclosure | credential theft | no secret-valued CLI flag; hidden prompt/stdin/keyring; redacted status | vendor output, crash dumps, or user tracing can still disclose child memory/environment |
-| stale parent credential wins | wrong account or billing domain | clear and reconstruct child environment; inject one selected mechanism; preflight static Claude auth routing | a future vendor selector not yet known to `aictx` could alter precedence; local auth status is not remote validity proof |
+| stale parent credential wins | wrong account or billing domain | clear and reconstruct child environment; inject one selected mechanism; preflight static Claude auth routing | a future vendor selector not yet known to `ctxlane` could alter precedence; local auth status is not remote validity proof |
 | state crossover | one profile refreshes/uses another profile's cache | unique absolute state directories; per-profile locks; `CODEX_HOME`/`CLAUDE_CONFIG_DIR` selection | native macOS Claude Keychain login is not isolated; vendor keyring namespacing remains vendor-defined |
-| malicious repository/config override | credential rerouting or command-hook exfiltration | no repository `aictx` config; inspect project vendor settings; refuse credential/endpoint routing, startup command hooks, and forwarded vendor options that can bypass the inspection or isolated config; scrub Claude subprocess credentials | Claude may discover descendant `.claude` definitions later in a session beyond the startup ancestor scan; vendor behavior outside inspected files can change, and blocking is conservative |
+| malicious repository/config override | credential rerouting or command-hook exfiltration | no repository `ctxlane` config; inspect project vendor settings; refuse credential/endpoint routing, startup command hooks, and forwarded vendor options that can bypass the inspection or isolated config; scrub Claude subprocess credentials | Claude may discover descendant `.claude` definitions later in a session beyond the startup ancestor scan; vendor behavior outside inspected files can change, and blocking is conservative |
 | executable/interpreter path hijack | attacker runs a fake vendor binary or shebang interpreter | initialization anchors discovered paths; validate canonical executable ownership/ancestors; reject repository paths; filter child `PATH` to trusted absolute directories | a trusted executable or installation can later be replaced by an attacker with sufficient local rights |
 | symlink/permission attack | metadata or state redirected/read | reject symlinked/writable sensitive path chains; Unix owner/mode validation; component-wise directory creation; atomic writes and coordinated locks | Windows ACL correctness needs deployment validation; advisory checks retain a same-user/privileged TOCTOU window |
 | fork PR credential theft | untrusted code prints token | defense-in-depth refusal of static credentials and cached Codex OAuth when inherited GitHub event metadata identifies a PR; long-lived subscription/OAuth/access-token automation requires a trusted-runner assertion in CI/non-interactive mode | a same-user process cannot attest its event environment; workflow/job permissions and secret gating are the real boundary, and the assertion can be misused |
@@ -42,7 +42,7 @@ Untrusted or potentially hostile inputs:
 
 ## Explicit non-goals
 
-`aictx` does not protect against:
+`ctxlane` does not protect against:
 
 - same-user malware, debugger/process-memory access, or an interactive process allowed to read the user's keyring;
 - administrator/root/kernel compromise;

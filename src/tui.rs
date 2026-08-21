@@ -39,7 +39,7 @@ const MIN_HEIGHT: u16 = 14;
 pub fn run(store: &MetadataStore, non_interactive: bool) -> Result<i32> {
     if non_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(Error::InteractionRequired(
-            "interactive mode requires a terminal; use an explicit aictx subcommand in scripts"
+            "interactive mode requires a terminal; use an explicit ctxlane subcommand in scripts"
                 .to_owned(),
         ));
     }
@@ -408,7 +408,7 @@ fn request_activation(app: &mut App, store: &MetadataStore) {
     let Some(target) = app.selected_context().cloned() else {
         app.set_message(
             MessageLevel::Warning,
-            "No context is selected. Add one with `aictx context add`.",
+            "No context is selected. Add one with `ctxlane context add`.",
         );
         return;
     };
@@ -529,7 +529,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 fn draw_small_terminal(frame: &mut Frame<'_>, area: Rect) {
     let text = vec![
         Line::from(Span::styled(
-            "aictx",
+            "ctxlane",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from("Terminal is too small."),
@@ -562,7 +562,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let title = Line::from(vec![
         Span::styled(
-            " aictx ",
+            " ctxlane ",
             Style::default()
                 .fg(Color::Black)
                 .bg(ACCENT)
@@ -648,7 +648,7 @@ fn draw_contexts(frame: &mut Frame<'_>, list_area: Rect, detail_area: Rect, app:
                 Line::from("No contexts configured."),
                 Line::from(""),
                 Line::from("Add one with:"),
-                Line::from("aictx context add <name> ..."),
+                Line::from("ctxlane context add <name> ..."),
             ]
         },
         |name| {
@@ -1142,7 +1142,7 @@ mod tests {
             Profile::Claude {
                 billing_domain: BillingDomain::AnthropicApi,
                 auth: ClaudeAuth::ApiKey,
-                state_dir: PathBuf::from("/tmp/aictx-test-state"),
+                state_dir: PathBuf::from("/tmp/ctxlane-test-state"),
                 secret_ref: Some("keyring://TopSecret/credential".to_owned()),
                 account_hint: Some("secret-account@example.test".to_owned()),
                 expected_organization: Some("secret-org".to_owned()),
@@ -1191,7 +1191,7 @@ mod tests {
 
     fn activation_app() -> (TempDir, MetadataStore, App, Name, Name) {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("aictx"));
+        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
         let store = MetadataStore::new(paths.clone());
         store
             .initialize()
@@ -1216,7 +1216,7 @@ mod tests {
                         auth: ClaudeAuth::SubscriptionToken,
                         state_dir: paths
                             .profile_state_dir(personal_id.provider(), personal_id.name()),
-                        secret_ref: Some("keyring://aictx/claude-personal".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/claude-personal".to_owned()),
                         account_hint: None,
                         expected_organization: None,
                         wif: None,
@@ -1228,7 +1228,7 @@ mod tests {
                         billing_domain: BillingDomain::AnthropicApi,
                         auth: ClaudeAuth::ApiKey,
                         state_dir: paths.profile_state_dir(work_id.provider(), work_id.name()),
-                        secret_ref: Some("keyring://aictx/claude-work".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/claude-work".to_owned()),
                         account_hint: None,
                         expected_organization: None,
                         wif: None,
@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn key_handling_covers_panels_help_and_clean_exit() {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("aictx")));
+        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("ctxlane")));
         let mut app = test_app();
 
         handle_key(
@@ -1439,7 +1439,7 @@ mod tests {
                         billing_domain: BillingDomain::OpenaiApi,
                         auth: CodexAuth::ApiKey,
                         state_dir: codex_state,
-                        secret_ref: Some("keyring://aictx/codex-work".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/codex-work".to_owned()),
                         account_hint: None,
                         expected_workspace_id: None,
                         credential_store: CodexCredentialStore::File,
@@ -1474,7 +1474,7 @@ mod tests {
     #[test]
     fn control_c_requests_exit_130_without_other_state_changes() {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("aictx")));
+        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("ctxlane")));
         let mut app = test_app();
         handle_key(
             &mut app,

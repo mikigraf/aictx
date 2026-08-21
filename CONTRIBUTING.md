@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome when they preserve the small security boundary: `aictx` selects and isolates credentials for official vendor CLIs; it is not an alternate API or OAuth client.
+Contributions are welcome when they preserve the small security boundary: `ctxlane` selects and isolates credentials for official vendor CLIs; it is not an alternate API or OAuth client.
 
 Security vulnerabilities belong in the private process described by [SECURITY.md](SECURITY.md), not a public issue or pull request.
 

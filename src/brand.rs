@@ -2,7 +2,7 @@
 
 pub(crate) const LEGACY_PRODUCT_LABEL: &str = "aictx";
 pub(crate) const TARGET_PRODUCT_LABEL: &str = "ctxlane";
-pub(crate) const CURRENT_PRODUCT_LABEL: &str = LEGACY_PRODUCT_LABEL;
+pub(crate) const CURRENT_PRODUCT_LABEL: &str = TARGET_PRODUCT_LABEL;
 
 pub(crate) const LEGACY_ENVIRONMENT_PREFIX: &str = "AICTX_";
 pub(crate) const TARGET_ENVIRONMENT_PREFIX: &str = "CTXLANE_";

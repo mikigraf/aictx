@@ -57,13 +57,13 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             if let Some(change) = selection_change.as_ref().filter(|_| !args.yes) {
                 if cli.non_interactive {
                     return Err(Error::InteractionRequired(
-                        "account profile change requires `aictx use --yes`".to_owned(),
+                        "account profile change requires `ctxlane use --yes`".to_owned(),
                     ));
                 }
                 print_selection_change(change);
                 if !confirm(
                     "Continue? [y/N] ",
-                    "account profile confirmation requires a terminal or `aictx use --yes`",
+                    "account profile confirmation requires a terminal or `ctxlane use --yes`",
                 )? {
                     return Err(Error::Cancelled);
                 }
@@ -112,7 +112,7 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
                     .as_ref()
                     .map_or_else(|| "(direct)".to_owned(), ToString::to_string);
                 eprintln!(
-                    "aictx: context={context} profile={} auth={} billing={} source={}{}",
+                    "ctxlane: context={context} profile={} auth={} billing={} source={}{}",
                     resolved.id,
                     resolved.profile.auth_label(),
                     resolved.profile.billing_domain(),
@@ -230,7 +230,7 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
                 .and_then(|path| path.canonicalize())
                 .map_err(|source| {
                     Error::VendorIncompatible(format!(
-                        "could not resolve the current aictx executable for shell integration: {source}"
+                        "could not resolve the current ctxlane executable for shell integration: {source}"
                     ))
                 })?;
             println!(
@@ -244,6 +244,52 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
             Ok(0)
         }
         Some(Command::Migrate(args)) => execute_migration(cli.root.as_deref(), args.command),
+    }
+}
+
+/// Apply rename-specific startup policy before any ordinary command touches metadata.
+///
+/// Keep this as one narrow entry-point seam: the shared startup guard can replace
+/// this implementation after the migration branches are rebased. Migration
+/// commands perform their own journal and path validation and must remain able
+/// to recover an interrupted transaction.
+pub fn guard_startup(cli: &Cli, target: &AppPaths) -> Result<()> {
+    if matches!(cli.command.as_ref(), Some(Command::Migrate(_))) {
+        return Ok(());
+    }
+
+    guard_against_incomplete_migration(target)?;
+    if cli.root.is_some() || path_entry_exists(&target.config_file)? {
+        return Ok(());
+    }
+
+    let legacy = AppPaths::discover_for(LEGACY_AICTX, None)?;
+    guard_against_detected_legacy(cli, &legacy)
+}
+
+fn guard_against_detected_legacy(cli: &Cli, legacy: &AppPaths) -> Result<()> {
+    if !path_entry_exists(&legacy.config_file)? {
+        return Ok(());
+    }
+    let fresh_init = matches!(cli.command.as_ref(), Some(Command::Init(args)) if args.fresh);
+    if fresh_init {
+        return Ok(());
+    }
+
+    Err(Error::PolicyRefused(format!(
+        "legacy aictx metadata exists at {}; ctxlane will not import it automatically. Run `ctxlane migrate aictx --dry-run`, then `ctxlane migrate aictx`. To create an unrelated empty store, run `ctxlane init --fresh`",
+        terminal_safe(&legacy.config_file.display().to_string())
+    )))
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -364,9 +410,8 @@ fn print_source_preservation_receipt() {
 
 /// Refuse ordinary startup while a ctxlane migration journal needs recovery.
 ///
-/// This helper is intentionally not active while `aictx` remains the current
-/// runtime identity. The ctxlane entry point can call it before loading target
-/// metadata after the rename is complete.
+/// The public entry point calls this before ordinary metadata access. It stays
+/// separate from migration execution so recovery remains possible.
 pub fn guard_against_incomplete_migration(target: &AppPaths) -> Result<()> {
     let journal = migration_journal_path(target);
     match fs::symlink_metadata(&journal) {
@@ -398,9 +443,9 @@ fn execute_init(
         if created {
             print_initialized(paths);
             println!("No credentials were created or imported.");
-            println!("Next: add a profile with `aictx profile add --help`.");
+            println!("Next: add a profile with `ctxlane profile add --help`.");
         } else {
-            println!("aictx is already initialized; existing metadata was left unchanged.");
+            println!("ctxlane is already initialized; existing metadata was left unchanged.");
         }
     }
     Ok(0)
@@ -419,7 +464,7 @@ fn execute_guided_init(
         if created {
             print_initialized(paths);
         } else {
-            println!("Validated existing aictx metadata; no metadata was overwritten.");
+            println!("Validated existing ctxlane metadata; no metadata was overwritten.");
         }
     }
 
@@ -441,7 +486,7 @@ fn execute_guided_init(
     }
 
     println!("Guided setup complete.");
-    println!("Next: aictx run --profile {profile_id} claude -- -p \"explain this repository\"");
+    println!("Next: ctxlane run --profile {profile_id} claude -- -p \"explain this repository\"");
     Ok(0)
 }
 
@@ -457,7 +502,7 @@ fn initialize_store(store: &MetadataStore) -> Result<bool> {
 }
 
 fn print_initialized(paths: &AppPaths) {
-    println!("Initialized aictx metadata.");
+    println!("Initialized ctxlane metadata.");
     println!("  config: {}", paths.config_file.display());
     println!("  state:  {}", paths.state_file.display());
 }
@@ -549,7 +594,7 @@ fn append_credential_readiness(
             report.push(
                 doctor::CheckLevel::Warning,
                 name,
-                "not checked because non-interactive mode refuses native keyring reads; run `aictx credential check` from an interactive terminal",
+                "not checked because non-interactive mode refuses native keyring reads; run `ctxlane credential check` from an interactive terminal",
             );
             continue;
         }
@@ -569,7 +614,7 @@ fn append_credential_readiness(
             Ok(CredentialState::Unavailable) => report.push(
                 doctor::CheckLevel::Failure,
                 name,
-                format!("authentication material is unavailable; run `aictx login {profile_id}`"),
+                format!("authentication material is unavailable; run `ctxlane login {profile_id}`"),
             ),
             Ok(CredentialState::Unverified)
                 if matches!(
@@ -590,7 +635,7 @@ fn append_credential_readiness(
                 doctor::CheckLevel::Failure,
                 name,
                 format!(
-                    "authentication material could not be verified against the configured identity; run `aictx login {profile_id}`"
+                    "authentication material could not be verified against the configured identity; run `ctxlane login {profile_id}`"
                 ),
             ),
             Err(error) => report.push(doctor::CheckLevel::Failure, name, error.to_string()),
@@ -1520,7 +1565,7 @@ fn store_or_validate_secret(
     };
     // Guided profile creation and login use separate metadata transactions. Recheck the new,
     // generation-specific keyring reference while the login lifecycle lock is held so another
-    // aictx process cannot populate it in that gap and be overwritten without consent.
+    // ctxlane process cannot populate it in that gap and be overwritten without consent.
     if confirm_new_reference_before_write
         && manager.exists(&reference, false)?
         && !confirm_secret_replacement_prompt(profile_id)?
@@ -1533,7 +1578,7 @@ fn store_or_validate_secret(
 
 fn warn_unstored_claude_setup_token() {
     eprintln!(
-        "Warning: Claude Code may have created a remote setup token, but aictx did not store it. Revoke that token in your Claude account settings (Settings > Claude Code) before retrying."
+        "Warning: Claude Code may have created a remote setup token, but ctxlane did not store it. Revoke that token in your Claude account settings (Settings > Claude Code) before retrying."
     );
 }
 
@@ -1885,5 +1930,109 @@ const fn title(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "Claude",
         Provider::Codex => "Codex",
+    }
+}
+
+#[cfg(test)]
+mod startup_guard_tests {
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn cli(arguments: &[&str]) -> Cli {
+        Cli::try_parse_from(arguments)
+            .unwrap_or_else(|error| panic!("parse startup command: {error}"))
+    }
+
+    fn seed_legacy_config(paths: &AppPaths) {
+        fs::create_dir_all(&paths.config_dir)
+            .unwrap_or_else(|error| panic!("create legacy config directory: {error}"));
+        fs::write(&paths.config_file, "version = 1\n")
+            .unwrap_or_else(|error| panic!("write legacy config marker: {error}"));
+    }
+
+    #[test]
+    fn detected_legacy_store_requires_migration_or_explicit_fresh_init() {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let legacy = AppPaths::for_root(temporary.path().join("legacy"));
+        seed_legacy_config(&legacy);
+
+        for arguments in [
+            &["ctxlane", "init"][..],
+            &["ctxlane", "init", "--guided"][..],
+            &["ctxlane", "status"][..],
+        ] {
+            let Err(error) = guard_against_detected_legacy(&cli(arguments), &legacy) else {
+                panic!("ordinary startup must refuse detected legacy metadata");
+            };
+            let message = error.to_string();
+            assert!(message.contains("will not import it automatically"));
+            assert!(message.contains("ctxlane migrate aictx --dry-run"));
+            assert!(message.contains("ctxlane init --fresh"));
+        }
+
+        for arguments in [
+            &["ctxlane", "init", "--fresh"][..],
+            &["ctxlane", "init", "--guided", "--fresh"][..],
+        ] {
+            guard_against_detected_legacy(&cli(arguments), &legacy)
+                .unwrap_or_else(|error| panic!("fresh startup should be allowed: {error}"));
+        }
+    }
+
+    #[test]
+    fn explicit_root_never_auto_detects_legacy_default_metadata() {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let root = temporary.path().join("target");
+        let target = AppPaths::for_root(&root);
+        let root = root
+            .to_str()
+            .unwrap_or_else(|| panic!("temporary path should be UTF-8"));
+        let cli = cli(&["ctxlane", "--root", root, "init"]);
+
+        guard_startup(&cli, &target)
+            .unwrap_or_else(|error| panic!("explicit root should not auto-detect: {error}"));
+    }
+
+    #[test]
+    fn incomplete_journal_blocks_ordinary_commands_but_not_recovery() {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let target_root = temporary.path().join("target");
+        let legacy_root = temporary.path().join("legacy");
+        let target = AppPaths::for_root(&target_root);
+        let journal = migration_journal_path(&target);
+        fs::create_dir_all(
+            journal
+                .parent()
+                .unwrap_or_else(|| panic!("journal should have a parent")),
+        )
+        .unwrap_or_else(|error| panic!("create journal parent: {error}"));
+        fs::write(&journal, "incomplete = true\n")
+            .unwrap_or_else(|error| panic!("write journal marker: {error}"));
+
+        let target_root = target_root
+            .to_str()
+            .unwrap_or_else(|| panic!("target root should be UTF-8"));
+        let legacy_root = legacy_root
+            .to_str()
+            .unwrap_or_else(|| panic!("legacy root should be UTF-8"));
+        let ordinary = cli(&["ctxlane", "--root", target_root, "status"]);
+        let Err(error) = guard_startup(&ordinary, &target) else {
+            panic!("ordinary command must refuse an incomplete journal");
+        };
+        assert!(error.to_string().contains("ctxlane migrate recover"));
+
+        let recovery = cli(&[
+            "ctxlane",
+            "--root",
+            target_root,
+            "migrate",
+            "recover",
+            "--from-root",
+            legacy_root,
+        ]);
+        guard_startup(&recovery, &target)
+            .unwrap_or_else(|error| panic!("recovery must bypass startup guard: {error}"));
     }
 }

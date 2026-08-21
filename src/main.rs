@@ -2,7 +2,7 @@
 
 use clap::Parser;
 
-use aictx::{
+use ctxlane::{
     binary::{BinaryOverrides, set_binary_overrides},
     cli::Cli,
     commands,
@@ -19,12 +19,13 @@ fn main() {
     }
 }
 
-fn run() -> aictx::Result<i32> {
+fn run() -> ctxlane::Result<i32> {
     let cli = Cli::parse();
     set_binary_overrides(BinaryOverrides {
         claude: cli.claude_bin.clone(),
         codex: cli.codex_bin.clone(),
     })?;
     let paths = AppPaths::discover(cli.root.as_deref())?;
+    commands::guard_startup(&cli, &paths)?;
     commands::execute(cli, &paths)
 }

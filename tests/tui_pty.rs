@@ -187,7 +187,7 @@ fn wait_for_output(
 }
 
 fn initialize(root: &Path) {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_aictx"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ctxlane"))
         .arg("--root")
         .arg(root)
         .arg("init")
@@ -249,7 +249,7 @@ fn run_in_pty(
         }
     });
 
-    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_aictx"));
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root");
     command.arg(root);
     command.args(arguments);
@@ -258,7 +258,7 @@ fn run_in_pty(
     let mut child = ChildGuard::new(
         pair.slave
             .spawn_command(command)
-            .unwrap_or_else(|error| panic!("spawn aictx in PTY: {error}")),
+            .unwrap_or_else(|error| panic!("spawn ctxlane in PTY: {error}")),
     );
     drop(pair.slave);
 
@@ -368,7 +368,7 @@ fn run_in_pty(
         }
         if Instant::now() >= deadline {
             child.kill_and_reap();
-            panic!("aictx PTY session exceeded {TEST_TIMEOUT:?}");
+            panic!("ctxlane PTY session exceeded {TEST_TIMEOUT:?}");
         }
         thread::sleep(Duration::from_millis(20));
     };
@@ -388,12 +388,12 @@ fn run_in_pty(
 #[test]
 fn dashboard_quits_after_resize_and_restores_terminal_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     initialize(&root);
 
     let (code, output) = run_in_pty(&root, &[], b"q", true);
     assert_eq!(code, 0, "PTY output:\n{output}");
-    assert!(output.contains("aictx"), "dashboard was not rendered");
+    assert!(output.contains("ctxlane"), "dashboard was not rendered");
     assert!(
         output.contains(SMALL_TERMINAL_MARKER),
         "undersized-terminal state was not rendered"
@@ -425,7 +425,7 @@ fn terminal_query_responder_handles_fragmented_queries_once() {
 #[test]
 fn dashboard_control_c_exits_130_and_restores_terminal_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     initialize(&root);
 
     let (code, output) = run_in_pty(&root, &[], b"\x03", false);
@@ -440,7 +440,7 @@ fn invalid_interactive_launches_fail_before_raw_terminal_mode() {
     let missing_root = temporary.path().join("missing");
     let (code, output) = run_in_pty(&missing_root, &[], b"", false);
     assert_eq!(code, 2, "PTY output:\n{output}");
-    assert!(output.contains("aictx init"));
+    assert!(output.contains("ctxlane init"));
     assert!(!output.contains("\u{1b}[?1049h"));
 
     let initialized_root = temporary.path().join("initialized");

@@ -26,7 +26,7 @@ The compiled native fake-vendor suite is process-level E2E evidence for the wrap
 
 ## Vendor contracts
 
-`aictx` intentionally relies on documented public process contracts rather than pinning guessed vendor CLI versions:
+`ctxlane` intentionally relies on documented public process contracts rather than pinning guessed vendor CLI versions:
 
 | Contract | Automated coverage | Production qualification still required |
 | --- | --- | --- |
@@ -62,28 +62,28 @@ Native keyrings may prompt for unlock or consent. `--non-interactive` therefore 
 
 ### Guided setup
 
-`aictx init --guided` supports the exact `claude:personal` subscription-token path. It validates existing metadata, refuses incompatible profile reuse, invokes the official setup-token process, applies bounded input-safety checks without depending on an undocumented token prefix or length, and stores the captured credential in the OS keyring. It does not create a context. Public tests use synthetic input and a native fake vendor; they do not run a live Claude login, write to the host keyring, or make a model request.
+`ctxlane init --guided` supports the exact `claude:personal` subscription-token path. It validates existing metadata, refuses incompatible profile reuse, invokes the official setup-token process, applies bounded input-safety checks without depending on an undocumented token prefix or length, and stores the captured credential in the OS keyring. It does not create a context. Public tests use synthetic input and a native fake vendor; they do not run a live Claude login, write to the host keyring, or make a model request.
 
 ### Repository settings
 
-To prevent a selected credential from being rerouted or exfiltrated, runs reject competing credential/endpoint settings and inspected startup repository command hooks. This can make a repository that intentionally uses a custom provider, MCP command, hook, or notification incompatible with `aictx run`. There is no bypass in `0.1.0`. Claude may still discover descendant `.claude` definitions after navigating or editing deeper paths during a live session; blocked `--add-dir` and subprocess credential scrubbing mitigate but do not eliminate that residual code-execution surface.
+To prevent a selected credential from being rerouted or exfiltrated, runs reject competing credential/endpoint settings and inspected startup repository command hooks. This can make a repository that intentionally uses a custom provider, MCP command, hook, or notification incompatible with `ctxlane run`. There is no bypass in `0.2.0`. Claude may still discover descendant `.claude` definitions after navigating or editing deeper paths during a live session; blocked `--add-dir` and subprocess credential scrubbing mitigate but do not eliminate that residual code-execution surface.
 
 ### Schema migration
 
-Only schema `1` is supported. There is no downgrade or migration command yet. Back up metadata before upgrading across a release that announces a schema change.
+Only schema `1` is supported. The v0.1 product rename does not change that schema, but absolute managed state paths move. Use the copy-only `ctxlane migrate aictx` flow described in [Migration from v0.1](migration-from-v0.1.md). There is no downgrade command. Legacy metadata and vendor state stay available for rollback; migration coordination may create or normalize advisory profile lock files in the source state directory.
 
 ## Qualification checklist
 
 Before enabling a new OS/vendor version combination:
 
 1. Install official vendor CLIs through your approved channel.
-2. Run interactive `aictx doctor --json` and record the reviewed report without recording secrets. In `--non-interactive` mode, static OS-keyring reads are skipped with a warning; this is not static-credential readiness evidence.
+2. Run interactive `ctxlane doctor --json` and record the reviewed report without recording secrets. In `--non-interactive` mode, static OS-keyring reads are skipped with a warning; this is not static-credential readiness evidence.
 3. Exercise login, status, one harmless request, logout, and re-login for each supported auth mode.
 4. Confirm the expected vendor account/workspace and billing domain using vendor-supported status/account controls.
 5. Seed deliberately conflicting parent environment variables and verify the selected identity still wins.
 6. Test a locked native keyring and a missing or denied keyring item.
 7. Run two distinct profiles concurrently and verify their state does not cross.
-8. Validate remote revocation and employee/offboarding procedures outside `aictx`.
+8. Validate remote revocation and employee/offboarding procedures outside `ctxlane`.
 9. For CI, prove fork/untrusted triggers cannot enter the credential-bearing job.
 10. On Windows, test the installed native vendor `.exe`, user ACLs, console/PTY restoration, and process exit behavior.
 11. For a release, verify checksums, SBOM, Sigstore bundle, and provenance. Qualify Authenticode, Apple signing, and macOS notarization separately where required.

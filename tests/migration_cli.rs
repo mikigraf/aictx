@@ -5,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-use aictx::{
+use ctxlane::{
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     migration::migration_journal_path,
     model::{Name, ProfileId, Provider},
@@ -13,8 +13,8 @@ use aictx::{
 use serde::Serialize;
 use tempfile::TempDir;
 
-fn aictx(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aictx"));
+fn ctxlane(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root").arg(root);
     command
 }
@@ -52,8 +52,8 @@ impl Fixture {
         let legacy = AppPaths::for_root(&legacy_root);
         let target = AppPaths::for_root(&target_root);
 
-        run_success(aictx(&legacy_root).arg("init"));
-        run_success(aictx(&legacy_root).args([
+        run_success(ctxlane(&legacy_root).arg("init"));
+        run_success(ctxlane(&legacy_root).args([
             "profile",
             "add",
             "claude",
@@ -63,7 +63,7 @@ impl Fixture {
             "--secret-ref",
             "keyring://aictx/preserved-handle",
         ]));
-        run_success(aictx(&legacy_root).args([
+        run_success(ctxlane(&legacy_root).args([
             "profile",
             "add",
             "codex",
@@ -71,7 +71,7 @@ impl Fixture {
             "--auth",
             "subscription-token",
         ]));
-        run_success(aictx(&legacy_root).args([
+        run_success(ctxlane(&legacy_root).args([
             "context",
             "add",
             "mixed",
@@ -80,7 +80,7 @@ impl Fixture {
             "--codex",
             "codex:work",
         ]));
-        run_success(aictx(&legacy_root).args(["use", "mixed", "--yes"]));
+        run_success(ctxlane(&legacy_root).args(["use", "mixed", "--yes"]));
 
         let personal =
             Name::parse("personal").unwrap_or_else(|error| panic!("parse personal name: {error}"));
@@ -112,7 +112,7 @@ impl Fixture {
     }
 
     fn migration_command(&self) -> Command {
-        let mut command = aictx(&self.target_root);
+        let mut command = ctxlane(&self.target_root);
         command
             .args(["migrate", "aictx", "--from-root"])
             .arg(&self.legacy_root);
@@ -120,7 +120,7 @@ impl Fixture {
     }
 
     fn recovery_command(&self) -> Command {
-        let mut command = aictx(&self.target_root);
+        let mut command = ctxlane(&self.target_root);
         command
             .args(["migrate", "recover", "--from-root"])
             .arg(&self.legacy_root);
@@ -251,7 +251,7 @@ fn migration_command_refuses_target_collisions_and_missing_source_root() {
     collision.assert_source_unchanged();
 
     let missing_source = Fixture::new();
-    let output = aictx(&missing_source.target_root)
+    let output = ctxlane(&missing_source.target_root)
         .args(["migrate", "aictx", "--dry-run"])
         .output()
         .unwrap_or_else(|error| panic!("run migration without source root: {error}"));
@@ -262,7 +262,7 @@ fn migration_command_refuses_target_collisions_and_missing_source_root() {
     missing_source.assert_source_unchanged();
 
     let invalid_source = Fixture::new();
-    let output = aictx(&invalid_source.target_root)
+    let output = ctxlane(&invalid_source.target_root)
         .args([
             "migrate",
             "aictx",

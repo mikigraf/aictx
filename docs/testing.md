@@ -4,13 +4,13 @@ This page explains what the repository tests prove and what still needs private 
 
 ## Evidence model
 
-`aictx` uses three kinds of evidence:
+`ctxlane` uses three kinds of evidence:
 
 1. **Automated tests** check the wrapper with synthetic data, temporary directories, and fake vendor programs. They do not use a network or a real credential.
 2. **CI results** show that one committed revision passed the configured jobs. A workflow file by itself is not proof that a revision passed.
-3. **Deployment qualification** checks real accounts, operating-system services, and release controls in the environment where `aictx` will run. This evidence is private and manual unless an organization supplies its own protected test system.
+3. **Deployment qualification** checks real accounts, operating-system services, and release controls in the environment where `ctxlane` will run. This evidence is private and manual unless an organization supplies its own protected test system.
 
-In this project, “automated end to end” means that the compiled `aictx` binary starts a compiled native fake-vendor process and verifies selected local contracts through the operating-system process boundary. It does not mean that a test contacted Claude or Codex.
+In this project, “automated end to end” means that the compiled `ctxlane` binary starts a compiled native fake-vendor process and verifies selected local contracts through the operating-system process boundary. It does not mean that a test contacted Claude or Codex.
 
 ## Automated layers
 
@@ -18,6 +18,8 @@ In this project, “automated end to end” means that the compiled `aictx` bina
 | --- | --- | --- |
 | Unit | `src/**` test modules | parsing, validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and TUI state/rendering |
 | CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, bindings, status, doctor readiness/JSON, shell output, completions, stable exit categories, recovery hints, locking, and local filesystem policy |
+| v0.1 migration | `tests/migration_core.rs`, `tests/migration_cli.rs` | explicit dry run/copy/recovery, path rewriting, keyring-reference preservation, source-data preservation with advisory lock coordination, collisions, symlinks, journals, and interrupted transactions |
+| Branding contract | `tests/branding_contract.rs` | current product naming across tracked files and an exact allowlist for required v0.1 migration literals |
 | Unix runner contracts | `tests/runner_contract.rs` | argument and exit propagation, environment cleaning, lifecycle locks, process signals, repository-policy refusals, and injected-secret routing through temporary shell fixtures |
 | Native fake-vendor E2E | `tests/native_vendor_contract.rs`, `tests/setup_token_pty.rs`, `tests/fixtures/native_vendor.rs` | a compiled fake vendor executable on the host OS, including guided Claude setup-token invocation/failure, WIF selectors, Codex OAuth preflight, static Claude route checks, isolated state, secret absence, and vendor exit status |
 | Terminal/PTY | `tests/tui_pty.rs`, `tests/setup_token_pty.rs` | dashboard startup/resize/exit restoration plus guided setup-token preflight preservation, protected wrapped-paste handling, queued-input draining into a next-shell check, cancellation, signals, bracketed-paste cleanup, and terminal-mode restoration |
@@ -39,13 +41,16 @@ cargo test --all-targets --all-features --locked
 cargo test --doc --locked
 ```
 
-`--all-features` enables the compiled `aictx-test-vendor` fixture. Default builds and installs exclude it. The feature exists only for repository tests; do not use `cargo install --all-features --bins` for a production installation because that explicit command also builds the fixture target.
+`--all-features` enables the compiled `ctxlane-test-vendor` fixture. Default builds and installs exclude it. The feature exists only for repository tests; do not use `cargo install --all-features --bins` for a production installation because that explicit command also builds the fixture target.
 
 Run one integration layer while developing:
 
 ```bash
 cargo test --locked --test cli_workflow
 cargo test --locked --test error_contract
+cargo test --locked --test migration_core
+cargo test --locked --test migration_cli
+cargo test --locked --test branding_contract
 cargo test --locked --test runner_contract
 cargo test --locked --features test-fixtures --test native_vendor_contract
 cargo test --locked --test tui_pty
@@ -78,15 +83,9 @@ CI=true GITHUB_EVENT_NAME=push cargo +1.97.1 llvm-cov \
   --fail-under-regions 75
 ```
 
-The pre-commit engineering baseline on 2026-08-20 used macOS on arm64, Rust 1.97.1, and `cargo-llvm-cov` 0.9.0 with all targets, all features, the lockfile, and `GITHUB_EVENT_NAME=push`. It ran 114 tests:
+The last recorded coverage baseline predates the v0.2 migration suite. Re-run the exact command above on the release candidate and record the new test count and metrics before publishing; do not reuse the older v0.1 percentages as v0.2 evidence.
 
-| Metric | Measured | CI floor |
-| --- | ---: | ---: |
-| Regions | 78.93% | 75% |
-| Functions | 63.79% | 60% |
-| Lines | 76.26% | 70% |
-
-This local measurement describes the reviewed pre-commit worktree, not an immutable revision. Use the green CI report for the committed revision as release evidence.
+The current local all-target suite contains 138 tests on Unix hosts. Platform gating changes the count on Windows. Use the green CI and coverage reports for the exact committed revision as release evidence.
 
 Coverage is a map of exercised Rust code, not a security score or a provider compatibility claim. Host-only reports do not include code compiled only for another operating system. Record the revision, OS, architecture, Rust version, command, and tool version with every final published measurement. Stable Rust region instrumentation does not provide a reliable branch percentage, so do not present an empty branch column as complete branch coverage.
 

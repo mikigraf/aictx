@@ -17,7 +17,7 @@ use crate::{
     model::{ProfileId, Provider},
 };
 
-const DEFAULT_KEYRING_SERVICE: &str = "aictx";
+const DEFAULT_KEYRING_SERVICE: &str = "ctxlane";
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
 const INPUT_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const INPUT_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -882,6 +882,9 @@ mod tests {
 
     #[test]
     fn parses_only_keyring_references() {
+        assert!("keyring://ctxlane/claude-work".parse::<SecretRef>().is_ok());
+        // Migration preserves the old service so the existing OS-keyring item
+        // remains addressable without reading or copying its value.
         assert!("keyring://aictx/claude-work".parse::<SecretRef>().is_ok());
         assert!("vault://team/ai-token".parse::<SecretRef>().is_err());
         assert!("command://curl/attacker".parse::<SecretRef>().is_err());

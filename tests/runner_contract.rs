@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aictx::{
+use ctxlane::{
     Result,
     config::{AppPaths, MetadataStore},
     model::ProfileId,
@@ -21,7 +21,7 @@ use aictx::{
 use secrecy::SecretString;
 use tempfile::TempDir;
 
-const TRUSTED_PUSH_CHILD: &str = "AICTX_RUNNER_CONTRACT_TRUSTED_PUSH_CHILD";
+const TRUSTED_PUSH_CHILD: &str = "CTXLANE_RUNNER_CONTRACT_TRUSTED_PUSH_CHILD";
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn executable(path: &Path, body: &str) {
@@ -41,8 +41,8 @@ fn executable(path: &Path, body: &str) {
         .unwrap_or_else(|error| panic!("chmod {}: {error}", path.display()));
 }
 
-fn aictx(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aictx"));
+fn ctxlane(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root").arg(root);
     command.env("CI", "true");
     command.env("GITHUB_EVENT_NAME", "push");
@@ -208,8 +208,8 @@ fn setup_wif_profile(root: &Path) -> PathBuf {
         .unwrap_or_else(|error| panic!("write identity token: {error}"));
     fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|error| panic!("secure identity token: {error}"));
-    ok(aictx(root).arg("init"));
-    ok(aictx(root).args([
+    ok(ctxlane(root).arg("init"));
+    ok(ctxlane(root).args([
         "profile",
         "add",
         "claude",
@@ -233,13 +233,13 @@ fn setup_wif_profile(root: &Path) -> PathBuf {
             .to_str()
             .unwrap_or_else(|| panic!("temporary path should be UTF-8")),
     ]));
-    ok(aictx(root).args(["context", "add", "work", "--claude", "claude:work"]));
+    ok(ctxlane(root).args(["context", "add", "work", "--claude", "claude:work"]));
     token_file
 }
 
 fn add_static_profiles(root: &Path) {
-    ok(aictx(root).arg("init"));
-    ok(aictx(root).args([
+    ok(ctxlane(root).arg("init"));
+    ok(ctxlane(root).args([
         "profile",
         "add",
         "claude",
@@ -247,9 +247,9 @@ fn add_static_profiles(root: &Path) {
         "--auth",
         "api-key",
         "--secret-ref",
-        "keyring://aictx/claude-api",
+        "keyring://ctxlane/claude-api",
     ]));
-    ok(aictx(root).args([
+    ok(ctxlane(root).args([
         "profile",
         "add",
         "codex",
@@ -257,14 +257,14 @@ fn add_static_profiles(root: &Path) {
         "--auth",
         "api-key",
         "--secret-ref",
-        "keyring://aictx/codex-api",
+        "keyring://ctxlane/codex-api",
     ]));
 }
 
 #[test]
 fn runner_sanitizes_environment_preserves_argv_and_forwards_exit_status() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let capture = temporary.path().join("capture.txt");
     let fake_claude = temporary.path().join("claude");
     let token_file = setup_wif_profile(&root);
@@ -276,7 +276,7 @@ fn runner_sanitizes_environment_preserves_argv_and_forwards_exit_status() {
         ),
     );
 
-    let output = aictx(&root)
+    let output = ctxlane(&root)
         .arg("--claude-bin")
         .arg(&fake_claude)
         .env("ANTHROPIC_API_KEY", "stale-wrong-billing")
@@ -324,15 +324,15 @@ fn runner_sanitizes_environment_preserves_argv_and_forwards_exit_status() {
 #[test]
 fn static_keyring_automation_policies_fail_before_keyring_access() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let marker = temporary.path().join("vendor-ran");
     let fake_claude = temporary.path().join("claude");
     executable(
         &fake_claude,
         &format!("#!/bin/sh\ntouch '{}'\n", shell_path(&marker)),
     );
-    ok(aictx(&root).arg("init"));
-    ok(aictx(&root).args([
+    ok(ctxlane(&root).arg("init"));
+    ok(ctxlane(&root).args([
         "profile",
         "add",
         "claude",
@@ -340,10 +340,10 @@ fn static_keyring_automation_policies_fail_before_keyring_access() {
         "--auth",
         "subscription-token",
         "--secret-ref",
-        "keyring://aictx/claude-work",
+        "keyring://ctxlane/claude-work",
     ]));
 
-    let untrusted = aictx(&root)
+    let untrusted = ctxlane(&root)
         .arg("--claude-bin")
         .arg(&fake_claude)
         .args([
@@ -358,7 +358,7 @@ fn static_keyring_automation_policies_fail_before_keyring_access() {
     assert_eq!(untrusted.status.code(), Some(15));
     assert!(String::from_utf8_lossy(&untrusted.stderr).contains("--trusted-runner"));
 
-    let pull_request = aictx(&root)
+    let pull_request = ctxlane(&root)
         .arg("--claude-bin")
         .arg(&fake_claude)
         .env("GITHUB_EVENT_NAME", "pull_request_target")
@@ -375,7 +375,7 @@ fn static_keyring_automation_policies_fail_before_keyring_access() {
     assert_eq!(pull_request.status.code(), Some(15));
     assert!(String::from_utf8_lossy(&pull_request.stderr).contains("pull-request workflows"));
 
-    let headless_keyring = aictx(&root)
+    let headless_keyring = ctxlane(&root)
         .arg("--claude-bin")
         .arg(&fake_claude)
         .args([
@@ -396,7 +396,7 @@ fn static_keyring_automation_policies_fail_before_keyring_access() {
 #[test]
 fn malicious_claude_project_inputs_fail_before_vendor_execution() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let project = temporary.path().join("project");
     let marker = temporary.path().join("vendor-ran");
     let fake_claude = temporary.path().join("claude");
@@ -415,7 +415,7 @@ fn malicious_claude_project_inputs_fail_before_vendor_execution() {
     ] {
         fs::write(project.join(".claude/settings.json"), document)
             .unwrap_or_else(|error| panic!("write unsafe settings: {error}"));
-        let output = aictx(&root)
+        let output = ctxlane(&root)
             .current_dir(&project)
             .arg("--claude-bin")
             .arg(&fake_claude)
@@ -436,7 +436,7 @@ fn malicious_claude_project_inputs_fail_before_vendor_execution() {
         "---\nname: unsafe\nhooks:\n  PreToolUse: steal\n---\nBody\n",
     )
     .unwrap_or_else(|error| panic!("write hooked definition: {error}"));
-    let output = aictx(&root)
+    let output = ctxlane(&root)
         .current_dir(&project)
         .arg("--claude-bin")
         .arg(&fake_claude)
@@ -451,7 +451,7 @@ fn malicious_claude_project_inputs_fail_before_vendor_execution() {
 #[test]
 fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let capture = temporary.path().join("codex-capture.txt");
     let fake_codex = temporary.path().join("codex");
     executable(
@@ -461,8 +461,8 @@ fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
             shell_path(&capture)
         ),
     );
-    ok(aictx(&root).arg("init"));
-    ok(aictx(&root).args([
+    ok(ctxlane(&root).arg("init"));
+    ok(ctxlane(&root).args([
         "profile",
         "add",
         "codex",
@@ -472,9 +472,9 @@ fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
         "--workspace",
         "ws_expected1234",
     ]));
-    ok(aictx(&root).args(["context", "add", "work", "--codex", "codex:work"]));
+    ok(ctxlane(&root).args(["context", "add", "work", "--codex", "codex:work"]));
 
-    let untrusted = aictx(&root)
+    let untrusted = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args(["--non-interactive", "run", "codex", "--", "exec"])
@@ -483,7 +483,7 @@ fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
     assert_eq!(untrusted.status.code(), Some(15));
     assert!(!capture.exists());
 
-    let pull_request = aictx(&root)
+    let pull_request = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .env("GITHUB_EVENT_NAME", "pull_request")
@@ -500,7 +500,7 @@ fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
     assert_eq!(pull_request.status.code(), Some(15));
     assert!(!capture.exists());
 
-    let output = aictx(&root)
+    let output = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .env("OPENAI_API_KEY", "stale-openai-key")
@@ -533,7 +533,7 @@ fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
 #[test]
 fn malicious_codex_project_configuration_fails_before_vendor_execution() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let project = temporary.path().join("project");
     let marker = temporary.path().join("codex-ran");
     let fake_codex = temporary.path().join("codex");
@@ -548,8 +548,8 @@ fn malicious_codex_project_configuration_fails_before_vendor_execution() {
         &fake_codex,
         &format!("#!/bin/sh\ntouch '{}'\n", shell_path(&marker)),
     );
-    ok(aictx(&root).arg("init"));
-    ok(aictx(&root).args([
+    ok(ctxlane(&root).arg("init"));
+    ok(ctxlane(&root).args([
         "profile",
         "add",
         "codex",
@@ -558,7 +558,7 @@ fn malicious_codex_project_configuration_fails_before_vendor_execution() {
         "chatgpt-oauth",
     ]));
 
-    let output = aictx(&root)
+    let output = ctxlane(&root)
         .current_dir(&project)
         .arg("--codex-bin")
         .arg(&fake_codex)
@@ -573,7 +573,7 @@ fn malicious_codex_project_configuration_fails_before_vendor_execution() {
         .unwrap_or_else(|error| panic!("remove Codex project config: {error}"));
     fs::write(project.join(".codex/hooks.json"), r#"{"hooks":[]}"#)
         .unwrap_or_else(|error| panic!("write Codex hooks: {error}"));
-    let hooks = aictx(&root)
+    let hooks = ctxlane(&root)
         .current_dir(&project)
         .arg("--codex-bin")
         .arg(&fake_codex)
@@ -588,7 +588,7 @@ fn malicious_codex_project_configuration_fails_before_vendor_execution() {
 #[test]
 fn forwarded_configuration_overrides_fail_before_keyring_access() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let vendor_marker = temporary.path().join("vendor-ran");
     let fake_claude = temporary.path().join("claude");
     let fake_codex = temporary.path().join("codex");
@@ -599,7 +599,7 @@ fn forwarded_configuration_overrides_fail_before_keyring_access() {
         );
     }
     add_static_profiles(&root);
-    ok(aictx(&root).args([
+    ok(ctxlane(&root).args([
         "profile",
         "add",
         "claude",
@@ -607,7 +607,7 @@ fn forwarded_configuration_overrides_fail_before_keyring_access() {
         "--auth",
         "subscription-token",
         "--secret-ref",
-        "keyring://aictx/claude-subscription",
+        "keyring://ctxlane/claude-subscription",
     ]));
 
     for arguments in [
@@ -616,7 +616,7 @@ fn forwarded_configuration_overrides_fail_before_keyring_access() {
         vec!["claude", "--", "--add-dir", "/tmp"],
         vec!["claude", "--", "--remote-control=0.0.0.0:9000"],
     ] {
-        let output = aictx(&root)
+        let output = ctxlane(&root)
             .arg("--claude-bin")
             .arg(&fake_claude)
             .args([
@@ -643,7 +643,7 @@ fn forwarded_configuration_overrides_fail_before_keyring_access() {
         vec!["codex", "--", "exec", "-C", "/tmp"],
         vec!["codex", "--", "exec", "--enable", "hooks"],
     ] {
-        let output = aictx(&root)
+        let output = ctxlane(&root)
             .arg("--codex-bin")
             .arg(&fake_codex)
             .args(["--non-interactive", "run", "--profile", "codex:api"])
@@ -669,7 +669,7 @@ impl SecretProvider for FixedSecrets {
         } else if account == "codex-api" {
             "codex-api-canary"
         } else {
-            return Err(aictx::Error::CredentialUnavailable {
+            return Err(ctxlane::Error::CredentialUnavailable {
                 profile: account.clone(),
                 reason: "test secret not configured".to_owned(),
             });
@@ -687,15 +687,15 @@ fn claude_static_credential_status_remains_unverified_after_local_route_confirma
     }
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let fake_claude = temporary.path().join("claude");
     // The helper's injected `auth status --json` response reports logged-in
     // solely from the presence of the selected environment variable. It does
     // not model a remote credential check.
     executable(&fake_claude, "#!/bin/sh\nexit 0\n");
-    ok(aictx(&root).arg("init"));
+    ok(ctxlane(&root).arg("init"));
     for (name, auth) in [("api", "api-key"), ("subscription", "subscription-token")] {
-        ok(aictx(&root).args([
+        ok(ctxlane(&root).args([
             "profile",
             "add",
             "claude",
@@ -703,10 +703,10 @@ fn claude_static_credential_status_remains_unverified_after_local_route_confirma
             "--auth",
             auth,
             "--secret-ref",
-            &format!("keyring://aictx/claude-{name}"),
+            &format!("keyring://ctxlane/claude-{name}"),
         ]));
     }
-    ok(aictx(&root).args([
+    ok(ctxlane(&root).args([
         "profile",
         "add",
         "claude",
@@ -716,7 +716,7 @@ fn claude_static_credential_status_remains_unverified_after_local_route_confirma
         "--organization",
         "organization-other",
         "--secret-ref",
-        "keyring://aictx/claude-wrong-org",
+        "keyring://ctxlane/claude-wrong-org",
     ]));
 
     let paths = AppPaths::for_root(&root);
@@ -762,7 +762,7 @@ fn claude_static_credential_status_remains_unverified_after_local_route_confirma
         Ok(state) => panic!("wrong organization unexpectedly returned {state:?}"),
         Err(error) => error,
     };
-    assert!(matches!(error, aictx::Error::IdentityMismatch(_)));
+    assert!(matches!(error, ctxlane::Error::IdentityMismatch(_)));
 }
 
 #[test]
@@ -774,7 +774,7 @@ fn static_profiles_route_injected_keyring_credentials_without_host_keychain_acce
     }
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let claude_capture = temporary.path().join("claude.txt");
     let codex_capture = temporary.path().join("codex.txt");
     let codex_login = temporary.path().join("codex-login.txt");
@@ -855,7 +855,7 @@ fn static_profiles_route_injected_keyring_credentials_without_host_keychain_acce
 #[test]
 fn repository_local_binary_is_rejected_and_environment_override_is_ignored() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let project = temporary.path().join("project");
     let marker = temporary.path().join("repository-binary-ran");
     fs::create_dir_all(project.join(".git"))
@@ -867,7 +867,7 @@ fn repository_local_binary_is_rejected_and_environment_override_is_ignored() {
     );
     setup_wif_profile(&root);
 
-    let rejected = aictx(&root)
+    let rejected = ctxlane(&root)
         .current_dir(&project)
         .arg("--claude-bin")
         .arg(&repository_claude)
@@ -880,10 +880,11 @@ fn repository_local_binary_is_rejected_and_environment_override_is_ignored() {
 
     let trusted_claude = temporary.path().join("trusted-claude");
     executable(&trusted_claude, "#!/bin/sh\nexit 0\n");
-    let allowed = aictx(&root)
+    let allowed = ctxlane(&root)
         .current_dir(&project)
         .arg("--claude-bin")
         .arg(&trusted_claude)
+        .env("CTXLANE_CLAUDE_BIN", &repository_claude)
         .env("AICTX_CLAUDE_BIN", &repository_claude)
         .args(["--non-interactive", "run", "claude", "--", "hello"])
         .output()
@@ -895,7 +896,7 @@ fn repository_local_binary_is_rejected_and_environment_override_is_ignored() {
 #[test]
 fn oauth_profile_lock_serializes_one_profile_but_not_distinct_profiles() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let started = temporary.path().join("started");
     let release = temporary.path().join("release");
     let fake_codex = temporary.path().join("codex");
@@ -907,12 +908,12 @@ fn oauth_profile_lock_serializes_one_profile_but_not_distinct_profiles() {
             shell_path(&release)
         ),
     );
-    ok(aictx(&root).arg("init"));
+    ok(ctxlane(&root).arg("init"));
     for name in ["one", "two"] {
-        ok(aictx(&root).args(["profile", "add", "codex", name, "--auth", "chatgpt-oauth"]));
+        ok(ctxlane(&root).args(["profile", "add", "codex", name, "--auth", "chatgpt-oauth"]));
     }
 
-    let first = aictx(&root)
+    let first = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
@@ -930,7 +931,7 @@ fn oauth_profile_lock_serializes_one_profile_but_not_distinct_profiles() {
         .unwrap_or_else(|error| panic!("start first profile run: {error}"));
     let mut first = ReleasingChild::new(first, release);
     wait_for_path_while_child_runs(&started, first.child_mut());
-    let mut same = aictx(&root)
+    let mut same = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
@@ -951,7 +952,7 @@ fn oauth_profile_lock_serializes_one_profile_but_not_distinct_profiles() {
         .unwrap_or_else(|error| panic!("start locked profile: {error}"));
     let same_status = wait_for_child(&mut same, "same-profile lock refusal");
     assert_eq!(same_status.code(), Some(15));
-    let mut other = aictx(&root)
+    let mut other = ctxlane(&root)
         .arg("--codex-bin")
         .arg(&fake_codex)
         .args([
@@ -999,13 +1000,13 @@ fn lifecycle_lock_precedes_static_credential_access() {
     }
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let started = temporary.path().join("secret-started");
     let release = temporary.path().join("secret-release");
     let fake_claude = temporary.path().join("claude");
     executable(&fake_claude, "#!/bin/sh\nexit 0\n");
-    ok(aictx(&root).arg("init"));
-    ok(aictx(&root).args([
+    ok(ctxlane(&root).arg("init"));
+    ok(ctxlane(&root).args([
         "profile",
         "add",
         "claude",
@@ -1013,7 +1014,7 @@ fn lifecycle_lock_precedes_static_credential_access() {
         "--auth",
         "api-key",
         "--secret-ref",
-        "keyring://aictx/claude-work",
+        "keyring://ctxlane/claude-work",
     ]));
     let paths = AppPaths::for_root(&root);
     let store = MetadataStore::new(paths.clone());
@@ -1056,7 +1057,7 @@ fn lifecycle_lock_precedes_static_credential_access() {
         )
     });
     wait_for_path(&started);
-    let removal = aictx(&root)
+    let removal = ctxlane(&root)
         .args(["profile", "remove", "claude:work"])
         .output()
         .unwrap_or_else(|error| panic!("remove busy profile: {error}"));
@@ -1075,7 +1076,7 @@ fn lifecycle_lock_precedes_static_credential_access() {
 #[test]
 fn non_interactive_logout_never_touches_keyring_or_vendor_cache() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let marker = temporary.path().join("codex-logout-ran");
     let fake_codex = temporary.path().join("codex");
     executable(
@@ -1085,7 +1086,7 @@ fn non_interactive_logout_never_touches_keyring_or_vendor_cache() {
     add_static_profiles(&root);
 
     for profile in ["claude:api", "codex:api"] {
-        let output = aictx(&root)
+        let output = ctxlane(&root)
             .arg("--codex-bin")
             .arg(&fake_codex)
             .args(["--non-interactive", "logout", profile])
@@ -1102,7 +1103,7 @@ fn termination_signal_is_forwarded_to_vendor_child() {
     use rustix::process::{Pid, Signal, kill_process};
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let started = temporary.path().join("signal-started");
     let terminated = temporary.path().join("signal-terminated");
     let fake_claude = temporary.path().join("claude");
@@ -1115,7 +1116,7 @@ fn termination_signal_is_forwarded_to_vendor_child() {
         ),
     );
     setup_wif_profile(&root);
-    let mut wrapper_command = aictx(&root);
+    let mut wrapper_command = ctxlane(&root);
     wrapper_command
         .arg("--claude-bin")
         .arg(&fake_claude)
@@ -1149,7 +1150,7 @@ fn termination_signal_is_forwarded_to_vendor_child() {
 #[test]
 fn trusted_child_path_prevents_repository_interpreter_hijacking() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let project = temporary.path().join("project");
     let malicious_bin = project.join("bin");
     let trusted_bin = temporary.path().join("trusted-bin");
@@ -1157,7 +1158,7 @@ fn trusted_child_path_prevents_repository_interpreter_hijacking() {
         .unwrap_or_else(|error| panic!("create repository marker: {error}"));
     fs::create_dir(&malicious_bin).unwrap_or_else(|error| panic!("create malicious bin: {error}"));
     fs::create_dir(&trusted_bin).unwrap_or_else(|error| panic!("create trusted bin: {error}"));
-    let interpreter = "aictx-contract-interpreter";
+    let interpreter = "ctxlane-contract-interpreter";
     let malicious_marker = temporary.path().join("malicious-interpreter-ran");
     let trusted_capture = temporary.path().join("trusted-environment.txt");
     executable(
@@ -1184,7 +1185,7 @@ fn trusted_child_path_prevents_repository_interpreter_hijacking() {
         Path::new("/bin"),
     ])
     .unwrap_or_else(|error| panic!("construct PATH: {error}"));
-    let output = aictx(&root)
+    let output = ctxlane(&root)
         .current_dir(&project)
         .arg("--claude-bin")
         .arg(&vendor_script)
@@ -1205,7 +1206,7 @@ fn trusted_child_path_prevents_repository_interpreter_hijacking() {
 #[test]
 fn wif_credential_status_is_available_without_static_secret_access() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     setup_wif_profile(&root);
     let paths = AppPaths::for_root(&root);
     let store = MetadataStore::new(paths.clone());

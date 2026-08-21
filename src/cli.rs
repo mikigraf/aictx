@@ -6,13 +6,13 @@ use crate::model::{AuthArg, CodexCredentialStore, Name, ProfileId, Provider};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "aictx",
+    name = "ctxlane",
     version,
-    about = "Safely switch and isolate Claude Code and Codex accounts",
+    about = "Switch between Claude Code and Codex accounts with isolated local state",
     long_about = None,
     propagate_version = true,
-    after_help = "Run `aictx` with no subcommand to open the interactive terminal dashboard.",
-    after_long_help = "Examples:\n  aictx init --guided\n  aictx init\n  aictx profile add claude personal --auth subscription\n  aictx profile add codex personal --auth subscription\n  aictx context add personal --claude claude:personal --codex codex:personal\n  aictx use personal\n  aictx run claude -- -p \"explain this repository\""
+    after_help = "Run `ctxlane` with no subcommand to open the interactive terminal dashboard.",
+    after_long_help = "Examples:\n  ctxlane init --guided\n  ctxlane init\n  ctxlane profile add claude personal --auth subscription\n  ctxlane profile add codex personal --auth subscription\n  ctxlane context add personal --claude claude:personal --codex codex:personal\n  ctxlane use personal\n  ctxlane run claude -- -p \"explain this repository\""
 )]
 pub struct Cli {
     /// Use an explicit application root outside the current repository.
@@ -110,7 +110,7 @@ pub enum MigrateCommand {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx migrate aictx --dry-run\n  aictx migrate aictx\n  aictx --root /new/ctxlane migrate aictx --from-root /old/aictx"
+    after_long_help = "Examples:\n  ctxlane migrate aictx --dry-run\n  ctxlane migrate aictx\n  ctxlane --root /new/ctxlane migrate aictx --from-root /old/aictx"
 )]
 pub struct MigrateAictxArgs {
     /// Read the legacy aictx store from this absolute root.
@@ -124,7 +124,7 @@ pub struct MigrateAictxArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx migrate recover\n  aictx --root /new/ctxlane migrate recover --from-root /old/aictx"
+    after_long_help = "Examples:\n  ctxlane migrate recover\n  ctxlane --root /new/ctxlane migrate recover --from-root /old/aictx"
 )]
 pub struct MigrateRecoverArgs {
     /// Read the legacy aictx store from this absolute root.
@@ -134,12 +134,16 @@ pub struct MigrateRecoverArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx init\n  aictx init --guided\n\nGuided setup creates or reuses the Claude `personal` subscription-token profile, runs the official `claude setup-token` flow, and stores the pasted token in the OS keyring. On success, run:\n  aictx run --profile claude:personal claude -- -p \"explain this repository\""
+    after_long_help = "Examples:\n  ctxlane init\n  ctxlane init --guided\n  ctxlane init --fresh\n  ctxlane init --guided --fresh\n\nGuided setup creates or reuses the Claude `personal` subscription-token profile, runs the official `claude setup-token` flow, and stores the pasted token in the OS keyring. On success, run:\n  ctxlane run --profile claude:personal claude -- -p \"explain this repository\""
 )]
 pub struct InitArgs {
     /// Set up the Claude `personal` subscription profile and credential in one guided flow.
     #[arg(long)]
     pub guided: bool,
+
+    /// Allow a separate empty ctxlane store when legacy metadata is detected.
+    #[arg(long)]
+    pub fresh: bool,
 }
 
 #[derive(Debug, Args)]
@@ -167,7 +171,7 @@ pub enum ProfileCommand {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx profile add claude personal --auth subscription\n  aictx profile add codex work --auth subscription\n  aictx profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --identity-token-file /run/secrets/anthropic.jwt"
+    after_long_help = "Examples:\n  ctxlane profile add claude personal --auth subscription\n  ctxlane profile add codex work --auth subscription\n  ctxlane profile add claude ci --auth wif --organization-id org_123 --federation-rule-id rule_123 --identity-token-file /run/secrets/anthropic.jwt"
 )]
 pub struct ProfileAddArgs {
     /// Vendor that owns the profile: `claude` or `codex`.
@@ -251,7 +255,7 @@ pub struct UseArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx login claude:personal --generate\n  aictx login codex:work\n  aictx login codex:work --device"
+    after_long_help = "Examples:\n  ctxlane login claude:personal --generate\n  ctxlane login codex:work\n  ctxlane login codex:work --device"
 )]
 pub struct LoginArgs {
     /// Provider profile ID, for example `claude:personal` or `codex:work`.
@@ -274,7 +278,7 @@ pub struct LogoutArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Examples:\n  aictx run claude -- -p \"explain this repository\"\n  aictx run codex -- exec \"run the tests\"\n  aictx run --profile codex:work codex -- exec \"review this change\""
+    after_long_help = "Examples:\n  ctxlane run claude -- -p \"explain this repository\"\n  ctxlane run codex -- exec \"run the tests\"\n  ctxlane run --profile codex:work codex -- exec \"review this change\""
 )]
 pub struct RunArgs {
     /// Resolve this context for one invocation without changing active state.
@@ -382,7 +386,7 @@ mod tests {
     #[test]
     fn run_preserves_hostile_arguments_as_values() {
         let cli = Cli::try_parse_from([
-            "aictx",
+            "ctxlane",
             "run",
             "claude",
             "--",
@@ -400,7 +404,7 @@ mod tests {
 
     #[test]
     fn no_subcommand_selects_interactive_mode() {
-        let cli = Cli::try_parse_from(["aictx"])
+        let cli = Cli::try_parse_from(["ctxlane"])
             .unwrap_or_else(|error| panic!("interactive CLI should parse: {error}"));
         assert!(cli.command.is_none());
     }

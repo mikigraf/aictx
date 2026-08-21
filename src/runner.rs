@@ -557,7 +557,7 @@ fn capture_preflight_stdout(
 ) -> Result<(ExitStatus, Vec<u8>)> {
     let (sender, receiver) = mpsc::sync_channel(1);
     if let Err(source) = thread::Builder::new()
-        .name("aictx-preflight-output".to_owned())
+        .name("ctxlane-preflight-output".to_owned())
         .spawn(move || {
             let mut bytes = Vec::new();
             let result = stdout
@@ -1631,7 +1631,7 @@ fn validate_forwarded_args(profile: &Profile, args: &[OsString]) -> Result<()> {
         };
         if blocked_command {
             return Err(Error::PolicyRefused(format!(
-                "vendor command `{command}` manages authentication or executable integrations; use the dedicated aictx workflow or run it outside aictx"
+                "vendor command `{command}` manages authentication or executable integrations; use the dedicated ctxlane workflow or run it outside ctxlane"
             )));
         }
     }
@@ -1944,26 +1944,26 @@ mod tests {
     #[allow(clippy::zombie_processes)]
     #[test]
     fn preflight_sleep_fixture() {
-        if env::var_os("AICTX_TEST_PREFLIGHT_DESCENDANT").is_some() {
+        if env::var_os("CTXLANE_TEST_PREFLIGHT_DESCENDANT").is_some() {
             let program = env::current_exe()
                 .unwrap_or_else(|error| panic!("resolve descendant test executable: {error}"));
             Command::new(program)
                 .arg("--exact")
                 .arg("runner::tests::preflight_sleep_fixture")
-                .env_remove("AICTX_TEST_PREFLIGHT_DESCENDANT")
-                .env("AICTX_TEST_PREFLIGHT_DESCENDANT_CHILD", "1")
+                .env_remove("CTXLANE_TEST_PREFLIGHT_DESCENDANT")
+                .env("CTXLANE_TEST_PREFLIGHT_DESCENDANT_CHILD", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap_or_else(|error| panic!("spawn descendant preflight fixture: {error}"));
-            if let Some(marker) = env::var_os("AICTX_TEST_PREFLIGHT_READY") {
+            if let Some(marker) = env::var_os("CTXLANE_TEST_PREFLIGHT_READY") {
                 fs::write(PathBuf::from(marker), b"ready")
                     .unwrap_or_else(|error| panic!("write descendant readiness marker: {error}"));
             }
-        } else if env::var_os("AICTX_TEST_PREFLIGHT_DESCENDANT_CHILD").is_some() {
+        } else if env::var_os("CTXLANE_TEST_PREFLIGHT_DESCENDANT_CHILD").is_some() {
             thread::sleep(Duration::from_secs(2));
-            if let Some(marker) = env::var_os("AICTX_TEST_PREFLIGHT_READY") {
+            if let Some(marker) = env::var_os("CTXLANE_TEST_PREFLIGHT_READY") {
                 let marker = PathBuf::from(marker);
                 if marker.exists() {
                     fs::remove_file(marker).unwrap_or_else(|error| {
@@ -1971,7 +1971,7 @@ mod tests {
                     });
                 }
             }
-        } else if env::var_os("AICTX_TEST_PREFLIGHT_SLEEP").is_some() {
+        } else if env::var_os("CTXLANE_TEST_PREFLIGHT_SLEEP").is_some() {
             thread::sleep(Duration::from_secs(30));
         }
     }
@@ -1986,7 +1986,7 @@ mod tests {
         command
             .arg("--exact")
             .arg("runner::tests::preflight_sleep_fixture")
-            .env("AICTX_TEST_PREFLIGHT_SLEEP", "1")
+            .env("CTXLANE_TEST_PREFLIGHT_SLEEP", "1")
             // This subprocess is the kill target. Its parent remains instrumented, while an
             // incomplete profile from the terminated child stays outside the coverage merge.
             .env_remove("LLVM_PROFILE_FILE")
@@ -2039,8 +2039,8 @@ mod tests {
         command
             .arg("--exact")
             .arg("runner::tests::preflight_sleep_fixture")
-            .env("AICTX_TEST_PREFLIGHT_DESCENDANT", "1")
-            .env("AICTX_TEST_PREFLIGHT_READY", &ready)
+            .env("CTXLANE_TEST_PREFLIGHT_DESCENDANT", "1")
+            .env("CTXLANE_TEST_PREFLIGHT_READY", &ready)
             // The finite-lived descendant intentionally outlives its direct parent. Do not let
             // either fixture race cargo-llvm-cov's merge after this test has completed.
             .env_remove("LLVM_PROFILE_FILE")
@@ -2114,7 +2114,7 @@ mod tests {
                 BillingDomain::AnthropicApi
             },
             auth,
-            state_dir: PathBuf::from("/tmp/aictx-claude"),
+            state_dir: PathBuf::from("/tmp/ctxlane-claude"),
             secret_ref: None,
             account_hint: None,
             expected_organization: None,
@@ -2132,8 +2132,8 @@ mod tests {
         Profile::Codex {
             billing_domain: BillingDomain::OpenaiApi,
             auth: CodexAuth::ApiKey,
-            state_dir: PathBuf::from("/tmp/aictx-codex"),
-            secret_ref: Some("keyring://aictx/codex-api-key".to_owned()),
+            state_dir: PathBuf::from("/tmp/ctxlane-codex"),
+            secret_ref: Some("keyring://ctxlane/codex-api-key".to_owned()),
             account_hint: None,
             expected_workspace_id: None,
             credential_store: CodexCredentialStore::File,
@@ -2448,7 +2448,7 @@ Body
         assert!(!environment.contains_key(OsStr::new("OPENAI_PROJECT")));
         assert_eq!(
             environment.get(OsStr::new("CODEX_HOME")),
-            Some(&OsString::from("/tmp/aictx-codex"))
+            Some(&OsString::from("/tmp/ctxlane-codex"))
         );
     }
 }

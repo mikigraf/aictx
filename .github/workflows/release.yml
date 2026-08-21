@@ -58,36 +58,36 @@ jobs:
             echo "tag version ${version} does not match Cargo.toml version ${manifest_version}" >&2
             exit 1
           fi
-          package="package/aictx-${version}-${target}"
+          package="package/ctxlane-${version}-${target}"
           mkdir -p "$package/completions" dist
 
           cargo build --release --locked --target "$target"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            cp "target/${target}/release/aictx.exe" "$package/aictx.exe"
-            binary="$package/aictx.exe"
+            cp "target/${target}/release/ctxlane.exe" "$package/ctxlane.exe"
+            binary="$package/ctxlane.exe"
           else
-            cp "target/${target}/release/aictx" "$package/aictx"
-            binary="$package/aictx"
+            cp "target/${target}/release/ctxlane" "$package/ctxlane"
+            binary="$package/ctxlane"
           fi
 
           cp README.md LICENSE SECURITY.md THREAT_MODEL.md CONTRIBUTING.md CHANGELOG.md "$package/"
           cp -R docs "$package/docs"
-          "$binary" completions bash > "$package/completions/aictx.bash"
-          "$binary" completions zsh > "$package/completions/_aictx"
-          "$binary" completions fish > "$package/completions/aictx.fish"
-          "$binary" completions powershell > "$package/completions/_aictx.ps1"
-          "$binary" completions elvish > "$package/completions/aictx.elv"
+          "$binary" completions bash > "$package/completions/ctxlane.bash"
+          "$binary" completions zsh > "$package/completions/_ctxlane"
+          "$binary" completions fish > "$package/completions/ctxlane.fish"
+          "$binary" completions powershell > "$package/completions/_ctxlane.ps1"
+          "$binary" completions elvish > "$package/completions/ctxlane.elv"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            archive="dist/aictx-${version}-${target}.zip"
+            archive="dist/ctxlane-${version}-${target}.zip"
             # Keep the same single top-level package directory used by the
             # Unix tarballs. Omitting the wildcard avoids scattering files
             # into the extraction directory on Windows.
             powershell -NoProfile -Command "Compress-Archive -Path '${package}' -DestinationPath '${archive}'"
             (cd dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
           else
-            archive="dist/aictx-${version}-${target}.tar.gz"
+            archive="dist/ctxlane-${version}-${target}.tar.gz"
             tar -C "$(dirname "$package")" -czf "$archive" "$(basename "$package")"
             if [[ "${RUNNER_OS}" == "macOS" ]]; then
               (cd dist && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
@@ -99,7 +99,7 @@ jobs:
       - name: Upload packaged artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: aictx-${{ matrix.name }}
+          name: ctxlane-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
@@ -138,13 +138,13 @@ jobs:
             | sha256sum --check --strict
           tar -xzf "$archive" -C "$install_dir" syft
           "$install_dir/syft" scan dir:. \
-            -o "cyclonedx-json=dist/aictx-${GITHUB_REF_NAME}-source.cdx.json"
+            -o "cyclonedx-json=dist/ctxlane-${GITHUB_REF_NAME}-source.cdx.json"
 
       - name: Checksum SBOM
         shell: bash
         run: |
           set -euo pipefail
-          sbom="aictx-${GITHUB_REF_NAME}-source.cdx.json"
+          sbom="ctxlane-${GITHUB_REF_NAME}-source.cdx.json"
           (cd dist && sha256sum "$sbom" > "${sbom}.sha256")
 
       - name: Install pinned Cosign

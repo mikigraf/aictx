@@ -32,7 +32,7 @@ pub fn mask_identity(value: &str) -> String {
 pub fn shell_init(shell: Shell, executable: &Path, root: Option<&Path>) -> Result<String> {
     let executable = executable.to_str().ok_or_else(|| {
         Error::InvalidConfig(format!(
-            "shell integration requires a UTF-8 aictx executable path: {}",
+            "shell integration requires a UTF-8 ctxlane executable path: {}",
             executable.display()
         ))
     })?;
@@ -108,7 +108,7 @@ pub fn environment_lines(
     context: &Context,
     shell: Shell,
 ) -> Vec<String> {
-    let mut values = vec![("AICTX_CONTEXT", context_name.to_string())];
+    let mut values = vec![("CTXLANE_CONTEXT", context_name.to_string())];
     if let Some(profile_id) = context.profile(Provider::Claude)
         && let Some(profile) = config.profiles.get(profile_id)
     {
@@ -135,7 +135,7 @@ pub fn environment_lines(
 
 pub fn generate_completions(shell: clap_complete::Shell) {
     let mut command = Cli::command();
-    clap_complete::generate(shell, &mut command, "aictx", &mut io::stdout());
+    clap_complete::generate(shell, &mut command, "ctxlane", &mut io::stdout());
 }
 
 fn quote_posix(value: &str) -> String {
@@ -168,33 +168,33 @@ mod tests {
     fn shell_quoting_does_not_interpolate() {
         assert_eq!(quote_posix("a'b"), "'a'\\''b'");
         assert_eq!(quote_powershell("a'b"), "'a''b'");
-        let init = shell_init(Shell::Bash, Path::new("/trusted/aictx"), None)
+        let init = shell_init(Shell::Bash, Path::new("/trusted/ctxlane"), None)
             .unwrap_or_else(|error| panic!("render shell integration: {error}"));
-        assert!(init.contains("command '/trusted/aictx' run claude"));
-        assert!(!init.contains("command aictx"));
+        assert!(init.contains("command '/trusted/ctxlane' run claude"));
+        assert!(!init.contains("command ctxlane"));
     }
 
     #[test]
     fn shell_init_preserves_explicit_root() {
         let init = shell_init(
             Shell::Bash,
-            Path::new("/trusted/aictx"),
+            Path::new("/trusted/ctxlane"),
             Some(Path::new("/safe/root's state")),
         )
         .unwrap_or_else(|error| panic!("render shell integration: {error}"));
         assert!(
-            init.contains("command '/trusted/aictx' --root '/safe/root'\\''s state' run claude")
+            init.contains("command '/trusted/ctxlane' --root '/safe/root'\\''s state' run claude")
         );
 
         let powershell = shell_init(
             Shell::Powershell,
-            Path::new("C:/trusted/aictx.exe"),
+            Path::new("C:/trusted/ctxlane.exe"),
             Some(Path::new("C:/safe/root's state")),
         )
         .unwrap_or_else(|error| panic!("render PowerShell integration: {error}"));
         assert!(
             powershell
-                .contains("& 'C:/trusted/aictx.exe' --root 'C:/safe/root''s state' run codex")
+                .contains("& 'C:/trusted/ctxlane.exe' --root 'C:/safe/root''s state' run codex")
         );
     }
 }

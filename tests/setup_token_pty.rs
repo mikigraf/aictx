@@ -17,7 +17,7 @@ use tempfile::TempDir;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const BRACKETED_PASTE_ENABLED: &str = "\u{1b}[?2004h";
 const BRACKETED_PASTE_DISABLED: &str = "\u{1b}[?2004l";
-const REVOCATION_WARNING: &str = "Warning: Claude Code may have created a remote setup token, but aictx did not store it. Revoke that token in your Claude account settings (Settings > Claude Code) before retrying.";
+const REVOCATION_WARNING: &str = "Warning: Claude Code may have created a remote setup token, but ctxlane did not store it. Revoke that token in your Claude account settings (Settings > Claude Code) before retrying.";
 const SYNTHETIC_SETUP_TOKEN: &str =
     "opaque-fixture:Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~Ab9_-xY2~";
 
@@ -72,7 +72,7 @@ struct GuidedRun {
 
 fn copy_fake_claude(directory: &Path, name: &str) -> PathBuf {
     let executable = directory.join(name);
-    fs::copy(env!("CARGO_BIN_EXE_aictx-test-vendor"), &executable)
+    fs::copy(env!("CARGO_BIN_EXE_ctxlane-test-vendor"), &executable)
         .unwrap_or_else(|error| panic!("copy fake Claude executable: {error}"));
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
         .unwrap_or_else(|error| panic!("secure fake Claude executable: {error}"));
@@ -159,16 +159,16 @@ fn wait_for_exit(child: &mut ChildGuard, deadline: Instant) -> portable_pty::Exi
 }
 
 fn run_ok(root: &Path, current_directory: &Path, arguments: &[&str]) {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_aictx"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ctxlane"))
         .arg("--root")
         .arg(root)
         .args(arguments)
         .current_dir(current_directory)
         .output()
-        .unwrap_or_else(|error| panic!("run aictx setup command: {error}"));
+        .unwrap_or_else(|error| panic!("run ctxlane setup command: {error}"));
     assert!(
         output.status.success(),
-        "aictx setup command failed\nstdout: {}\nstderr: {}",
+        "ctxlane setup command failed\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -190,7 +190,7 @@ fn run_guided_preflight(root: &Path, current_directory: &Path, fake_claude: &Pat
         .unwrap_or_else(|error| panic!("clone guided preflight PTY reader: {error}"));
     let output = Arc::new(Mutex::new(Vec::new()));
     let output_reader = capture_output(reader, &output);
-    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_aictx"));
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root");
     command.arg(root);
     command.arg("--claude-bin");
@@ -222,7 +222,7 @@ fn run_guided_preflight(root: &Path, current_directory: &Path, fake_claude: &Pat
 fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
     let malformed_temporary =
         TempDir::new().unwrap_or_else(|error| panic!("malformed tempdir: {error}"));
-    let malformed_root = malformed_temporary.path().join("aictx");
+    let malformed_root = malformed_temporary.path().join("ctxlane");
     let malformed_worktree = malformed_temporary.path().join("worktree");
     fs::create_dir(&malformed_worktree)
         .unwrap_or_else(|error| panic!("create malformed-test worktree: {error}"));
@@ -258,7 +258,7 @@ fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
 
     let incompatible_temporary =
         TempDir::new().unwrap_or_else(|error| panic!("incompatible tempdir: {error}"));
-    let incompatible_root = incompatible_temporary.path().join("aictx");
+    let incompatible_root = incompatible_temporary.path().join("ctxlane");
     let incompatible_worktree = incompatible_temporary.path().join("worktree");
     fs::create_dir(&incompatible_worktree)
         .unwrap_or_else(|error| panic!("create incompatible-test worktree: {error}"));
@@ -304,7 +304,7 @@ fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
 #[test]
 fn guided_vendor_failure_warns_that_the_generated_token_may_need_revocation() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let worktree = temporary.path().join("worktree");
     fs::create_dir(&worktree).unwrap_or_else(|error| panic!("create isolated worktree: {error}"));
     let fake_claude = copy_fake_claude(temporary.path(), "claude-setup-token-exit-23");
@@ -401,8 +401,8 @@ fn protected_wrapped_paste_succeeds_without_echo_and_restores_the_terminal() {
 
 #[test]
 fn protected_wrapped_paste_rejects_delayed_input_before_the_next_shell() {
-    const SHELL_DONE: &str = "AICTX_NEXT_SHELL_DRAINED";
-    const TERMINAL_RESTORED: &str = "AICTX_PROMPT_TERMINAL_RESTORED";
+    const SHELL_DONE: &str = "CTXLANE_NEXT_SHELL_DRAINED";
+    const TERMINAL_RESTORED: &str = "CTXLANE_PROMPT_TERMINAL_RESTORED";
 
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let sentinel = temporary.path().join("delayed-input-was-executed");
@@ -431,12 +431,12 @@ fn protected_wrapped_paste_rejects_delayed_input_before_the_next_shell() {
     let mut shell_command = CommandBuilder::new("/bin/sh");
     shell_command.arg("-c");
     shell_command.arg(
-        "before=$(stty -g)\n\"$AICTX_PROMPT_HARNESS\" prompt-setup-token\nstatus=$?\nafter=$(stty -g)\nif [ \"$before\" = \"$after\" ]; then printf 'AICTX_PROMPT_TERMINAL_RESTORED\\n'; fi\nprintf 'AICTX_PROMPT_STATUS_%s\\n' \"$status\"\nexec /bin/sh -i",
+        "before=$(stty -g)\n\"$CTXLANE_PROMPT_HARNESS\" prompt-setup-token\nstatus=$?\nafter=$(stty -g)\nif [ \"$before\" = \"$after\" ]; then printf 'CTXLANE_PROMPT_TERMINAL_RESTORED\\n'; fi\nprintf 'CTXLANE_PROMPT_STATUS_%s\\n' \"$status\"\nexec /bin/sh -i",
     );
     shell_command.cwd(temporary.path());
     shell_command.env("TERM", "xterm-256color");
-    shell_command.env("PS1", "AICTX_TEST_SHELL> ");
-    shell_command.env("AICTX_PROMPT_HARNESS", &prompt_harness);
+    shell_command.env("PS1", "CTXLANE_TEST_SHELL> ");
+    shell_command.env("CTXLANE_PROMPT_HARNESS", &prompt_harness);
     let mut shell = ChildGuard::new(
         pair.slave
             .spawn_command(shell_command)
@@ -462,7 +462,7 @@ fn protected_wrapped_paste_rejects_delayed_input_before_the_next_shell() {
         .unwrap_or_else(|error| panic!("write delayed sentinel input: {error}"));
 
     wait_for_marker(&output, &mut shell, TERMINAL_RESTORED, deadline);
-    wait_for_marker(&output, &mut shell, "AICTX_PROMPT_STATUS_2", deadline);
+    wait_for_marker(&output, &mut shell, "CTXLANE_PROMPT_STATUS_2", deadline);
 
     let shell_input = format!("printf '{SHELL_DONE}\\n'; exit\r");
     writer
@@ -493,7 +493,7 @@ fn protected_wrapped_paste_rejects_delayed_input_before_the_next_shell() {
 
 fn run_guided_prompt(exit: PromptExit) -> GuidedRun {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let root = temporary.path().join("aictx");
+    let root = temporary.path().join("ctxlane");
     let worktree = temporary.path().join("worktree");
     fs::create_dir(&worktree).unwrap_or_else(|error| panic!("create isolated worktree: {error}"));
     let fake_claude = copy_fake_claude(temporary.path(), "claude-guided-pty");
@@ -521,7 +521,7 @@ fn run_guided_prompt(exit: PromptExit) -> GuidedRun {
     let output = Arc::new(Mutex::new(Vec::new()));
     let output_reader = capture_output(reader, &output);
 
-    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_aictx"));
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ctxlane"));
     command.arg("--root");
     command.arg(&root);
     command.arg("--claude-bin");
@@ -540,7 +540,7 @@ fn run_guided_prompt(exit: PromptExit) -> GuidedRun {
     let mut child = ChildGuard::new(
         pair.slave
             .spawn_command(command)
-            .unwrap_or_else(|error| panic!("spawn guided aictx in PTY: {error}")),
+            .unwrap_or_else(|error| panic!("spawn guided ctxlane in PTY: {error}")),
     );
     let child_process_id = child
         .child

@@ -6,6 +6,9 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ### Changed
 
+- Renamed the package, library, executable, platform application identity, new keyring service, shell selector, release artifacts, and documentation from `aictx` to `ctxlane` for version 0.2.0.
+- Added explicit copy-only `ctxlane migrate aictx` and recovery commands. Legacy metadata, vendor state, and credential references remain unchanged; advisory lock files may be created or normalized while coordinating the copy.
+- Added `ctxlane init --fresh` and `ctxlane init --guided --fresh` for users who intentionally want a separate empty store when v0.1 metadata is detected.
 - Reframed public product language around account selection and profile separation while keeping `profile` as the CLI and configuration object.
 
 ## 0.1.0 - 2026-08-20

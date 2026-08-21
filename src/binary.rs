@@ -76,7 +76,7 @@ pub fn resolve_external_binary(configured: &Path, program: ExternalProgram) -> R
         && current == canonical
     {
         return Err(Error::VendorIncompatible(format!(
-            "resolved {label} executable points back to aictx ({})",
+            "resolved {label} executable points back to ctxlane ({})",
             canonical.display()
         )));
     }

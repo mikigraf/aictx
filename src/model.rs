@@ -499,7 +499,7 @@ impl Config {
         }
         if self.settings.telemetry {
             return Err(Error::InvalidConfig(
-                "telemetry must remain disabled; aictx does not implement telemetry".to_owned(),
+                "telemetry must remain disabled; ctxlane does not implement telemetry".to_owned(),
             ));
         }
         for (provider, binary) in [
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn profile_names_and_state_directories_are_ascii_case_fold_unique() {
-        let root = std::env::temp_dir().join("aictx-model-case-fold-test");
+        let root = std::env::temp_dir().join("ctxlane-model-case-fold-test");
         let profile = |state_dir: PathBuf| Profile::Codex {
             billing_domain: BillingDomain::ChatgptSubscription,
             auth: CodexAuth::ChatgptOauth,
@@ -967,7 +967,7 @@ mod tests {
 
     #[test]
     fn persisted_metadata_and_paths_reject_control_characters() {
-        let root = std::env::temp_dir().join("aictx-model-control-test");
+        let root = std::env::temp_dir().join("ctxlane-model-control-test");
         let profile_id = ProfileId::new(
             Provider::Codex,
             Name::parse("work").unwrap_or_else(|error| panic!("name: {error}")),

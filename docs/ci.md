@@ -11,7 +11,7 @@ Use the least-personal credential compatible with the task:
 
 Static API keys, subscription tokens, and access tokens are stored in the native OS keyring. `--non-interactive` refuses credential reads, writes, and deletes in the keyring, so these profiles are not a headless CI credential path.
 
-Do not copy a developer's vendor credential cache into a shared runner. `aictx` does not implement cache import/export.
+Do not copy a developer's vendor credential cache into a shared runner. `ctxlane` does not implement cache import/export.
 
 ## Non-interactive behavior
 
@@ -26,7 +26,7 @@ WIF requires the upstream identity-token file to be a private regular file. A ca
 
 ## Codex access-token policy
 
-An access-token profile requires `--workspace` at creation. When inherited `GITHUB_EVENT_NAME` identifies `pull_request` or `pull_request_target`, `aictx` refuses wrapper-managed static credentials and cached Codex OAuth before use. That check is defense-in-depth because code in the job can alter its own environment; GitHub job permissions, environment protection, and secret gating must prevent untrusted jobs from receiving credentials in the first place. When `CI` is set or `--non-interactive` is active, Claude subscription-token, Codex OAuth, and Codex access-token runs also require the explicit `aictx run --trusted-runner ...` flag. There is no environment-variable equivalent for that assertion because inherited environment is not a trust boundary.
+An access-token profile requires `--workspace` at creation. When inherited `GITHUB_EVENT_NAME` identifies `pull_request` or `pull_request_target`, `ctxlane` refuses wrapper-managed static credentials and cached Codex OAuth before use. That check is defense-in-depth because code in the job can alter its own environment; GitHub job permissions, environment protection, and secret gating must prevent untrusted jobs from receiving credentials in the first place. When `CI` is set or `--non-interactive` is active, Claude subscription-token, Codex OAuth, and Codex access-token runs also require the explicit `ctxlane run --trusted-runner ...` flag. There is no environment-variable equivalent for that assertion because inherited environment is not a trust boundary.
 
 This flag is a deliberate operator assertion, not a technical attestation. Set it only after verifying:
 
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run selected official client
         run: >-
-          aictx --root "${{ runner.temp }}/aictx" --non-interactive run
+          ctxlane --root "${{ runner.temp }}/ctxlane" --non-interactive run
           --profile claude:ci claude -- -p "review this change"
 ```
 
@@ -71,7 +71,7 @@ The setup needed to create `claude:ci` is deployment-specific and intentionally 
 Create the identity-token file through the upstream OIDC/workload identity mechanism, restrict its permissions, then configure selectors:
 
 ```bash
-aictx profile add claude ci \
+ctxlane profile add claude ci \
   --auth wif \
   --organization-id "$ANTHROPIC_ORG_ID" \
   --federation-rule-id "$ANTHROPIC_RULE_ID" \
@@ -79,7 +79,7 @@ aictx profile add claude ci \
   --identity-token-file "$RUNNER_TEMP/anthropic-identity.jwt"
 ```
 
-`aictx` passes the selector names and file path to the official Claude client. It does not contact Anthropic's token endpoint, validate JWT claims, or refresh access tokens itself. Validate this flow with the exact IdP and Claude CLI deployed in your organization.
+`ctxlane` passes the selector names and file path to the official Claude client. It does not contact Anthropic's token endpoint, validate JWT claims, or refresh access tokens itself. Validate this flow with the exact IdP and Claude CLI deployed in your organization.
 
 ## Failure handling
 
@@ -88,8 +88,8 @@ Use the wrapper exit categories in [Command reference](command-reference.md) to 
 Run these checks during image qualification:
 
 ```bash
-aictx --non-interactive doctor
-aictx --non-interactive credential check --all
+ctxlane --non-interactive doctor
+ctxlane --non-interactive credential check --all
 ```
 
 `doctor` failing because an unused provider binary is absent can be narrowed with `--provider`. Do not print `env`, vendor state, or config indiscriminately when diagnosing a credential job.

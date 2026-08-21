@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use aictx::{
+use ctxlane::{
     Error,
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     migration::{
@@ -21,6 +21,9 @@ use serde::Serialize;
 use tempfile::TempDir;
 
 struct Fixture {
+    // Unix-only path tests read this guard directly; every platform needs it to
+    // keep the temporary migration roots alive for the fixture lifetime.
+    #[cfg_attr(not(unix), allow(dead_code))]
     temporary: TempDir,
     legacy: AppPaths,
     target: AppPaths,
@@ -87,7 +90,7 @@ impl Fixture {
                     },
                 );
                 config.default_context = Some(context_name.clone());
-                config.bindings.push(aictx::model::Binding {
+                config.bindings.push(ctxlane::model::Binding {
                     path: binding_path,
                     context: context_name.clone(),
                 });

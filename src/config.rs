@@ -815,14 +815,14 @@ mod tests {
     }
 
     #[test]
-    fn default_discovery_uses_the_legacy_application_identity() {
+    fn default_discovery_uses_the_target_application_identity() {
         let current = AppPaths::discover(None)
             .unwrap_or_else(|error| panic!("discover current paths: {error}"));
-        let legacy = AppPaths::discover_for(LEGACY_AICTX, None)
-            .unwrap_or_else(|error| panic!("discover legacy paths: {error}"));
+        let target = AppPaths::discover_for(TARGET_CTXLANE, None)
+            .unwrap_or_else(|error| panic!("discover target paths: {error}"));
 
-        assert_same_paths(&current, &legacy);
-        assert_matches_platform_identity(&current, LEGACY_AICTX);
+        assert_same_paths(&current, &target);
+        assert_matches_platform_identity(&current, TARGET_CTXLANE);
     }
 
     #[test]
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn initialize_is_idempotent_and_secure() {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("aictx"));
+        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
         let store = MetadataStore::new(paths.clone());
         assert!(store.initialize().is_ok());
         assert!(matches!(store.initialize(), Ok(false)));
@@ -883,7 +883,7 @@ mod tests {
     #[test]
     fn update_revalidates_before_commit() {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("aictx")));
+        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("ctxlane")));
         assert!(store.initialize().is_ok());
         let result = store.update_config(|config| {
             config.settings.telemetry = true;
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn metadata_store_rejects_non_managed_profile_state_directory() {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("aictx"));
+        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
         let store = MetadataStore::new(paths.clone());
         store
             .initialize()
@@ -959,18 +959,18 @@ mod tests {
             .join("missing")
             .join("..")
             .join("repository")
-            .join(".aictx");
+            .join(".ctxlane");
         let Err(error) = AppPaths::discover(Some(&root)) else {
             panic!("root containing a parent component should be rejected");
         };
         assert!(error.to_string().contains("must not contain `.` or `..`"));
-        assert!(!temporary.path().join("repository/.aictx").exists());
+        assert!(!temporary.path().join("repository/.ctxlane").exists());
     }
 
     #[test]
     fn concurrent_context_selection_and_removal_preserve_cross_file_invariants() {
         let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("aictx"));
+        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
         let store = MetadataStore::new(paths.clone());
         store
             .initialize()
@@ -991,7 +991,7 @@ mod tests {
                         billing_domain: BillingDomain::AnthropicApi,
                         auth: ClaudeAuth::ApiKey,
                         state_dir: paths.profile_state_dir(Provider::Claude, profile_id.name()),
-                        secret_ref: Some("keyring://aictx/test-api-key".to_owned()),
+                        secret_ref: Some("keyring://ctxlane/test-api-key".to_owned()),
                         account_hint: None,
                         expected_organization: None,
                         wif: None,

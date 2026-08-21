@@ -109,7 +109,7 @@ pub fn inspect(
             CheckLevel::Warning,
             "parent environment",
             format!(
-                "aictx will remove these variables from vendor children: {}",
+                "ctxlane will remove these variables from vendor children: {}",
                 inherited.join(", ")
             ),
         );
@@ -125,9 +125,9 @@ pub fn inspect(
             |provider| format!("{provider} profiles"),
         );
         let detail = provider_filter.map_or_else(
-            || "no profiles are configured; run `aictx profile add --help`".to_owned(),
+            || "no profiles are configured; run `ctxlane profile add --help`".to_owned(),
             |provider| {
-                format!("no {provider} profiles are configured; run `aictx profile add --help`")
+                format!("no {provider} profiles are configured; run `ctxlane profile add --help`")
             },
         );
         report.push(CheckLevel::Failure, name, detail);
@@ -310,7 +310,7 @@ mod tests {
                 billing_domain: BillingDomain::AnthropicApi,
                 auth: ClaudeAuth::ApiKey,
                 state_dir: PathBuf::from("unused-test-state"),
-                secret_ref: Some("keyring://aictx/claude-work".to_owned()),
+                secret_ref: Some("keyring://ctxlane/claude-work".to_owned()),
                 account_hint: None,
                 expected_organization: None,
                 wif: None,

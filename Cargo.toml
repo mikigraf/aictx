@@ -1,13 +1,13 @@
 [package]
-name = "aictx"
-version = "0.1.0"
-default-run = "aictx"
+name = "ctxlane"
+version = "0.2.0"
+default-run = "ctxlane"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
-description = "Safely switch and isolate personal, work, and CI accounts for Claude Code and Codex"
-documentation = "https://docs.rs/aictx"
-repository = "https://github.com/mikigraf/aictx"
+description = "Switch between Claude Code and Codex accounts with isolated local state"
+documentation = "https://docs.rs/ctxlane"
+repository = "https://github.com/mikigraf/ctxlane"
 readme = "README.md"
 keywords = ["claude", "codex", "cli", "credentials", "accounts"]
 categories = ["command-line-utilities", "authentication"]
@@ -16,7 +16,7 @@ categories = ["command-line-utilities", "authentication"]
 test-fixtures = []
 
 [[bin]]
-name = "aictx-test-vendor"
+name = "ctxlane-test-vendor"
 path = "tests/fixtures/native_vendor.rs"
 required-features = ["test-fixtures"]
 test = false

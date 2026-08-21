@@ -47,12 +47,11 @@ impl AppIdentity {
 /// The directory identity used by released `aictx` versions.
 pub const LEGACY_AICTX: AppIdentity = AppIdentity::new("dev", "Cloudsail", LEGACY_PRODUCT_LABEL);
 
-/// The directory identity intended for the `ctxlane` migration.
+/// The directory identity used by `ctxlane` releases.
 pub const TARGET_CTXLANE: AppIdentity = AppIdentity::new("dev", "Cloudsail", TARGET_PRODUCT_LABEL);
 
 /// The directory identity used by the current executable.
 ///
-/// Keep this pointed at the legacy identity until migration behavior is ready.
 pub const CURRENT_APPLICATION: AppIdentity =
     AppIdentity::new("dev", "Cloudsail", CURRENT_PRODUCT_LABEL);
 
@@ -64,6 +63,6 @@ mod tests {
     fn application_identities_keep_the_legacy_label_stable() {
         assert_eq!(LEGACY_AICTX.application(), "aictx");
         assert_eq!(TARGET_CTXLANE.application(), "ctxlane");
-        assert_eq!(CURRENT_APPLICATION, LEGACY_AICTX);
+        assert_eq!(CURRENT_APPLICATION, TARGET_CTXLANE);
     }
 }
