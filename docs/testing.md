@@ -18,7 +18,7 @@ In this project, “automated end to end” means that the compiled `ctxlane` bi
 | --- | --- | --- |
 | Unit | `src/**` test modules | parsing, validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and TUI state/rendering |
 | CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, bindings, status, doctor readiness/JSON, shell output, completions, stable exit categories, recovery hints, locking, and local filesystem policy |
-| v0.1 migration | `tests/migration_core.rs`, `tests/migration_cli.rs` | explicit dry run/copy/recovery, path rewriting, keyring-reference preservation, source-data preservation with advisory lock coordination, collisions, symlinks, journals, and interrupted transactions |
+| v0.1 migration | `tests/migration_core.rs`, `tests/migration_cli.rs`, `tests/migration_locking.rs`, `tests/migration_recovery.rs`, `tests/migration_windows.rs`, `tests/v01_migration_compat.rs` | frozen v0.1 input, explicit dry run/copy/recovery, path rewriting, keyring-reference preservation, source-data preservation with advisory lock coordination, simultaneous startup, collisions, symlinks/reparse points, journals, and every interrupted recovery transition |
 | Branding contract | `tests/branding_contract.rs` | current product naming across tracked files and an exact allowlist for required v0.1 migration literals |
 | Unix runner contracts | `tests/runner_contract.rs` | argument and exit propagation, environment cleaning, lifecycle locks, process signals, repository-policy refusals, and injected-secret routing through temporary shell fixtures |
 | Native fake-vendor E2E | `tests/native_vendor_contract.rs`, `tests/setup_token_pty.rs`, `tests/fixtures/native_vendor.rs` | a compiled fake vendor executable on the host OS, including guided Claude setup-token invocation/failure, WIF selectors, Codex OAuth preflight, static Claude route checks, isolated state, secret absence, and vendor exit status |
@@ -50,6 +50,9 @@ cargo test --locked --test cli_workflow
 cargo test --locked --test error_contract
 cargo test --locked --test migration_core
 cargo test --locked --test migration_cli
+cargo test --locked --test migration_locking
+cargo test --locked --test migration_recovery
+cargo test --locked --test v01_migration_compat
 cargo test --locked --test branding_contract
 cargo test --locked --test runner_contract
 cargo test --locked --features test-fixtures --test native_vendor_contract
@@ -57,7 +60,7 @@ cargo test --locked --test tui_pty
 cargo test --locked --features test-fixtures --test setup_token_pty
 ```
 
-On Windows, `runner_contract` and `setup_token_pty` contain no tests because those files are Unix-only. Do not treat those empty results as Windows runner or setup-token terminal coverage; the native fake-vendor and CLI suites still run there.
+On Windows, also run `cargo test --locked --test migration_windows` for the native junction/reparse-point contract. `runner_contract` and `setup_token_pty` contain no tests on Windows because those files are Unix-only. Do not treat those empty results as Windows runner or setup-token terminal coverage; the native fake-vendor, migration, and CLI suites still run there.
 
 Check the minimum supported Rust version separately:
 
@@ -83,9 +86,7 @@ CI=true GITHUB_EVENT_NAME=push cargo +1.97.1 llvm-cov \
   --fail-under-regions 75
 ```
 
-The last recorded coverage baseline predates the v0.2 migration suite. Re-run the exact command above on the release candidate and record the new test count and metrics before publishing; do not reuse the older v0.1 percentages as v0.2 evidence.
-
-The current local all-target suite contains 138 tests on Unix hosts. Platform gating changes the count on Windows. Use the green CI and coverage reports for the exact committed revision as release evidence.
+For commit `1fa04f9` on macOS arm64 on 2026-08-21, the exact command above used Rust 1.97.1 and `cargo-llvm-cov` 0.9.0, ran 152 tests, and recorded 79.19% region coverage, 63.48% function coverage, and 76.16% line coverage. The enforced floors are 75%, 60%, and 70%, respectively. Platform gating changes the test count and compiled lines on Windows and Linux. Use the hosted CI and coverage reports for the exact published revision as final release evidence.
 
 Coverage is a map of exercised Rust code, not a security score or a provider compatibility claim. Host-only reports do not include code compiled only for another operating system. Record the revision, OS, architecture, Rust version, command, and tool version with every final published measurement. Stable Rust region instrumentation does not provide a reliable branch percentage, so do not present an empty branch column as complete branch coverage.
 

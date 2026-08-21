@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## Unreleased
 
+No changes yet.
+
+## 0.2.0 - 2026-08-21
+
 ### Changed
 
 - Renamed the package, library, executable, platform application identity, new keyring service, shell selector, release artifacts, and documentation from `aictx` to `ctxlane` for version 0.2.0.
