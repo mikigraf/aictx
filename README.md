@@ -38,7 +38,7 @@ brew install mikigraf/tap/ctxlane
 
 Install at least one supported vendor CLI: Claude Code or Codex.
 
-If Homebrew still has version 0.1 installed, follow [Migration from v0.1](docs/migration-from-v0.1.md) before normal setup. `ctxlane` does not import the old local store automatically.
+If you used version 0.1, follow [Migration from v0.1](docs/migration-from-v0.1.md) before normal setup. Homebrew users must first rename and upgrade the formula as described there. `ctxlane` does not import the old local store automatically.
 
 ### Claude Code
 

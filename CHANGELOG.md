@@ -4,7 +4,9 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## Unreleased
 
-No changes yet.
+### Documentation
+
+- Clarified the Homebrew package rename and local-store migration steps for every v0.1 installation method.
 
 ## 0.2.0 - 2026-08-21
 
