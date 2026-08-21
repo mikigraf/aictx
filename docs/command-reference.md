@@ -1,6 +1,6 @@
 # Command reference
 
-This page summarizes the `0.2.0` command surface. The installed binary is authoritative; use `ctxlane --help` and `ctxlane <command> --help` for parser-generated details.
+This page summarizes the current command surface. The installed binary is authoritative; use `ctxlane --help` and `ctxlane <command> --help` for parser-generated details.
 
 Global options can be supplied with subcommands:
 
@@ -18,9 +18,31 @@ ctxlane
 
 After initialization, running `ctxlane` without a subcommand opens the terminal dashboard. It lists contexts, profiles, and directory bindings without reading credentials or starting a vendor CLI. The header shows the global active context, the default context, and the context resolved for the current directory as separate values.
 
-Use the arrow keys or `j` and `k` to move, `Tab` to change panels, `Enter` or `u` to activate a context, `r` to reload metadata, `?` or `h` for help, and `q` or `Esc` to exit. Context changes use the same locked update and billing-confirmation policy as `ctxlane use`.
+Use these keys on a dashboard panel:
 
-Interactive mode requires terminal input and output. Bare `ctxlane --non-interactive`, piped input, or redirected output fails with exit code `14` before enabling terminal raw mode. `Ctrl-C` restores the terminal and exits with `130`.
+| Key | Action |
+| --- | --- |
+| `a` | Add an item |
+| `e` | Edit the selected item |
+| `R` or `F2` | Rename the selected profile or context; open binding Edit with the path selected |
+| `d` | Remove the selected item after confirmation |
+| `Enter` or `u` | Activate the selected context |
+| `r` | Reload metadata |
+| `Tab`, Left, or Right | Change panels |
+| `?` or `h` | Show help |
+| `q` or `Esc` | Exit |
+
+In a form, use `Tab` or `Shift-Tab` to change fields, Left and Right or Space to change a choice, `Enter` to save, and `Esc` to cancel. Text fields support normal cursor, Home, End, Backspace, and Delete keys. A form stays open when validation fails.
+
+The forms are metadata-only. They never read or delete a keyring credential and never start a vendor CLI. Profile Add records the chosen authentication mode and, when needed, a generated keyring reference; it does not store a credential. Profile Edit changes non-secret account or organization/workspace metadata and the Codex credential-store policy. Provider, authentication mode, private vendor state, and secret reference stay unchanged. Use `ctxlane login`, `ctxlane logout`, and `ctxlane run` outside the dashboard.
+
+Profile Rename keeps the existing private vendor-state directory and secret reference, and rewrites every context reference to the new profile ID. Dashboard profile removal retains its keyring credential and leaves its immutable managed vendor state detached at the same path. A profile still used by a context cannot be removed.
+
+Context Edit changes its Claude and Codex profile choices. A changed account selection uses the same confirmation policy as `ctxlane use`. A context whose name would change cannot be renamed while it is active; after switching away, Context Rename rewrites the default context when applicable and every directory binding that uses the old name. An active or bound context still cannot be removed.
+
+Binding Edit can change both the directory path and context. The new path must exist so it can be canonicalized. Binding removal uses the saved canonical path and still works when the directory no longer exists.
+
+Interactive mode requires terminal input and output. Bare `ctxlane --non-interactive`, piped input, or redirected output fails with exit code `14` before enabling terminal raw mode. `Ctrl-C` works from the dashboard and its forms or dialogs, restores the terminal, and exits with `130`.
 
 ## Initialization and OS keyring
 
@@ -75,7 +97,9 @@ Profile options:
 
 Use the provider-neutral `subscription` auth name for either Claude or Codex. `subscription-token` remains accepted for both providers, including the equivalent Codex command, and `chatgpt-oauth` remains accepted for Codex. Profiles persist the vendor-native mode: `subscription-token` for Claude and `chatgpt-oauth` for Codex. `api-key` works for both providers; `wif` is Claude-only and `access-token` is Codex-only. Cross-provider options and incomplete WIF/access-token metadata are rejected.
 
-A profile still referenced by a context cannot be removed. Under a per-profile lock, removal drops its metadata and moves its managed vendor directory to a private `.retired-*` sibling so recreating the name starts with fresh state; profile creation also retires any orphaned active directory left by an interrupted removal. The archive remains available for deliberate recovery and may contain vendor-cached credentials, so protect or deliberately remove it when no longer needed. Remote credentials are not revoked. `--delete-secret` first deletes only that profile's wrapper-held keyring credential, so a keyring error leaves the profile metadata intact.
+A profile still referenced by a context cannot be removed. Under a per-profile lock, removal drops its metadata but leaves its immutable managed vendor directory detached at the same path. Profile creation allocates a new private state directory, so recreating a name does not reuse detached state. Detached state may contain vendor-cached credentials; protect it until you deliberately remove it. `ctxlane` does not perform automated orphan cleanup. A private `p-*` leaf does not distinguish configured state from detached state, so never delete one by name alone: verify that no configured profile references the exact path first. Remote credentials are not revoked.
+
+Without `--delete-secret`, removal retains any wrapper-held OS-keyring item. With `--delete-secret`, `ctxlane` also attempts to delete that item. If keyring cleanup fails, it attempts to restore the profile metadata; when rollback succeeds, the profile remains configured and the command returns the cleanup error. If rollback also fails, the command reports both failures and the metadata may already be absent. For a profile with a wrapper-held keyring reference, `--non-interactive` refuses this cleanup before changing metadata.
 
 ## Contexts and selection
 

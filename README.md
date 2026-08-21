@@ -125,17 +125,30 @@ For API keys, WIF, managed access tokens, custom profile names, and other option
 
 ## Interactive mode
 
-After you create a context, run `ctxlane` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
+After `ctxlane init`, run `ctxlane` by itself to open the terminal dashboard, built with [Ratatui](https://ratatui.rs/):
 
 ```bash
 ctxlane
 ```
 
-The dashboard shows contexts, active and default selection, directory resolution, profile IDs, authentication modes, and billing domains. It never reads secret values or starts a vendor login. Profile creation, login, logout, and vendor runs stay in the explicit CLI commands.
+The dashboard shows contexts, active and default selection, directory resolution, profile IDs, authentication modes, and billing domains. You can also manage the selected panel:
 
-Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. By default, changing any selected provider profile opens a confirmation dialog before state is written, even when both profiles use the same billing type.
+| Key | Action |
+| --- | --- |
+| `a` | Add a profile, context, or binding |
+| `e` | Edit the selected item |
+| `R` or `F2` | Rename a profile or context; edit a binding path |
+| `d` | Remove the selected item after confirmation |
 
-The dashboard opens only when standard input and output are terminals. Bare `ctxlane --non-interactive` and redirected use fail instead of entering raw terminal mode. Non-interactive commands remain available for scripts, while browser login, terminal prompts, and native-keyring access fail closed when interaction is disabled.
+Use the arrow keys or `j` and `k` to move. In a form, use `Tab` to change fields, the arrow keys or Space to change a choice, `Enter` to save, and `Esc` to cancel. Press `Enter` on a context to activate it, `r` to reload, `?` for help, and `q` or `Esc` to leave. By default, changing any selected provider profile opens a confirmation dialog before state is written, even when both profiles use the same billing type.
+
+Dashboard forms change local metadata only. They never read or delete an OS-keyring credential, and they never start Claude Code or Codex. Use the CLI commands `ctxlane login`, `ctxlane logout`, and `ctxlane run` for authentication and vendor work.
+
+Renaming a profile keeps its private vendor state and secret reference, then updates every context that uses it. A context whose name would change cannot be renamed while it is active; switch to another context first. A permitted context rename updates the default context when applicable and every directory binding that uses the old name.
+
+Dashboard profile removal deletes the profile metadata but retains its OS-keyring credential and leaves its immutable vendor-state directory detached at the same path. The directory is not reused automatically, and `ctxlane` does not automatically clean it up. A private `p-*` name does not distinguish a configured directory from a detached one, so never delete one based on its name alone; first verify that no configured profile references the exact path. The CLI option `profile remove --delete-secret` also attempts to delete the wrapper-held keyring item. If that cleanup fails, `ctxlane` attempts to restore the profile metadata; a successful rollback leaves the profile configured, while a rollback failure is reported explicitly and the metadata may already be absent. A binding can still be removed after its directory has been deleted.
+
+The dashboard opens only when standard input and output are terminals. Bare `ctxlane --non-interactive` and redirected use fail instead of entering raw terminal mode. `Ctrl-C` restores the terminal and exits with status `130`. Non-interactive commands remain available for scripts, while browser login, terminal prompts, and native-keyring access fail closed when interaction is disabled.
 
 ## Context resolution
 
@@ -209,7 +222,7 @@ ctxlane init --guided
 
 If Claude creates a setup token but capture or keyring storage fails, revoke that remote token in your Claude account settings under **Settings > Claude Code** before retrying. Local replacement or logout does not revoke an already-created remote token.
 
-Codex API-key and access-token login can store a second vendor-owned credential copy. With the default `file` policy, that copy is plaintext inside the private, isolated `CODEX_HOME`. Treat current and retired Codex state as credential-bearing data. Other Codex store policies follow vendor and operating-system behavior.
+Codex API-key and access-token login can store a second vendor-owned credential copy. With the default `file` policy, that copy is plaintext inside the private, isolated `CODEX_HOME`. Treat configured and detached Codex state as credential-bearing data. Other Codex store policies follow vendor and operating-system behavior.
 
 Read [Configuration](docs/configuration.md) for every supported profile field and auth combination.
 
@@ -218,7 +231,7 @@ Read [Configuration](docs/configuration.md) for every supported profile field an
 | Command | Purpose |
 | --- | --- |
 | `ctxlane init --guided` | Set up the personal Claude subscription profile and credential |
-| `ctxlane` | Open the interactive context dashboard |
+| `ctxlane` | Open the interactive dashboard and manage local metadata |
 | `ctxlane status --verbose` | Show resolved profiles and non-secret identity metadata |
 | `ctxlane current` | Print the context selected for the current directory |
 | `ctxlane use <context>` | Change the global active context |

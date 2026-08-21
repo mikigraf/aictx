@@ -8,7 +8,7 @@ use std::{
 use ctxlane::{
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     migration::migration_journal_path,
-    model::{Name, ProfileId, Provider},
+    model::{Name, Profile, ProfileId, Provider},
 };
 use serde::Serialize;
 use tempfile::TempDir;
@@ -84,16 +84,73 @@ impl Fixture {
 
         let personal =
             Name::parse("personal").unwrap_or_else(|error| panic!("parse personal name: {error}"));
+        let work = Name::parse("work").unwrap_or_else(|error| panic!("parse work name: {error}"));
+        let legacy_store = MetadataStore::new(legacy.clone());
+        let current_config = legacy_store
+            .load_config()
+            .unwrap_or_else(|error| panic!("load generated fixture config: {error}"));
+        let claude_id: ProfileId = "claude:personal"
+            .parse()
+            .unwrap_or_else(|error| panic!("parse Claude fixture profile: {error}"));
+        let codex_id: ProfileId = "codex:work"
+            .parse()
+            .unwrap_or_else(|error| panic!("parse Codex fixture profile: {error}"));
+        let legacy_claude_state = legacy.profile_state_dir(Provider::Claude, &personal);
+        let legacy_codex_state = legacy.profile_state_dir(Provider::Codex, &work);
+        let moves = [
+            (
+                claude_id.clone(),
+                current_config
+                    .profiles
+                    .get(&claude_id)
+                    .unwrap_or_else(|| panic!("generated Claude fixture profile"))
+                    .state_dir()
+                    .to_path_buf(),
+                legacy_claude_state.clone(),
+            ),
+            (
+                codex_id.clone(),
+                current_config
+                    .profiles
+                    .get(&codex_id)
+                    .unwrap_or_else(|| panic!("generated Codex fixture profile"))
+                    .state_dir()
+                    .to_path_buf(),
+                legacy_codex_state.clone(),
+            ),
+        ];
+        for (_, current, legacy_path) in &moves {
+            fs::rename(current, legacy_path).unwrap_or_else(|error| {
+                panic!(
+                    "normalize legacy fixture state {} -> {}: {error}",
+                    current.display(),
+                    legacy_path.display()
+                )
+            });
+        }
+        legacy_store
+            .update_config(|config| {
+                for (id, _, legacy_path) in &moves {
+                    let profile = config
+                        .profiles
+                        .get_mut(id)
+                        .unwrap_or_else(|| panic!("fixture profile {id}"));
+                    match profile {
+                        Profile::Claude { state_dir, .. } | Profile::Codex { state_dir, .. } => {
+                            state_dir.clone_from(legacy_path);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("persist legacy fixture state paths: {error}"));
+
         write_private(
-            &legacy
-                .profile_state_dir(Provider::Claude, &personal)
-                .join("session.json"),
+            &legacy_claude_state.join("session.json"),
             b"claude-session\n",
         );
-        let work = Name::parse("work").unwrap_or_else(|error| panic!("parse work name: {error}"));
-        let codex_state = legacy.profile_state_dir(Provider::Codex, &work);
-        write_private(&codex_state.join("auth.json"), b"codex-session\n");
-        write_private(&codex_state.join("active.lock"), b"live-lock\n");
+        write_private(&legacy_codex_state.join("auth.json"), b"codex-session\n");
+        write_private(&legacy_codex_state.join("active.lock"), b"live-lock\n");
 
         let source_config = fs::read(&legacy.config_file)
             .unwrap_or_else(|error| panic!("snapshot source config: {error}"));

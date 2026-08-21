@@ -9,6 +9,7 @@ pub mod config;
 pub mod doctor;
 pub mod error;
 pub mod identity;
+pub mod management;
 pub mod migration;
 pub mod model;
 pub mod resolver;

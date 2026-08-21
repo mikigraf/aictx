@@ -28,6 +28,8 @@ Unknown fields are rejected. The current schema version is `1`; this build does 
 
 The no-subcommand terminal dashboard reads the same validated `config.toml` and `state.toml`. Moving through its lists does not write metadata, access the OS keyring, or contact a vendor. Activating a context updates `state.toml` through the same metadata lock and fresh billing-policy check used by `ctxlane use`.
 
+Dashboard Add, Edit, Rename, and Remove forms write through the normal metadata locks and validation. They are metadata-only: they never read or delete an OS-keyring credential and never start Claude Code or Codex. Authentication and vendor work remain in `ctxlane login`, `ctxlane logout`, and `ctxlane run`.
+
 An illustrative generated configuration is shown below. Paths are absolute in a real file and should be managed through CLI commands whenever possible.
 
 ```toml
@@ -47,14 +49,14 @@ codex = "/trusted/path/to/codex"
 provider = "claude"
 billing_domain = "claude-subscription"
 auth = "subscription-token"
-state_dir = "/absolute/private/data/vendor-state/claude/personal"
+state_dir = "/absolute/private/data/vendor-state/claude/p-<private-id>"
 secret_ref = "keyring://ctxlane/claude-personal-<generation>"
 
 [profiles."codex:personal"]
 provider = "codex"
 billing_domain = "chatgpt-subscription"
 auth = "chatgpt-oauth"
-state_dir = "/absolute/private/data/vendor-state/codex/personal"
+state_dir = "/absolute/private/data/vendor-state/codex/p-<private-id>"
 credential_store = "file"
 trusted_runners_only = false
 
@@ -100,7 +102,15 @@ Static secret values are limited to 1 MiB and must be non-empty UTF-8. They are 
 
 ## Profiles
 
-Profile IDs always have the form `claude:name` or `codex:name`. Each profile receives a unique, absolute mutable state directory. Two profiles cannot share a state directory.
+Profile IDs always have the form `claude:name` or `codex:name`. Each profile receives a unique, absolute mutable state directory. Two profiles cannot share a state directory. The directory leaf is private implementation state and does not need to match the profile name.
+
+The dashboard can add profiles for every supported authentication shape. Profile Edit changes only non-secret identity hints and, for Codex, the credential-store policy. It does not change the provider, authentication mode, private state directory, or secret reference. Empty Edit fields keep existing identity hints; `-` clears the selected hint.
+
+Profile Rename changes the profile ID and every context reference to it. The existing private state directory and `secret_ref` remain unchanged. This keeps the isolated vendor login state and the wrapper-held keyring reference attached to the same local account.
+
+Dashboard profile removal does not read or delete the keyring item. It removes the unreferenced profile metadata and leaves the immutable managed vendor directory detached at the same path. That directory is not reused automatically and can contain vendor-owned credentials. `ctxlane` does not perform automated orphan cleanup. A private `p-*` leaf does not distinguish configured state from detached state, so never delete one based on its name alone; verify that no configured profile references the exact path first.
+
+Use the explicit CLI `profile remove --delete-secret` option when you also intend to delete a wrapper-held keyring credential. If keyring cleanup fails, `ctxlane` attempts to restore the profile metadata. A successful rollback leaves the profile configured; if rollback also fails, the command reports both failures and the metadata may already be absent. Remote credentials are never revoked by local profile removal.
 
 Valid authentication/billing combinations are fixed:
 
@@ -126,13 +136,13 @@ For Codex, `ctxlane` maintains these values in the isolated profile `config.toml
 - `forced_chatgpt_workspace_id` when configured.
 - a wrapper-owned `shell_environment_policy` with `inherit = "core"` and default secret exclusions enabled.
 
-Codex API keys and access tokens are sent through the official stdin login flow before a run. Codex therefore caches a second vendor-owned copy according to `cli_auth_credentials_store`; `file` mode stores it in plaintext inside the owner-only isolated `CODEX_HOME`. `keyring` and `auto` are supported, but their storage and isolation semantics remain defined by Codex and the operating system. The static credential is not placed in the main Codex child environment. Treat live and retired Codex state as credential-bearing material.
+Codex API keys and access tokens are sent through the official stdin login flow before a run. Codex therefore caches a second vendor-owned copy according to `cli_auth_credentials_store`; `file` mode stores it in plaintext inside the owner-only isolated `CODEX_HOME`. `keyring` and `auto` are supported, but their storage and isolation semantics remain defined by Codex and the operating system. The static credential is not placed in the main Codex child environment. Treat configured and detached Codex state as credential-bearing material.
 
 ## Contexts and bindings
 
-The first context becomes the default. A context must contain at least one provider and may reference only existing profiles of that provider.
+The first context becomes the default. A context must contain at least one provider and may reference only existing profiles of that provider. Dashboard Context Edit changes the provider selections. A context whose name would change cannot be renamed while it is active; switch to another context first. When permitted, Context Rename updates the context key, the default selection when applicable, and every binding that points to the old name.
 
-Bindings are canonical absolute directories. The nearest ancestor binding wins. They are recorded in global metadata through `ctxlane bind`; repository configuration cannot choose a secret reference, executable, or command.
+Bindings are canonical absolute directories. The nearest ancestor binding wins. They are recorded in global metadata through `ctxlane bind` or the dashboard; repository configuration cannot choose a secret reference, executable, or command. Dashboard Binding Edit can replace both the path and context. Its new path must exist. Removal matches the saved path directly, so a binding can still be removed after its directory has been deleted.
 
 ## Child environment policy
 

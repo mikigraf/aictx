@@ -4,12 +4,22 @@ All notable changes are documented here. The project follows [Semantic Versionin
 
 ## Unreleased
 
+### Added
+
+- Added interactive dashboard forms for profile, context, and binding metadata. Use `a` to add, `e` to edit, `R` or `F2` to rename a profile or context or edit a binding path, and `d` to remove.
+
 ### Changed
 
 - Moved the Homebrew, Claude Code, and Codex first-run paths to the top of the README and clarified the v0.1 migration and verified release evidence.
 - Aligned package, command-help, and dashboard positioning around local account isolation.
 - Added exact selected-profile recovery hints for missing credentials without exposing opaque keyring handles.
 - Completed argument descriptions and copyable examples on the remaining high-value CLI help surfaces.
+- Profile Rename now preserves private vendor state and the secret reference while updating context links. Context Rename refuses a name change while the context is active; otherwise it updates default and directory-binding references. Binding Edit can change both path and context.
+
+### Security
+
+- Kept dashboard forms metadata-only. They never read or delete keyring credentials and never start a vendor CLI. Dashboard profile removal retains its keyring credential and leaves immutable managed vendor state detached in place without automatic reuse or cleanup.
+- Made `profile remove --delete-secret` restore profile metadata when keyring cleanup fails and rollback succeeds; a rollback failure reports both failures explicitly.
 
 ## 0.2.0 - 2026-08-21
 

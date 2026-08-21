@@ -49,6 +49,21 @@ fn ctxlane(root: &Path) -> Command {
     command
 }
 
+fn configured_profile_state(root: &Path, profile: &str) -> PathBuf {
+    let store = MetadataStore::new(AppPaths::for_root(root));
+    let profile: ProfileId = profile
+        .parse()
+        .unwrap_or_else(|error| panic!("parse profile ID: {error}"));
+    store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load profile config: {error}"))
+        .profiles
+        .get(&profile)
+        .unwrap_or_else(|| panic!("missing profile {profile}"))
+        .state_dir()
+        .to_path_buf()
+}
+
 fn rerun_as_trusted_push(test_name: &str) -> bool {
     if env::var_os(TRUSTED_PUSH_CHILD).is_some() {
         assert_eq!(
@@ -523,8 +538,9 @@ fn codex_oauth_home_is_isolated_and_policy_is_fail_closed() {
     assert!(captured.contains("CODEX_HOME="));
     assert!(!captured.contains("stale-openai-key"));
 
-    let vendor_config = fs::read_to_string(root.join("data/vendor-state/codex/work/config.toml"))
-        .unwrap_or_else(|error| panic!("read Codex config: {error}"));
+    let vendor_config =
+        fs::read_to_string(configured_profile_state(&root, "codex:work").join("config.toml"))
+            .unwrap_or_else(|error| panic!("read Codex config: {error}"));
     assert!(vendor_config.contains("forced_login_method = \"chatgpt\""));
     assert!(vendor_config.contains("forced_chatgpt_workspace_id = \"ws_expected1234\""));
     assert!(vendor_config.contains("cli_auth_credentials_store = \"file\""));

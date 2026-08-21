@@ -1,9 +1,10 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
+use ctxlane::model::{Config, ProfileId};
 use tempfile::TempDir;
 
 fn ctxlane(root: &Path) -> Command {
@@ -27,7 +28,7 @@ fn run_ok(command: &mut Command) -> std::process::Output {
     output
 }
 
-fn copy_ctxlane_as_vendor(directory: &Path, name: &str) -> std::path::PathBuf {
+fn copy_ctxlane_as_vendor(directory: &Path, name: &str) -> PathBuf {
     let executable = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     fs::copy(env!("CARGO_BIN_EXE_ctxlane"), &executable)
         .unwrap_or_else(|error| panic!("copy test vendor executable: {error}"));
@@ -39,6 +40,22 @@ fn copy_ctxlane_as_vendor(directory: &Path, name: &str) -> std::path::PathBuf {
             .unwrap_or_else(|error| panic!("secure test vendor executable: {error}"));
     }
     executable
+}
+
+fn configured_profile_state(root: &Path, profile: &str) -> PathBuf {
+    let text = fs::read_to_string(root.join("config/config.toml"))
+        .unwrap_or_else(|error| panic!("read config: {error}"));
+    let config: Config =
+        toml::from_str(&text).unwrap_or_else(|error| panic!("parse config: {error}"));
+    let profile: ProfileId = profile
+        .parse()
+        .unwrap_or_else(|error| panic!("parse profile ID: {error}"));
+    config
+        .profiles
+        .get(&profile)
+        .unwrap_or_else(|| panic!("missing profile {profile}"))
+        .state_dir()
+        .to_path_buf()
 }
 
 fn add_personal_context(root: &Path) {
@@ -364,7 +381,7 @@ fn case_folded_profile_add_is_rejected_without_disturbing_existing_state() {
     let root = temporary.path().join("ctxlane");
     run_ok(ctxlane(&root).arg("init"));
     run_ok(ctxlane(&root).args(["profile", "add", "codex", "Work", "--auth", "chatgpt-oauth"]));
-    let state_dir = root.join("data/vendor-state/codex/Work");
+    let state_dir = configured_profile_state(&root, "codex:Work");
     let marker = state_dir.join("must-survive");
     fs::write(&marker, "existing state")
         .unwrap_or_else(|error| panic!("write existing state marker: {error}"));
@@ -389,7 +406,15 @@ fn case_folded_profile_add_is_rejected_without_disturbing_existing_state() {
                 .file_name()
         })
         .collect::<Vec<_>>();
-    assert_eq!(state_entries, vec![std::ffi::OsString::from("Work")]);
+    assert_eq!(
+        state_entries,
+        vec![
+            state_dir
+                .file_name()
+                .unwrap_or_else(|| panic!("state directory leaf"))
+                .to_os_string()
+        ]
+    );
     assert!(root.join("state/profile-locks/codex-work.lock").exists());
 }
 
@@ -882,7 +907,7 @@ fn recreating_removed_profile_cannot_reuse_old_state_or_default_keyring_item() {
         .unwrap_or_else(|| panic!("first secret reference missing"))
         .to_owned();
     assert!(first_reference.contains("keyring://ctxlane/"));
-    let active_state = root.join("data/vendor-state/claude/reusable");
+    let active_state = configured_profile_state(&root, "claude:reusable");
     fs::write(active_state.join("credential-marker"), "old identity")
         .unwrap_or_else(|error| panic!("write old vendor state: {error}"));
 
@@ -900,31 +925,21 @@ fn recreating_removed_profile_cannot_reuse_old_state_or_default_keyring_item() {
     assert!(active_state.join("credential-marker").exists());
 
     run_ok(ctxlane(&root).args(["profile", "remove", "claude:reusable"]));
-    assert!(!active_state.exists());
-    let archived = fs::read_dir(root.join("data/vendor-state/claude"))
-        .unwrap_or_else(|error| panic!("read vendor-state archive directory: {error}"))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("reusable.retired-"))
-        })
-        .unwrap_or_else(|| panic!("retired vendor state missing"));
-    assert!(archived.join("credential-marker").exists());
+    assert!(active_state.exists());
+    assert!(active_state.join("credential-marker").exists());
 
-    // This is the safe on-disk shape of a process interrupted after its profile
-    // metadata was removed but before the managed state directory was retired.
-    fs::create_dir(&active_state)
+    // A name-derived detached directory from an older release must also remain untouched.
+    let interrupted_state = root.join("data/vendor-state/claude/reusable");
+    fs::create_dir(&interrupted_state)
         .unwrap_or_else(|error| panic!("recreate interrupted vendor state: {error}"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&active_state, fs::Permissions::from_mode(0o700))
+        fs::set_permissions(&interrupted_state, fs::Permissions::from_mode(0o700))
             .unwrap_or_else(|error| panic!("secure interrupted vendor state: {error}"));
     }
     fs::write(
-        active_state.join("interrupted-marker"),
+        interrupted_state.join("interrupted-marker"),
         "must not be reused",
     )
     .unwrap_or_else(|error| panic!("write interrupted vendor state: {error}"));
@@ -938,20 +953,13 @@ fn recreating_removed_profile_cannot_reuse_old_state_or_default_keyring_item() {
         .unwrap_or_else(|| panic!("second secret reference missing"));
     assert!(second_reference.contains("keyring://ctxlane/"));
     assert_ne!(first_reference, second_reference);
-    assert!(!active_state.join("credential-marker").exists());
-    assert!(!active_state.join("interrupted-marker").exists());
-    let interrupted_archive = fs::read_dir(root.join("data/vendor-state/claude"))
-        .unwrap_or_else(|error| panic!("read interrupted state archive directory: {error}"))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.join("interrupted-marker").exists())
-        .unwrap_or_else(|| panic!("interrupted vendor state was not archived"));
-    assert!(
-        interrupted_archive
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("reusable.retired-"))
-    );
+    let replacement_state = configured_profile_state(&root, "claude:reusable");
+    assert_ne!(replacement_state, active_state);
+    assert_ne!(replacement_state, interrupted_state);
+    assert!(!replacement_state.join("credential-marker").exists());
+    assert!(!replacement_state.join("interrupted-marker").exists());
+    assert!(active_state.join("credential-marker").exists());
+    assert!(interrupted_state.join("interrupted-marker").exists());
 }
 
 #[cfg(unix)]

@@ -9,6 +9,11 @@ use std::{
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use tempfile::TempDir;
 
+use ctxlane::{
+    config::{AppPaths, MetadataStore},
+    model::ProfileId,
+};
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DASHBOARD_MARKER: &str = "boundary";
 const DASHBOARD_FOOTER_MARKER: &str = "quit";
@@ -17,6 +22,8 @@ const SMALL_TERMINAL_MARKER: &str = "Terminal";
 const SMALL_TERMINAL_RESIZE_MARKER: &str = "Resize";
 const SMALL_TERMINAL_FOOTER_MARKER: &str = "quit";
 const MAX_TERMINAL_QUERY_LENGTH: usize = 5;
+const SECRET_REF_CANARY: &str = "keyring://pty-canary/never-render-this-secret-ref";
+const EDITED_ACCOUNT_LABEL: &str = "visible-smoke-account";
 
 type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -169,20 +176,56 @@ fn write_pty(writer: &SharedPtyWriter, bytes: &[u8]) -> std::io::Result<()> {
     writer.flush()
 }
 
-fn wait_for_output(
-    output: &PtyOutput,
-    child: &mut ChildGuard,
-    marker: &str,
-    start: usize,
-    deadline: Instant,
-    action: &str,
-) -> usize {
-    output
-        .wait_for(marker, start, deadline, action)
-        .unwrap_or_else(|message| {
-            child.kill_and_reap();
-            panic!("{message}");
-        })
+struct PtyScript<'a> {
+    output: &'a PtyOutput,
+    writer: &'a SharedPtyWriter,
+    offset: usize,
+}
+
+impl<'a> PtyScript<'a> {
+    const fn new(output: &'a PtyOutput, writer: &'a SharedPtyWriter) -> Self {
+        Self {
+            output,
+            writer,
+            offset: 0,
+        }
+    }
+
+    fn wait_for_result(&mut self, marker: &str, action: &str) -> Result<usize, String> {
+        let offset =
+            self.output
+                .wait_for(marker, self.offset, Instant::now() + TEST_TIMEOUT, action)?;
+        self.offset = offset;
+        Ok(offset)
+    }
+
+    fn wait_for(&mut self, child: &mut ChildGuard, marker: &str, action: &str) -> usize {
+        match self.wait_for_result(marker, action) {
+            Ok(offset) => offset,
+            Err(message) => {
+                child.kill_and_reap();
+                panic!("{message}");
+            }
+        }
+    }
+
+    fn send(&self, input: &[u8], action: &str) {
+        write_pty(self.writer, input).unwrap_or_else(|error| {
+            panic!("failed to {action}: {error}");
+        });
+    }
+
+    fn wait_then_send(
+        &mut self,
+        child: &mut ChildGuard,
+        marker: &str,
+        input: &[u8],
+        action: &str,
+    ) -> usize {
+        let offset = self.wait_for(child, marker, action);
+        self.send(input, action);
+        offset
+    }
 }
 
 fn initialize(root: &Path) {
@@ -199,11 +242,61 @@ fn initialize(root: &Path) {
     );
 }
 
+fn add_secret_canary_profile(root: &Path) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ctxlane"))
+        .arg("--root")
+        .arg(root)
+        .args([
+            "profile",
+            "add",
+            "claude",
+            "sentinel",
+            "--auth",
+            "api-key",
+            "--secret-ref",
+            SECRET_REF_CANARY,
+        ])
+        .output()
+        .unwrap_or_else(|error| panic!("add secret canary profile: {error}"));
+    assert!(
+        output.status.success(),
+        "profile setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[derive(Clone, Copy)]
+enum PtyJourney<'a> {
+    FinalInput(&'a [u8]),
+    ProfileCrud,
+}
+
 fn run_in_pty(
     root: &Path,
     arguments: &[&str],
     input: &[u8],
     exercise_resize: bool,
+) -> (u32, String) {
+    let journey = (!input.is_empty()).then_some(PtyJourney::FinalInput(input));
+    run_in_pty_journey(root, arguments, journey, exercise_resize, None)
+}
+
+fn run_profile_crud_in_pty(root: &Path, current_directory: &Path) -> (u32, String) {
+    run_in_pty_journey(
+        root,
+        &[],
+        Some(PtyJourney::ProfileCrud),
+        false,
+        Some(current_directory),
+    )
+}
+
+fn run_in_pty_journey(
+    root: &Path,
+    arguments: &[&str],
+    journey: Option<PtyJourney<'_>>,
+    exercise_resize: bool,
+    current_directory: Option<&Path>,
 ) -> (u32, String) {
     let pty = native_pty_system();
     let pair = pty
@@ -254,6 +347,9 @@ fn run_in_pty(
     command.args(arguments);
     command.env("TERM", "xterm-256color");
     command.env_remove("NO_COLOR");
+    if let Some(current_directory) = current_directory {
+        command.cwd(current_directory);
+    }
     let mut child = ChildGuard::new(
         pair.slave
             .spawn_command(command)
@@ -261,32 +357,18 @@ fn run_in_pty(
     );
     drop(pair.slave);
 
-    let deadline = Instant::now() + TEST_TIMEOUT;
-    if !input.is_empty() {
-        let dashboard_header = wait_for_output(
-            &output,
-            &mut child,
-            DASHBOARD_MARKER,
-            0,
-            deadline,
-            "the initial dashboard render",
-        );
-        let dashboard_footer = wait_for_output(
-            &output,
+    if let Some(journey) = journey {
+        let mut script = PtyScript::new(output.as_ref(), &writer);
+        script.wait_for(&mut child, DASHBOARD_MARKER, "the initial dashboard render");
+        script.wait_then_send(
             &mut child,
             DASHBOARD_FOOTER_MARKER,
-            dashboard_header,
-            deadline,
+            b"r",
             "the initial dashboard footer",
         );
-        write_pty(&writer, b"r")
-            .unwrap_or_else(|error| panic!("write PTY readiness input: {error}"));
-        let event_loop_ready = wait_for_output(
-            &output,
+        script.wait_for(
             &mut child,
             RELOAD_MESSAGE_MARKER,
-            dashboard_footer,
-            deadline,
             "the event-loop readiness render",
         );
         if exercise_resize {
@@ -298,28 +380,19 @@ fn run_in_pty(
                     pixel_height: 0,
                 })
                 .unwrap_or_else(|error| panic!("shrink PTY: {error}"));
-            let small_marker = wait_for_output(
-                &output,
+            script.wait_for(
                 &mut child,
                 SMALL_TERMINAL_MARKER,
-                event_loop_ready,
-                deadline,
                 "the undersized-terminal render",
             );
-            let small_resize_instruction = wait_for_output(
-                &output,
+            script.wait_for(
                 &mut child,
                 SMALL_TERMINAL_RESIZE_MARKER,
-                small_marker,
-                deadline,
                 "the undersized-terminal resize instruction",
             );
-            let small_render = wait_for_output(
-                &output,
+            script.wait_for(
                 &mut child,
                 SMALL_TERMINAL_FOOTER_MARKER,
-                small_resize_instruction,
-                deadline,
                 "the undersized-terminal footer",
             );
             pair.master
@@ -330,26 +403,24 @@ fn run_in_pty(
                     pixel_height: 0,
                 })
                 .unwrap_or_else(|error| panic!("restore PTY size: {error}"));
-            let restored_header = wait_for_output(
-                &output,
+            script.wait_for(
                 &mut child,
                 DASHBOARD_MARKER,
-                small_render,
-                deadline,
                 "the restored dashboard render",
             );
-            wait_for_output(
-                &output,
+            script.wait_for(
                 &mut child,
                 RELOAD_MESSAGE_MARKER,
-                restored_header,
-                deadline,
                 "the restored dashboard status",
             );
         }
-        write_pty(&writer, input).unwrap_or_else(|error| panic!("write PTY input: {error}"));
+        match journey {
+            PtyJourney::FinalInput(input) => script.send(input, "write the final PTY input"),
+            PtyJourney::ProfileCrud => exercise_profile_crud(&mut script, &mut child, root),
+        }
     }
 
+    let exit_deadline = Instant::now() + TEST_TIMEOUT;
     let status = loop {
         if let Some(status) = child
             .try_wait()
@@ -357,7 +428,7 @@ fn run_in_pty(
         {
             break status;
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= exit_deadline {
             child.kill_and_reap();
             panic!("ctxlane PTY session exceeded {TEST_TIMEOUT:?}");
         }
@@ -374,6 +445,79 @@ fn run_in_pty(
         status.exit_code(),
         String::from_utf8_lossy(&bytes).into_owned(),
     )
+}
+
+fn exercise_profile_crud(script: &mut PtyScript<'_>, child: &mut ChildGuard, root: &Path) {
+    let added_id: ProfileId = "claude:smoke"
+        .parse()
+        .unwrap_or_else(|error| panic!("added profile ID: {error}"));
+    let renamed_id: ProfileId = "claude:smoke-renamed"
+        .parse()
+        .unwrap_or_else(|error| panic!("renamed profile ID: {error}"));
+    let store = MetadataStore::new(AppPaths::for_root(root));
+
+    script.send(b"2a", "open the profile add form");
+    script.wait_for(child, "Add profile", "the profile add form");
+    script.send(b"\tsmoke\r", "submit the profile add form");
+    script.wait_for(
+        child,
+        "Added profile claude:smoke.",
+        "the committed profile addition",
+    );
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load config after profile add: {error}"));
+    assert!(config.profiles.contains_key(&added_id));
+
+    script.send(b"e", "open the profile edit form");
+    script.wait_for(child, "Edit profile", "the profile edit form");
+    script.send(
+        format!("{EDITED_ACCOUNT_LABEL}\r").as_bytes(),
+        "submit the profile edit form",
+    );
+    script.wait_for(
+        child,
+        "Updated profile claude:smoke.",
+        "the committed profile edit",
+    );
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load config after profile edit: {error}"));
+    assert_eq!(
+        config.profiles[&added_id].account_hint(),
+        Some(EDITED_ACCOUNT_LABEL)
+    );
+
+    script.send(b"R", "open the profile rename form");
+    script.wait_for(child, "Rename profile", "the profile rename form");
+    script.send(b"-renamed\r", "submit the profile rename form");
+    script.wait_for(
+        child,
+        "Renamed profile claude:smoke to claude:smoke-renamed.",
+        "the committed profile rename",
+    );
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load config after profile rename: {error}"));
+    assert!(!config.profiles.contains_key(&added_id));
+    assert_eq!(
+        config.profiles[&renamed_id].account_hint(),
+        Some(EDITED_ACCOUNT_LABEL)
+    );
+
+    script.send(b"d", "open the profile removal confirmation");
+    script.wait_for(child, "Confirm removal", "the profile removal confirmation");
+    script.send(b"y", "confirm profile removal");
+    script.wait_for(
+        child,
+        "Removed profile claude:smoke-renamed.",
+        "the committed profile removal",
+    );
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load config after profile removal: {error}"));
+    assert!(!config.profiles.contains_key(&renamed_id));
+    script.send(b"q", "quit after the CRUD journey");
 }
 
 #[test]
@@ -414,6 +558,30 @@ fn terminal_query_responder_handles_fragmented_queries_once() {
 }
 
 #[test]
+fn pty_script_cursor_advances_past_each_matching_marker() {
+    let output = PtyOutput::default();
+    let writer: SharedPtyWriter = Arc::new(Mutex::new(Box::new(std::io::sink())));
+    let mut script = PtyScript::new(&output, &writer);
+
+    output.append(b"ready");
+    assert_eq!(
+        script
+            .wait_for_result("ready", "the first marker")
+            .unwrap_or_else(|message| panic!("{message}")),
+        5
+    );
+
+    output.append(b"noise-ready");
+    assert_eq!(
+        script
+            .wait_for_result("ready", "the second marker")
+            .unwrap_or_else(|message| panic!("{message}")),
+        16,
+        "the second wait must not reuse the marker before the script cursor"
+    );
+}
+
+#[test]
 fn dashboard_control_c_exits_130_and_restores_terminal_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("ctxlane");
@@ -423,6 +591,44 @@ fn dashboard_control_c_exits_130_and_restores_terminal_state() {
     assert_eq!(code, 130, "PTY output:\n{output}");
     assert!(output.contains("\u{1b}[?1049l"));
     assert!(output.contains("\u{1b}[?25h"));
+}
+
+#[test]
+fn dashboard_profile_crud_persists_each_step_without_exposing_secret_metadata() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("ctxlane");
+    let current_directory = temporary.path().join("workspace");
+    std::fs::create_dir(&current_directory)
+        .unwrap_or_else(|error| panic!("create isolated PTY working directory: {error}"));
+    initialize(&root);
+    add_secret_canary_profile(&root);
+
+    let (code, output) = run_profile_crud_in_pty(&root, &current_directory);
+    assert_eq!(code, 0, "PTY output:\n{output}");
+    assert!(output.contains("Added profile claude:smoke."));
+    assert!(output.contains("Updated profile claude:smoke."));
+    assert!(output.contains("Renamed profile claude:smoke to claude:smoke-renamed."));
+    assert!(output.contains("Removed profile claude:smoke-renamed."));
+    assert!(
+        !output.contains(SECRET_REF_CANARY),
+        "dashboard exposed a persisted secret reference: {output}"
+    );
+    assert!(output.contains("\u{1b}[?1049l"));
+    assert!(output.contains("\u{1b}[?25h"));
+    assert!(output.contains("\u{1b}[?2004l"));
+
+    let store = MetadataStore::new(AppPaths::for_root(root));
+    let config = store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load final CRUD config: {error}"));
+    let sentinel: ProfileId = "claude:sentinel"
+        .parse()
+        .unwrap_or_else(|error| panic!("sentinel profile ID: {error}"));
+    assert_eq!(config.profiles.len(), 1);
+    assert_eq!(
+        config.profiles[&sentinel].secret_ref(),
+        Some(SECRET_REF_CANARY)
+    );
 }
 
 #[test]

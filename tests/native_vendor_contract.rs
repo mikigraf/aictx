@@ -77,6 +77,21 @@ fn run_ok(command: &mut Command) -> Output {
     output
 }
 
+fn configured_profile_state(root: &Path, profile: &str) -> PathBuf {
+    let store = MetadataStore::new(AppPaths::for_root(root));
+    let profile: ProfileId = profile
+        .parse()
+        .unwrap_or_else(|error| panic!("parse profile ID: {error}"));
+    store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load profile config: {error}"))
+        .profiles
+        .get(&profile)
+        .unwrap_or_else(|| panic!("missing profile {profile}"))
+        .state_dir()
+        .to_path_buf()
+}
+
 fn trusted_vendor(temporary: &TempDir, name: &str) -> PathBuf {
     let suffix = env::consts::EXE_SUFFIX;
     let destination = temporary.path().join(format!("{name}{suffix}"));
@@ -214,7 +229,7 @@ fn native_wif_cli_flow_preserves_arguments_selectors_and_exit_status() {
         "two words",
         "semi;colon",
     ]));
-    let state_dir = root.join("data/vendor-state/claude/ci");
+    let state_dir = configured_profile_state(&root, "claude:ci");
     let captured = record(&state_dir.join(RECORD_FILE));
     assert_eq!(captured["provider"], "claude");
     assert_eq!(
@@ -274,7 +289,7 @@ fn native_codex_oauth_flow_preflights_login_and_isolates_vendor_state() {
         "--",
         "native-oauth",
     ]));
-    let state_dir = root.join("data/vendor-state/codex/work");
+    let state_dir = configured_profile_state(&root, "codex:work");
     let record_path = state_dir.join(RECORD_FILE);
     let captured = record(&record_path);
     assert_eq!(captured["provider"], "codex");
@@ -374,7 +389,7 @@ fn native_pull_request_policy_refuses_long_lived_profile_before_vendor_execution
         "ws_test",
     ]));
 
-    let record_path = root.join("data/vendor-state/codex/work").join(RECORD_FILE);
+    let record_path = configured_profile_state(&root, "codex:work").join(RECORD_FILE);
     for event in ["pull_request", "pull_request_target"] {
         let refused = ctxlane(&root)
             .arg("--codex-bin")

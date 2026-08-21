@@ -1,41 +1,39 @@
 use std::{
     io::{self, IsTerminal, Stdout},
-    panic::{self, PanicHookInfo},
     path::PathBuf,
-    sync::Arc,
     time::Duration,
 };
 
-use crossterm::{
-    cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::{Terminal, backend::CrosstermBackend, style::Color};
 
 use crate::{
     Error, Result, activation,
     activation::SelectionConfirmation,
     config::MetadataStore,
-    model::{Config, MutableState, Name, ProfileId, Provider},
+    model::{Binding, Config, Context, MutableState, Name, Profile, ProfileId},
     resolver::{ResolvedContext, current_directory, resolve_context},
 };
+
+mod editor;
+mod input;
+mod mutations;
+mod render;
+mod terminal;
+
+use editor::{Form, FormEvent, Submission};
+use mutations::{apply_removal, apply_submission};
+use render::{draw, profile_route_summary};
+use terminal::{PanicHookGuard, TerminalSession};
 
 const ACCENT: Color = Color::Cyan;
 const WARNING: Color = Color::Yellow;
 const ERROR: Color = Color::Red;
 const MIN_WIDTH: u16 = 52;
 const MIN_HEIGHT: u16 = 14;
+const MODAL_WIDTH: u16 = 76;
 
-/// Open the interactive context browser.
+/// Open the interactive account dashboard.
 pub fn run(store: &MetadataStore, non_interactive: bool) -> Result<i32> {
     if non_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(Error::InteractionRequired(
@@ -70,6 +68,9 @@ fn run_loop(
     let mut needs_draw = true;
     while !app.should_quit {
         if needs_draw {
+            let area = terminal.size().map_err(Error::Terminal)?;
+            app.viewport_width = area.width;
+            app.viewport_height = area.height;
             terminal
                 .draw(|frame| draw(frame, app))
                 .map_err(Error::Terminal)?;
@@ -84,11 +85,11 @@ fn run_loop(
         }
         match event::read().map_err(Error::Terminal)? {
             Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, store, key),
+            Event::Paste(value) => handle_paste(app, &value),
             Event::Resize(_, _)
             | Event::FocusGained
             | Event::FocusLost
             | Event::Mouse(_)
-            | Event::Paste(_)
             | Event::Key(_) => {}
         }
         needs_draw = true;
@@ -191,6 +192,36 @@ struct PendingActivation {
     change: activation::SelectionChange,
 }
 
+#[derive(Clone)]
+enum Removal {
+    Context { name: Name, expected: Context },
+    Profile { id: ProfileId, expected: Profile },
+    Binding { expected: Binding },
+}
+
+impl Removal {
+    fn label(&self) -> String {
+        match self {
+            Self::Context { name, .. } => format!("context {name}"),
+            Self::Profile { id, .. } => format!("profile {id}"),
+            Self::Binding { expected } => format!(
+                "binding {} -> {}",
+                terminal_safe(&expected.path.display().to_string()),
+                expected.context
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Overlay {
+    Help,
+    Activation(PendingActivation),
+    Form(Form),
+    Removal(Removal),
+    SelectionChange(Submission),
+}
+
 struct App {
     config: Config,
     state: MutableState,
@@ -200,8 +231,9 @@ struct App {
     context_index: usize,
     profile_index: usize,
     binding_index: usize,
-    show_help: bool,
-    pending_activation: Option<PendingActivation>,
+    overlay: Option<Overlay>,
+    viewport_width: u16,
+    viewport_height: u16,
     message: Option<Message>,
     should_quit: bool,
     exit_code: i32,
@@ -236,8 +268,9 @@ impl App {
             context_index,
             profile_index: 0,
             binding_index: 0,
-            show_help: false,
-            pending_activation: None,
+            overlay: None,
+            viewport_width: u16::MAX,
+            viewport_height: u16::MAX,
             message: None,
             should_quit: false,
             exit_code: 0,
@@ -253,10 +286,8 @@ impl App {
             .get(self.binding_index)
             .map(|binding| binding.path.clone());
         let (config, state) = store.load_metadata()?;
-        let cwd = current_directory()?;
         self.config = config;
         self.state = state;
-        self.cwd = cwd;
         self.resolution = resolve_context(&self.config, &self.state, &self.cwd, None)
             .map_err(|error| terminal_safe(&error.to_string()));
         self.context_index = selected_context
@@ -349,6 +380,27 @@ impl App {
             text: terminal_safe(&text.into()),
         });
     }
+
+    fn required_size(&self) -> (u16, u16) {
+        match self.overlay.as_ref() {
+            Some(Overlay::Help) => (68, 23),
+            Some(Overlay::Activation(_) | Overlay::SelectionChange(_)) => (MODAL_WIDTH, 17),
+            Some(Overlay::Removal(_)) => (70, 13),
+            Some(Overlay::Form(form)) => (
+                MODAL_WIDTH,
+                u16::try_from(form.fields.len())
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(9)
+                    .max(15),
+            ),
+            None => (MIN_WIDTH, MIN_HEIGHT),
+        }
+    }
+
+    fn visible_for_interaction(&self) -> bool {
+        let (width, height) = self.required_size();
+        self.viewport_width >= width && self.viewport_height >= height
+    }
 }
 
 fn handle_key(app: &mut App, store: &MetadataStore, key: KeyEvent) {
@@ -358,31 +410,23 @@ fn handle_key(app: &mut App, store: &MetadataStore, key: KeyEvent) {
         return;
     }
 
-    if app.pending_activation.is_some() {
-        match key.code {
-            KeyCode::Char('y' | 'Y') => confirm_activation(app, store),
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
-                app.pending_activation = None;
-                app.set_message(MessageLevel::Info, "Activation cancelled.");
-            }
-            KeyCode::Char('q') => app.should_quit = true,
-            _ => {}
+    if !app.visible_for_interaction() {
+        if key.code == KeyCode::Esc && app.overlay.take().is_some() {
+            app.set_message(MessageLevel::Info, "Action cancelled.");
+        } else if app.overlay.is_none() && key.code == KeyCode::Char('q') {
+            app.should_quit = true;
         }
         return;
     }
 
-    if app.show_help {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('?' | 'h') => app.show_help = false,
-            KeyCode::Char('q') => app.should_quit = true,
-            _ => {}
-        }
+    if app.overlay.is_some() {
+        handle_overlay_key(app, store, key);
         return;
     }
 
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-        KeyCode::Char('?' | 'h') => app.show_help = true,
+        KeyCode::Char('?' | 'h') => app.overlay = Some(Overlay::Help),
         KeyCode::Tab | KeyCode::Right => app.panel = app.panel.next(),
         KeyCode::BackTab | KeyCode::Left => app.panel = app.panel.previous(),
         KeyCode::Char('1') => app.panel = Panel::Contexts,
@@ -397,12 +441,203 @@ fn handle_key(app: &mut App, store: &MetadataStore, key: KeyEvent) {
         KeyCode::Enter | KeyCode::Char('u') if app.panel == Panel::Contexts => {
             request_activation(app, store);
         }
+        KeyCode::Char('a') => open_add_form(app),
+        KeyCode::Char('e') => open_edit_form(app, false),
+        KeyCode::Char('R') | KeyCode::F(2) => open_rename_form(app),
+        KeyCode::Char('d') => open_removal(app),
         KeyCode::Char('r') => match app.reload(store) {
             Ok(()) => app.set_message(MessageLevel::Info, "Metadata reloaded."),
             Err(error) => app.set_message(MessageLevel::Error, error.to_string()),
         },
         _ => {}
     }
+}
+
+fn handle_paste(app: &mut App, value: &str) {
+    if !app.visible_for_interaction() {
+        return;
+    }
+    if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
+        form.handle_paste(value);
+    }
+}
+
+fn handle_overlay_key(app: &mut App, store: &MetadataStore, key: KeyEvent) {
+    let Some(overlay) = app.overlay.take() else {
+        return;
+    };
+    match overlay {
+        Overlay::Help => match key.code {
+            KeyCode::Esc | KeyCode::Char('?' | 'h') => {}
+            _ => app.overlay = Some(Overlay::Help),
+        },
+        Overlay::Activation(pending) => match key.code {
+            KeyCode::Char('y' | 'Y') => confirm_activation(app, store, pending),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                app.set_message(MessageLevel::Info, "Activation cancelled.");
+            }
+            _ => app.overlay = Some(Overlay::Activation(pending)),
+        },
+        Overlay::Form(mut form) => match form.handle_key(key) {
+            FormEvent::Cancel => app.set_message(MessageLevel::Info, "Edit cancelled."),
+            FormEvent::Submit => {
+                if let Some(submission) = form.submission() {
+                    if matches!(
+                        &submission,
+                        Submission::ContextEdit {
+                            expected,
+                            replacement,
+                            ..
+                        } if expected != replacement
+                    ) {
+                        app.overlay = Some(Overlay::SelectionChange(submission));
+                    } else if let Err(error) = apply_submission(app, store, submission) {
+                        form.error = Some(error.to_string());
+                        app.overlay = Some(Overlay::Form(form));
+                    }
+                } else {
+                    app.overlay = Some(Overlay::Form(form));
+                }
+            }
+            FormEvent::Changed | FormEvent::None => app.overlay = Some(Overlay::Form(form)),
+        },
+        Overlay::Removal(removal) => match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                if let Err(error) = apply_removal(app, store, &removal) {
+                    app.set_message(MessageLevel::Error, error.to_string());
+                }
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                app.set_message(MessageLevel::Info, "Removal cancelled.");
+            }
+            _ => app.overlay = Some(Overlay::Removal(removal)),
+        },
+        Overlay::SelectionChange(submission) => match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                if let Err(error) = apply_submission(app, store, submission.clone()) {
+                    app.set_message(MessageLevel::Error, error.to_string());
+                    app.overlay = Some(Overlay::SelectionChange(submission));
+                }
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                app.set_message(MessageLevel::Info, "Context edit cancelled.");
+            }
+            _ => app.overlay = Some(Overlay::SelectionChange(submission)),
+        },
+    }
+}
+
+fn open_add_form(app: &mut App) {
+    let form = match app.panel {
+        Panel::Contexts => Form::context_add(&app.config),
+        Panel::Profiles => Form::profile_add(),
+        Panel::Bindings => {
+            if app.config.contexts.is_empty() {
+                app.set_message(
+                    MessageLevel::Warning,
+                    "Add a context before adding a directory binding.",
+                );
+                return;
+            }
+            Form::binding_add(&app.cwd, &app.config)
+        }
+    };
+    app.message = None;
+    app.overlay = Some(Overlay::Form(form));
+}
+
+fn open_edit_form(app: &mut App, focus_binding_path: bool) {
+    let form = match app.panel {
+        Panel::Contexts => {
+            let Some(name) = app.selected_context().cloned() else {
+                app.set_message(MessageLevel::Warning, "No context is selected.");
+                return;
+            };
+            let context = app.config.contexts[&name].clone();
+            Form::context_edit(name, context, &app.config)
+        }
+        Panel::Profiles => {
+            let Some(id) = app.selected_profile().cloned() else {
+                app.set_message(MessageLevel::Warning, "No profile is selected.");
+                return;
+            };
+            let profile = app.config.profiles[&id].clone();
+            Form::profile_edit(id, profile)
+        }
+        Panel::Bindings => {
+            let Some(binding) = app.config.bindings.get(app.binding_index).cloned() else {
+                app.set_message(MessageLevel::Warning, "No binding is selected.");
+                return;
+            };
+            Form::binding_edit(
+                binding.path,
+                binding.context,
+                &app.config,
+                focus_binding_path,
+            )
+        }
+    };
+    app.message = None;
+    app.overlay = Some(Overlay::Form(form));
+}
+
+fn open_rename_form(app: &mut App) {
+    let form = match app.panel {
+        Panel::Contexts => {
+            let Some(name) = app.selected_context().cloned() else {
+                app.set_message(MessageLevel::Warning, "No context is selected.");
+                return;
+            };
+            Form::context_rename(name.clone(), app.config.contexts[&name].clone())
+        }
+        Panel::Profiles => {
+            let Some(id) = app.selected_profile().cloned() else {
+                app.set_message(MessageLevel::Warning, "No profile is selected.");
+                return;
+            };
+            Form::profile_rename(id.clone(), app.config.profiles[&id].clone())
+        }
+        Panel::Bindings => {
+            open_edit_form(app, true);
+            return;
+        }
+    };
+    app.message = None;
+    app.overlay = Some(Overlay::Form(form));
+}
+
+fn open_removal(app: &mut App) {
+    let removal = match app.panel {
+        Panel::Contexts => {
+            let Some(name) = app.selected_context().cloned() else {
+                app.set_message(MessageLevel::Warning, "No context is selected.");
+                return;
+            };
+            Removal::Context {
+                expected: app.config.contexts[&name].clone(),
+                name,
+            }
+        }
+        Panel::Profiles => {
+            let Some(id) = app.selected_profile().cloned() else {
+                app.set_message(MessageLevel::Warning, "No profile is selected.");
+                return;
+            };
+            Removal::Profile {
+                expected: app.config.profiles[&id].clone(),
+                id,
+            }
+        }
+        Panel::Bindings => {
+            let Some(expected) = app.config.bindings.get(app.binding_index).cloned() else {
+                app.set_message(MessageLevel::Warning, "No binding is selected.");
+                return;
+            };
+            Removal::Binding { expected }
+        }
+    };
+    app.message = None;
+    app.overlay = Some(Overlay::Removal(removal));
 }
 
 fn request_activation(app: &mut App, store: &MetadataStore) {
@@ -415,7 +650,7 @@ fn request_activation(app: &mut App, store: &MetadataStore) {
     };
     match activation::required_selection_change(store, &target) {
         Ok(Some(change)) => {
-            app.pending_activation = Some(PendingActivation { change });
+            app.overlay = Some(Overlay::Activation(PendingActivation { change }));
             app.message = None;
         }
         Ok(None) => {
@@ -425,10 +660,7 @@ fn request_activation(app: &mut App, store: &MetadataStore) {
     }
 }
 
-fn confirm_activation(app: &mut App, store: &MetadataStore) {
-    let Some(pending) = app.pending_activation.take() else {
-        return;
-    };
+fn confirm_activation(app: &mut App, store: &MetadataStore, pending: PendingActivation) {
     let target = pending.change.target().clone();
     let confirmation = SelectionConfirmation::Change(pending.change);
     if matches!(
@@ -437,7 +669,7 @@ fn confirm_activation(app: &mut App, store: &MetadataStore) {
     ) {
         match activation::required_selection_change(store, &target) {
             Ok(Some(change)) => {
-                app.pending_activation = Some(PendingActivation { change });
+                app.overlay = Some(Overlay::Activation(PendingActivation { change }));
                 app.set_message(
                     MessageLevel::Warning,
                     "Context or profile state changed. Review the account warning again.",
@@ -497,498 +729,6 @@ fn commit_activation(
     }
 }
 
-fn draw(frame: &mut Frame<'_>, app: &App) {
-    let area = frame.area();
-    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        draw_small_terminal(frame, area);
-        return;
-    }
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    draw_header(frame, rows[0], app);
-    draw_tabs(frame, rows[1], app);
-    draw_body(frame, rows[2], app);
-    draw_footer(frame, rows[3], app);
-
-    if app.show_help {
-        draw_help(frame, area);
-    }
-    if let Some(pending) = &app.pending_activation {
-        draw_confirmation(frame, area, pending);
-    }
-}
-
-fn draw_small_terminal(frame: &mut Frame<'_>, area: Rect) {
-    let text = vec![
-        Line::from(Span::styled(
-            "ctxlane",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )),
-        Line::from("Terminal is too small."),
-        Line::from(format!(
-            "Resize to at least {MIN_WIDTH} x {MIN_HEIGHT}. q: quit"
-        )),
-    ];
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let active = app
-        .state
-        .current_context
-        .as_ref()
-        .map_or_else(|| "none".to_owned(), ToString::to_string);
-    let default = app
-        .config
-        .default_context
-        .as_ref()
-        .map_or_else(|| "none".to_owned(), ToString::to_string);
-    let resolved = match &app.resolution {
-        Ok(value) => format!("{} ({})", value.name, value.source.label()),
-        Err(_) => "none".to_owned(),
-    };
-    let title = Line::from(vec![
-        Span::styled(
-            " ctxlane ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  Local account boundary for Claude Code and Codex"),
-    ]);
-    let status = Line::from(format!(
-        " Global: {active}   Default: {default}   Here: {resolved}"
-    ));
-    frame.render_widget(
-        Paragraph::new(vec![title, status]).block(Block::default().borders(Borders::ALL).title(
-            format!(
-                " {} contexts | {} profiles | {} bindings ",
-                app.config.contexts.len(),
-                app.config.profiles.len(),
-                app.config.bindings.len()
-            ),
-        )),
-        area,
-    );
-}
-
-fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let tabs = Tabs::new(vec!["[1] Contexts", "[2] Profiles", "[3] Bindings"])
-        .select(app.panel.index())
-        .block(Block::default().borders(Borders::ALL))
-        .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
-        .divider(" | ");
-    frame.render_widget(tabs, area);
-}
-
-fn draw_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-    match app.panel {
-        Panel::Contexts => draw_contexts(frame, columns[0], columns[1], app),
-        Panel::Profiles => draw_profiles(frame, columns[0], columns[1], app),
-        Panel::Bindings => draw_bindings(frame, columns[0], columns[1], app),
-    }
-}
-
-fn draw_contexts(frame: &mut Frame<'_>, list_area: Rect, detail_area: Rect, app: &App) {
-    let resolved_name = app.resolution.as_ref().ok().map(|value| &value.name);
-    let items = app
-        .config
-        .contexts
-        .keys()
-        .map(|name| {
-            let mut labels = Vec::new();
-            if app.state.current_context.as_ref() == Some(name) {
-                labels.push("active");
-            }
-            if app.config.default_context.as_ref() == Some(name) {
-                labels.push("default");
-            }
-            if resolved_name == Some(name) {
-                labels.push("here");
-            }
-            let suffix = if labels.is_empty() {
-                String::new()
-            } else {
-                format!(" [{}]", labels.join(", "))
-            };
-            ListItem::new(format!("{name}{suffix}"))
-        })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    if !items.is_empty() {
-        state.select(Some(app.context_index));
-    }
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Contexts "))
-        .highlight_symbol("> ")
-        .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
-    frame.render_stateful_widget(list, list_area, &mut state);
-
-    let lines = app.selected_context().map_or_else(
-        || {
-            vec![
-                Line::from("No contexts configured."),
-                Line::from(""),
-                Line::from("Add one with:"),
-                Line::from("ctxlane context add <name> ..."),
-            ]
-        },
-        |name| {
-            let context = &app.config.contexts[name];
-            let mut lines = vec![detail_heading(format!("Context {name}")), Line::from("")];
-            append_context_profile(&mut lines, app, "Claude", context.claude.as_ref());
-            append_context_profile(&mut lines, app, "Codex", context.codex.as_ref());
-            let binding_count = app
-                .config
-                .bindings
-                .iter()
-                .filter(|binding| &binding.context == name)
-                .count();
-            lines.push(Line::from(""));
-            lines.push(Line::from(format!("Directory bindings: {binding_count}")));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Credentials are not read or shown in this view.",
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Status "))
-            .wrap(Wrap { trim: false }),
-        detail_area,
-    );
-}
-
-fn append_context_profile(
-    lines: &mut Vec<Line<'static>>,
-    app: &App,
-    label: &str,
-    id: Option<&ProfileId>,
-) {
-    match id {
-        Some(id) => {
-            lines.push(Line::from(format!("{label}: {id}")));
-            if let Some(profile) = app.config.profiles.get(id) {
-                lines.push(Line::from(format!("  Auth: {}", profile.auth_label())));
-                lines.push(Line::from(format!(
-                    "  Billing: {}",
-                    profile.billing_domain()
-                )));
-            }
-        }
-        None => lines.push(Line::from(format!("{label}: not configured"))),
-    }
-}
-
-fn draw_profiles(frame: &mut Frame<'_>, list_area: Rect, detail_area: Rect, app: &App) {
-    let items = app
-        .config
-        .profiles
-        .keys()
-        .map(ToString::to_string)
-        .map(ListItem::new)
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    if !items.is_empty() {
-        state.select(Some(app.profile_index));
-    }
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Profiles "))
-            .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        list_area,
-        &mut state,
-    );
-
-    let lines = app.selected_profile().map_or_else(
-        || vec![Line::from("No profiles configured.")],
-        |id| {
-            let profile = &app.config.profiles[id];
-            let contexts = app
-                .config
-                .contexts
-                .iter()
-                .filter(|(_, context)| context.profile(id.provider()) == Some(id))
-                .map(|(name, _)| name.to_string())
-                .collect::<Vec<_>>();
-            vec![
-                detail_heading(format!("Profile {id}")),
-                Line::from(""),
-                Line::from(format!("Provider: {}", profile.provider())),
-                Line::from(format!("Auth: {}", profile.auth_label())),
-                Line::from(format!("Billing: {}", profile.billing_domain())),
-                Line::from(format!(
-                    "Used by: {}",
-                    if contexts.is_empty() {
-                        "no contexts".to_owned()
-                    } else {
-                        contexts.join(", ")
-                    }
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Secret references, account labels, and credentials are hidden.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Status "))
-            .wrap(Wrap { trim: false }),
-        detail_area,
-    );
-}
-
-fn draw_bindings(frame: &mut Frame<'_>, list_area: Rect, detail_area: Rect, app: &App) {
-    let items = app
-        .config
-        .bindings
-        .iter()
-        .map(|binding| {
-            ListItem::new(format!(
-                "{} -> {}",
-                terminal_safe(&binding.path.display().to_string()),
-                binding.context
-            ))
-        })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default();
-    if !items.is_empty() {
-        state.select(Some(app.binding_index));
-    }
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Bindings "))
-            .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        list_area,
-        &mut state,
-    );
-
-    let lines = app.config.bindings.get(app.binding_index).map_or_else(
-        || vec![Line::from("No directory bindings configured.")],
-        |binding| {
-            vec![
-                detail_heading("Directory binding"),
-                Line::from(""),
-                Line::from(format!(
-                    "Path: {}",
-                    terminal_safe(&binding.path.display().to_string())
-                )),
-                Line::from(format!("Context: {}", binding.context)),
-                Line::from(""),
-                Line::from(if app.cwd.starts_with(&binding.path) {
-                    "This binding contains the current directory."
-                } else {
-                    "This binding does not contain the current directory."
-                }),
-            ]
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Status "))
-            .wrap(Wrap { trim: false }),
-        detail_area,
-    );
-}
-
-fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let shortcuts = if area.width < 72 {
-        if app.panel == Panel::Contexts {
-            " j/k move  Enter use  ? help  q quit "
-        } else {
-            " j/k move  Tab panel  ? help  q quit "
-        }
-    } else if app.panel == Panel::Contexts {
-        " j/k: move  Enter/u: use  Tab: panel  r: reload  ?: help  q: quit "
-    } else {
-        " j/k: move  Tab: panel  r: reload  ?: help  q: quit "
-    };
-    let content = app.message.as_ref().map_or_else(
-        || Line::from(shortcuts),
-        |message| {
-            let color = match message.level {
-                MessageLevel::Info => ACCENT,
-                MessageLevel::Warning => WARNING,
-                MessageLevel::Error => ERROR,
-            };
-            Line::from(Span::styled(
-                format!(" {} ", message.text),
-                Style::default().fg(color),
-            ))
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().borders(Borders::ALL).title(" Keys "))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn draw_help(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered_rect(68, 20, area);
-    frame.render_widget(Clear, popup);
-    let lines = vec![
-        detail_heading("Keyboard shortcuts"),
-        Line::from(""),
-        Line::from("Up/Down, j/k        Move selection"),
-        Line::from("PageUp/PageDown     Move 10 rows"),
-        Line::from("Home/End            First or last row"),
-        Line::from("Tab, Left/Right     Change panel"),
-        Line::from("1 / 2 / 3           Contexts / Profiles / Bindings"),
-        Line::from("Enter or u          Activate selected context"),
-        Line::from("r                   Reload metadata"),
-        Line::from("? or h              Open or close this help"),
-        Line::from("q or Esc            Quit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "The UI never resolves secrets or starts a vendor CLI.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from("Press Esc, ?, or h to close."),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Left)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(ACCENT))
-                    .title(" Help "),
-            )
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
-fn draw_confirmation(frame: &mut Frame<'_>, area: Rect, pending: &PendingActivation) {
-    let popup = centered_rect(76, 15, area);
-    frame.render_widget(Clear, popup);
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Account profile change",
-            Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(format!(
-            "Current global context: {}",
-            pending.change.previous()
-        )),
-        Line::from(format!("New global context: {}", pending.change.target())),
-    ];
-    for (provider, (previous, target)) in [Provider::Claude, Provider::Codex].into_iter().zip(
-        pending
-            .change
-            .previous_profiles()
-            .iter()
-            .zip(pending.change.target_profiles()),
-    ) {
-        if previous != target {
-            lines.push(Line::from(format!(
-                "{provider}: {} -> {}",
-                profile_selection_summary(previous.as_ref()),
-                profile_selection_summary(target.as_ref())
-            )));
-        }
-    }
-    lines.extend([
-        Line::from(""),
-        Line::from("The selected account or organization may be different."),
-        Line::from("Press y to activate, or n/Esc to cancel."),
-    ]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(WARNING))
-                    .title(" Confirm activation "),
-            )
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
-fn profile_selection_summary(selection: Option<&activation::ProfileSelection>) -> String {
-    selection.map_or_else(
-        || "none".to_owned(),
-        |selection| {
-            format!(
-                "{} ({}, {})",
-                selection.id(),
-                selection.auth_label(),
-                selection.billing_domain()
-            )
-        },
-    )
-}
-
-fn profile_route_summary(profiles: &[Option<activation::ProfileSelection>; 2]) -> String {
-    [Provider::Claude, Provider::Codex]
-        .into_iter()
-        .zip(profiles)
-        .filter_map(|(provider, profile)| {
-            profile
-                .as_ref()
-                .map(|profile| format!("{provider}={}", profile_selection_summary(Some(profile))))
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn detail_heading(value: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        value.into(),
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-    ))
-}
-
-const fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let width = if width < area.width {
-        width
-    } else {
-        area.width
-    };
-    let height = if height < area.height {
-        height
-    } else {
-        area.height
-    };
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
 fn terminal_safe(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
@@ -1001,488 +741,5 @@ fn terminal_safe(value: &str) -> String {
     output
 }
 
-struct TerminalSetup {
-    raw_mode: bool,
-    alternate_screen: bool,
-    cursor_hidden: bool,
-}
-
-impl TerminalSetup {
-    fn enter() -> io::Result<Self> {
-        let mut setup = Self {
-            raw_mode: false,
-            alternate_screen: false,
-            cursor_hidden: false,
-        };
-        enable_raw_mode()?;
-        setup.raw_mode = true;
-
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        setup.alternate_screen = true;
-        execute!(stdout, Hide)?;
-        setup.cursor_hidden = true;
-        Ok(setup)
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        let mut first_error = None;
-        let mut stdout = io::stdout();
-        if self.cursor_hidden {
-            match execute!(stdout, Show) {
-                Ok(()) => self.cursor_hidden = false,
-                Err(error) => first_error = Some(error),
-            }
-        }
-        if self.alternate_screen {
-            match execute!(stdout, LeaveAlternateScreen) {
-                Ok(()) => self.alternate_screen = false,
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
-            }
-        }
-        if self.raw_mode {
-            match disable_raw_mode() {
-                Ok(()) => self.raw_mode = false,
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
-            }
-        }
-        first_error.map_or(Ok(()), Err)
-    }
-}
-
-impl Drop for TerminalSetup {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
-}
-
-struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    setup: TerminalSetup,
-}
-
-impl TerminalSession {
-    fn enter() -> io::Result<Self> {
-        let setup = TerminalSetup::enter()?;
-        let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        Ok(Self { terminal, setup })
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        self.setup.restore()
-    }
-}
-
-type PanicHandler = dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static;
-
-struct PanicHookGuard {
-    previous: Option<Arc<PanicHandler>>,
-}
-
-impl PanicHookGuard {
-    fn install() -> Self {
-        let previous: Arc<PanicHandler> = Arc::from(panic::take_hook());
-        let chained = Arc::clone(&previous);
-        panic::set_hook(Box::new(move |information| {
-            restore_after_panic();
-            chained(information);
-        }));
-        Self {
-            previous: Some(previous),
-        }
-    }
-}
-
-impl Drop for PanicHookGuard {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            return;
-        }
-        let _ = panic::take_hook();
-        if let Some(previous) = self.previous.take() {
-            panic::set_hook(Box::new(move |information| previous(information)));
-        }
-    }
-}
-
-fn restore_after_panic() {
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, Show, LeaveAlternateScreen);
-    let _ = disable_raw_mode();
-}
-
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use ratatui::{Terminal, backend::TestBackend};
-    use tempfile::TempDir;
-
-    use crate::{
-        config::AppPaths,
-        model::{
-            BillingDomain, Binding, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Profile,
-            SCHEMA_VERSION,
-        },
-    };
-
-    use super::*;
-
-    fn test_app() -> App {
-        let work = Name::parse("work").unwrap_or_else(|error| panic!("valid name: {error}"));
-        let personal =
-            Name::parse("personal").unwrap_or_else(|error| panic!("valid name: {error}"));
-        let profile_id: ProfileId = "claude:work"
-            .parse()
-            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
-        let mut config = Config::default();
-        config.profiles.insert(
-            profile_id.clone(),
-            Profile::Claude {
-                billing_domain: BillingDomain::AnthropicApi,
-                auth: ClaudeAuth::ApiKey,
-                state_dir: PathBuf::from("/tmp/ctxlane-test-state"),
-                secret_ref: Some("keyring://TopSecret/credential".to_owned()),
-                account_hint: Some("secret-account@example.test".to_owned()),
-                expected_organization: Some("secret-org".to_owned()),
-                wif: None,
-            },
-        );
-        config.contexts = BTreeMap::from([
-            (
-                personal.clone(),
-                Context {
-                    claude: Some(profile_id.clone()),
-                    codex: None,
-                },
-            ),
-            (
-                work.clone(),
-                Context {
-                    claude: Some(profile_id),
-                    codex: None,
-                },
-            ),
-        ]);
-        config.default_context = Some(personal);
-        let state = MutableState {
-            version: SCHEMA_VERSION,
-            current_context: Some(work),
-        };
-        App::from_metadata(config, state, std::env::temp_dir())
-    }
-
-    fn render_text(app: &App, width: u16, height: u16) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal =
-            Terminal::new(backend).unwrap_or_else(|error| panic!("test terminal: {error}"));
-        terminal
-            .draw(|frame| draw(frame, app))
-            .unwrap_or_else(|error| panic!("draw test UI: {error}"));
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect::<String>()
-    }
-
-    fn activation_app() -> (TempDir, MetadataStore, App, Name, Name) {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let paths = AppPaths::for_root(temporary.path().join("ctxlane"));
-        let store = MetadataStore::new(paths.clone());
-        store
-            .initialize()
-            .unwrap_or_else(|error| panic!("initialize store: {error}"));
-
-        let personal =
-            Name::parse("personal").unwrap_or_else(|error| panic!("valid name: {error}"));
-        let work = Name::parse("work").unwrap_or_else(|error| panic!("valid name: {error}"));
-        let personal_id: ProfileId = "claude:personal"
-            .parse()
-            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
-        let work_id: ProfileId = "claude:work"
-            .parse()
-            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
-
-        store
-            .update_config(|config| {
-                config.profiles.insert(
-                    personal_id.clone(),
-                    Profile::Claude {
-                        billing_domain: BillingDomain::ClaudeSubscription,
-                        auth: ClaudeAuth::SubscriptionToken,
-                        state_dir: paths
-                            .profile_state_dir(personal_id.provider(), personal_id.name()),
-                        secret_ref: Some("keyring://ctxlane/claude-personal".to_owned()),
-                        account_hint: None,
-                        expected_organization: None,
-                        wif: None,
-                    },
-                );
-                config.profiles.insert(
-                    work_id.clone(),
-                    Profile::Claude {
-                        billing_domain: BillingDomain::AnthropicApi,
-                        auth: ClaudeAuth::ApiKey,
-                        state_dir: paths.profile_state_dir(work_id.provider(), work_id.name()),
-                        secret_ref: Some("keyring://ctxlane/claude-work".to_owned()),
-                        account_hint: None,
-                        expected_organization: None,
-                        wif: None,
-                    },
-                );
-                config.contexts.insert(
-                    personal.clone(),
-                    Context {
-                        claude: Some(personal_id),
-                        codex: None,
-                    },
-                );
-                config.contexts.insert(
-                    work.clone(),
-                    Context {
-                        claude: Some(work_id),
-                        codex: None,
-                    },
-                );
-                config.default_context = Some(personal.clone());
-                Ok(())
-            })
-            .unwrap_or_else(|error| panic!("populate store: {error}"));
-
-        let (config, state) = store
-            .load_metadata()
-            .unwrap_or_else(|error| panic!("load metadata: {error}"));
-        let app = App::from_metadata(config, state, temporary.path().to_path_buf());
-        (temporary, store, app, personal, work)
-    }
-
-    #[test]
-    fn tiny_terminal_renders_without_panicking() {
-        let text = render_text(&test_app(), 8, 3);
-        assert!(!text.is_empty());
-    }
-
-    #[test]
-    fn profile_view_never_renders_secret_metadata() {
-        let mut app = test_app();
-        app.panel = Panel::Profiles;
-        let text = render_text(&app, 110, 30);
-        assert!(text.contains("Profile claude:work"));
-        assert!(!text.contains("TopSecret"));
-        assert!(!text.contains("secret-account"));
-        assert!(!text.contains("secret-org"));
-    }
-
-    #[test]
-    fn navigation_is_bounded() {
-        let mut app = test_app();
-        assert_eq!(
-            app.selected_context().map(Name::as_str),
-            Some("work"),
-            "the resolved context should be selected on launch"
-        );
-        app.move_selection(10);
-        assert_eq!(app.context_index, 1);
-        app.move_selection(-10);
-        assert_eq!(app.context_index, 0);
-        app.panel = Panel::Bindings;
-        app.move_selection(1);
-        assert_eq!(app.binding_index, 0);
-    }
-
-    #[test]
-    fn header_distinguishes_active_context_from_directory_binding() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let mut app = test_app();
-        let personal =
-            Name::parse("personal").unwrap_or_else(|error| panic!("valid name: {error}"));
-        app.cwd = temporary.path().to_path_buf();
-        app.config.bindings.push(Binding {
-            path: temporary
-                .path()
-                .canonicalize()
-                .unwrap_or_else(|error| panic!("canonical path: {error}")),
-            context: personal,
-        });
-        app.resolution = resolve_context(&app.config, &app.state, &app.cwd, None)
-            .map_err(|error| error.to_string());
-        let text = render_text(&app, 120, 30);
-        assert!(text.contains("Global: work"));
-        assert!(text.contains("Here: personal (directory binding)"));
-    }
-
-    #[test]
-    fn key_handling_covers_panels_help_and_clean_exit() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("ctxlane")));
-        let mut app = test_app();
-
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-        );
-        assert_eq!(app.panel, Panel::Profiles);
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-        );
-        assert_eq!(app.panel, Panel::Contexts);
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
-        );
-        assert!(app.show_help);
-        assert!(render_text(&app, 100, 28).contains("Keyboard shortcuts"));
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        );
-        assert!(!app.show_help);
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-        );
-        assert!(app.should_quit);
-        assert_eq!(app.exit_code, 0);
-    }
-
-    #[test]
-    fn account_profile_modal_cancel_and_confirm_use_the_shared_activation_service() {
-        let (_temporary, store, mut app, personal, work) = activation_app();
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
-        );
-        assert_eq!(app.selected_context(), Some(&work));
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
-        assert!(app.pending_activation.is_some());
-        let rendered = render_text(&app, 100, 28);
-        assert!(rendered.contains("Account profile change"));
-        assert!(rendered.contains("claude:personal"));
-        assert!(rendered.contains("claude:work"));
-
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
-        );
-        assert!(app.pending_activation.is_none());
-        let (config, state) = store
-            .load_metadata()
-            .unwrap_or_else(|error| panic!("load cancelled state: {error}"));
-        assert_eq!(state.current_context, None);
-        assert_eq!(config.default_context.as_ref(), Some(&personal));
-
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
-        );
-        let (config, state) = store
-            .load_metadata()
-            .unwrap_or_else(|error| panic!("load activated state: {error}"));
-        assert_eq!(state.current_context.as_ref(), Some(&work));
-        assert_eq!(config.default_context.as_ref(), Some(&personal));
-        assert!(app.pending_activation.is_none());
-        assert!(
-            app.message
-                .as_ref()
-                .is_some_and(|message| message.text.contains("Global active context: work"))
-        );
-    }
-
-    #[test]
-    fn stale_account_profile_modal_requires_reviewing_the_updated_change() {
-        let (_temporary, store, mut app, _personal, work) = activation_app();
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
-        );
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
-        assert!(app.pending_activation.is_some());
-
-        let codex_id: ProfileId = "codex:work"
-            .parse()
-            .unwrap_or_else(|error| panic!("valid profile ID: {error}"));
-        let codex_state = store
-            .paths()
-            .profile_state_dir(codex_id.provider(), codex_id.name());
-        store
-            .update_config(|config| {
-                config.profiles.insert(
-                    codex_id.clone(),
-                    Profile::Codex {
-                        billing_domain: BillingDomain::OpenaiApi,
-                        auth: CodexAuth::ApiKey,
-                        state_dir: codex_state,
-                        secret_ref: Some("keyring://ctxlane/codex-work".to_owned()),
-                        account_hint: None,
-                        expected_workspace_id: None,
-                        credential_store: CodexCredentialStore::File,
-                        trusted_runners_only: false,
-                    },
-                );
-                config
-                    .contexts
-                    .get_mut(&work)
-                    .ok_or_else(|| Error::ContextNotFound(work.to_string()))?
-                    .codex = Some(codex_id);
-                Ok(())
-            })
-            .unwrap_or_else(|error| panic!("change profile fingerprint: {error}"));
-
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
-        );
-        assert!(app.pending_activation.is_some());
-        assert!(app.message.as_ref().is_some_and(|message| {
-            message.text.contains("Context or profile state changed")
-                && message.level == MessageLevel::Warning
-        }));
-        let (_, state) = store
-            .load_metadata()
-            .unwrap_or_else(|error| panic!("load unchanged state: {error}"));
-        assert_eq!(state.current_context, None);
-    }
-
-    #[test]
-    fn control_c_requests_exit_130_without_other_state_changes() {
-        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let store = MetadataStore::new(AppPaths::for_root(temporary.path().join("ctxlane")));
-        let mut app = test_app();
-        handle_key(
-            &mut app,
-            &store,
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        );
-        assert!(app.should_quit);
-        assert_eq!(app.exit_code, 130);
-    }
-}
+mod tests;

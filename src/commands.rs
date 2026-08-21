@@ -2,10 +2,12 @@ use std::{
     fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use secrecy::SecretString;
+
+#[cfg(test)]
+use crate::model::BillingDomain;
 
 use crate::{
     Error, Result, activation,
@@ -17,13 +19,14 @@ use crate::{
     config::{AppPaths, MetadataStore, acquire_profile_lock, ensure_secure_directory},
     doctor,
     identity::{LEGACY_AICTX, TARGET_CTXLANE},
+    management::{self, ProfileDraft},
     migration::{
         MigrationPlan, MigrationStartupGuard, MigrationSummary, RecoveryOutcome,
         acquire_migration_startup_guard, recover_incomplete,
     },
     model::{
-        AuthArg, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Context, Name,
-        Profile, ProfileId, Provider, WifConfig,
+        AuthArg, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Context, Name, Profile,
+        ProfileId, Provider, WifConfig,
     },
     resolver::{
         binding_lookup_path, canonical_directory, context_not_found, current_directory,
@@ -48,9 +51,7 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
         Some(Command::Init(args)) => {
             execute_init(&store, paths, &args, cli.non_interactive, cli.quiet)
         }
-        Some(Command::Profile(args)) => {
-            execute_profile(&store, paths, args.command, cli.non_interactive)
-        }
+        Some(Command::Profile(args)) => execute_profile(&store, args.command, cli.non_interactive),
         Some(Command::Context(args)) => execute_context(&store, args.command),
         Some(Command::Use(args)) => {
             let selection_change = activation::required_selection_change(&store, &args.context)?;
@@ -484,7 +485,7 @@ fn execute_guided_init(
         }
     }
 
-    let (profile_id, secret_reference_is_new) = ensure_guided_claude_profile(store, paths, quiet)?;
+    let (profile_id, secret_reference_is_new) = ensure_guided_claude_profile(store, quiet)?;
     let code = execute_login(
         store,
         paths,
@@ -523,11 +524,7 @@ fn print_initialized(paths: &AppPaths) {
     println!("  state:  {}", paths.state_file.display());
 }
 
-fn ensure_guided_claude_profile(
-    store: &MetadataStore,
-    paths: &AppPaths,
-    quiet: bool,
-) -> Result<(ProfileId, bool)> {
+fn ensure_guided_claude_profile(store: &MetadataStore, quiet: bool) -> Result<(ProfileId, bool)> {
     let profile_id: ProfileId = "claude:personal".parse()?;
     let config = store.load_config()?;
     if let Some((existing_id, profile)) = config.profiles.iter().find(|(existing_id, _)| {
@@ -561,7 +558,6 @@ fn ensure_guided_claude_profile(
 
     execute_profile(
         store,
-        paths,
         ProfileCommand::Add(ProfileAddArgs {
             provider: Provider::Claude,
             name: profile_id.name().clone(),
@@ -684,58 +680,15 @@ fn print_doctor_report(report: &doctor::DoctorReport, json: bool) -> Result<()> 
 
 fn execute_profile(
     store: &MetadataStore,
-    paths: &AppPaths,
     command: ProfileCommand,
     non_interactive: bool,
 ) -> Result<i32> {
     match command {
         ProfileCommand::Add(args) => {
             require_initialized(store)?;
-            let profile_id = ProfileId::new(args.provider, args.name.clone());
-            let state_dir = paths.profile_state_dir(args.provider, &args.name);
-            let _profile_lock = acquire_profile_lock(
-                &paths.profile_lock(profile_id.provider(), profile_id.name()),
-                true,
-            )?;
-            let mut archived_orphan = None;
-            let mut state_prepared = false;
-            let update = store.update_config(|config| {
-                if let Some(existing) = config.profiles.keys().find(|existing| {
-                    existing.provider() == profile_id.provider()
-                        && existing
-                            .name()
-                            .as_str()
-                            .eq_ignore_ascii_case(profile_id.name().as_str())
-                }) {
-                    if existing == &profile_id {
-                        return Err(Error::InvalidInput(format!(
-                            "profile `{profile_id}` already exists"
-                        )));
-                    }
-                    return Err(Error::InvalidInput(format!(
-                        "profile `{profile_id}` conflicts with existing `{existing}` on case-insensitive filesystems"
-                    )));
-                }
-                archived_orphan = archive_managed_profile_state(paths, &profile_id, &state_dir)?;
-                state_prepared = true;
-                ensure_secure_directory(&state_dir)?;
-                let profile = build_profile(&profile_id, &state_dir, &args)?;
-                config.profiles.insert(profile_id.clone(), profile);
-                Ok(())
-            });
-            if let Err(error) = update {
-                if state_prepared {
-                    rollback_failed_profile_add(&state_dir, archived_orphan.as_deref())?;
-                }
-                return Err(error);
-            }
-            if let Some(archived) = archived_orphan {
-                println!(
-                    "Archived orphaned vendor state from an interrupted removal at {}.",
-                    archived.display()
-                );
-            }
-            println!("Added profile {profile_id}.");
+            let draft = profile_draft_from_args(&args)?;
+            let receipt = management::add_profile(store, draft)?;
+            println!("Added profile {}.", receipt.id);
             Ok(0)
         }
         ProfileCommand::List => {
@@ -767,58 +720,35 @@ fn execute_profile(
             delete_secret,
         } => {
             require_initialized(store)?;
-            let _profile_lock = acquire_profile_lock(
-                &paths.profile_lock(profile.provider(), profile.name()),
-                true,
-            )?;
-            let (value, deleted_keyring_secret) = store.update_config(|current| {
-                ensure_profile_unreferenced(current, &profile)?;
-                let value = current
-                    .profiles
-                    .get(&profile)
-                    .cloned()
-                    .ok_or_else(|| profile_not_found(current, &profile))?;
-                let deleted_keyring_secret = if delete_secret {
-                    if let Some(reference) = value.secret_ref() {
-                        let reference: SecretRef = reference.parse()?;
-                        SecretManager::new().delete(&reference, non_interactive)?
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if current.profiles.remove(&profile).is_none() {
-                    return Err(Error::ProfileNotFound(profile.to_string()));
-                }
-                Ok((value, deleted_keyring_secret))
-            })?;
-
-            let archived_state = match detach_profile_state(paths, &profile, &value) {
-                Ok(archived) => archived,
-                Err(archive_error) => {
-                    let restore = store.update_config(|current| {
-                        if current.profiles.contains_key(&profile) {
-                            return Err(Error::InvalidInput(format!(
-                                "cannot restore profile `{profile}` because that name is already configured"
-                            )));
-                        }
-                        current.profiles.insert(profile.clone(), value.clone());
-                        Ok(())
-                    });
-                    if let Err(restore_error) = restore {
-                        return Err(Error::PolicyRefused(format!(
-                            "profile metadata was removed, vendor state archival failed ({archive_error}), and metadata rollback also failed ({restore_error}); the managed state will be retired before this profile name can be added again"
-                        )));
-                    }
-                    if deleted_keyring_secret {
-                        return Err(Error::InvalidConfig(format!(
-                            "profile removal was rolled back because vendor state archival failed ({archive_error}); its keyring credential was already deleted and must be stored again"
-                        )));
-                    }
-                    return Err(archive_error);
-                }
+            let config = store.load_config()?;
+            let value = config
+                .profiles
+                .get(&profile)
+                .cloned()
+                .ok_or_else(|| profile_not_found(&config, &profile))?;
+            let secret_reference = if delete_secret {
+                value
+                    .secret_ref()
+                    .map(str::parse::<SecretRef>)
+                    .transpose()?
+            } else {
+                None
             };
+            if non_interactive && secret_reference.is_some() {
+                return Err(Error::InteractionRequired(
+                    "deleting an OS-keyring credential may require an unlock or consent prompt"
+                        .to_owned(),
+                ));
+            }
+            let (receipt, deleted_keyring_secret) = management::remove_profile_with(
+                store,
+                &profile,
+                &value,
+                |_| match secret_reference {
+                    Some(reference) => SecretManager::new().delete(&reference, false),
+                    None => Ok(false),
+                },
+            )?;
             if delete_secret {
                 if deleted_keyring_secret {
                     println!("Deleted the local keyring credential.");
@@ -826,89 +756,18 @@ fn execute_profile(
                     println!("No wrapper-held keyring credential was deleted.");
                 }
             }
-            if let Some(archived) = archived_state {
-                println!("Archived isolated vendor state at {}.", archived.display());
-            } else if value.state_dir()
-                == paths.profile_state_dir(profile.provider(), profile.name())
-            {
-                println!("No local vendor state needed archiving.");
-            } else {
+            if let Some(detached) = receipt.detached_state {
                 println!(
-                    "Vendor state outside the managed profile path was left unchanged at {}.",
-                    value.state_dir().display()
+                    "Detached isolated vendor state remains at {} and will not be reused automatically.",
+                    detached.display()
                 );
+            } else {
+                println!("No local vendor state was present.");
             }
             println!("Removed profile {profile}. Remote credentials were not revoked.");
-            let _ = non_interactive;
             Ok(0)
         }
     }
-}
-
-fn ensure_profile_unreferenced(config: &Config, profile: &ProfileId) -> Result<()> {
-    for (context_name, context) in &config.contexts {
-        if context.claude.as_ref() == Some(profile) || context.codex.as_ref() == Some(profile) {
-            return Err(Error::InvalidInput(format!(
-                "profile `{profile}` is still referenced by context `{context_name}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn archive_managed_profile_state(
-    paths: &AppPaths,
-    profile_id: &ProfileId,
-    state_dir: &Path,
-) -> Result<Option<PathBuf>> {
-    let managed = paths.profile_state_dir(profile_id.provider(), profile_id.name());
-    if state_dir != managed || !state_dir.exists() {
-        return Ok(None);
-    }
-    ensure_secure_directory(state_dir)?;
-    let generation = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let archived = state_dir.with_file_name(format!(
-        "{}.retired-{generation:032x}-{:08x}",
-        profile_id.name(),
-        std::process::id()
-    ));
-    if archived.exists() {
-        return Err(Error::PolicyRefused(format!(
-            "refusing to overwrite archived profile state {}",
-            archived.display()
-        )));
-    }
-    fs::rename(state_dir, &archived).map_err(|source| Error::WriteFile {
-        path: state_dir.to_path_buf(),
-        source,
-    })?;
-    Ok(Some(archived))
-}
-
-fn detach_profile_state(
-    paths: &AppPaths,
-    profile_id: &ProfileId,
-    profile: &Profile,
-) -> Result<Option<PathBuf>> {
-    archive_managed_profile_state(paths, profile_id, profile.state_dir())
-}
-
-fn rollback_failed_profile_add(state_dir: &Path, archived: Option<&Path>) -> Result<()> {
-    if state_dir.exists() {
-        fs::remove_dir(state_dir).map_err(|source| Error::WriteFile {
-            path: state_dir.to_path_buf(),
-            source,
-        })?;
-    }
-    if let Some(archived) = archived {
-        fs::rename(archived, state_dir).map_err(|source| Error::WriteFile {
-            path: state_dir.to_path_buf(),
-            source,
-        })?;
-    }
-    Ok(())
 }
 
 fn execute_context(store: &MetadataStore, command: ContextCommand) -> Result<i32> {
@@ -1396,11 +1255,7 @@ fn execute_credential_check(
     Ok(exit_code)
 }
 
-fn build_profile(
-    profile_id: &ProfileId,
-    state_dir: &Path,
-    args: &ProfileAddArgs,
-) -> Result<Profile> {
+fn profile_draft_from_args(args: &ProfileAddArgs) -> Result<ProfileDraft> {
     for value in [
         args.account.as_deref(),
         args.organization.as_deref(),
@@ -1471,18 +1326,17 @@ fn build_profile(
                 ClaudeAuth::SubscriptionToken | ClaudeAuth::ApiKey => {
                     reject_wif_options(args)?;
                     (
-                        Some(resolve_secret_ref(profile_id, args.secret_ref.as_deref())?),
+                        args.secret_ref
+                            .as_deref()
+                            .map(str::parse::<SecretRef>)
+                            .transpose()?,
                         None,
                     )
                 }
             };
-            Ok(Profile::Claude {
-                billing_domain: match auth {
-                    ClaudeAuth::SubscriptionToken => BillingDomain::ClaudeSubscription,
-                    ClaudeAuth::ApiKey | ClaudeAuth::Wif => BillingDomain::AnthropicApi,
-                },
+            Ok(ProfileDraft::Claude {
+                name: args.name.clone(),
                 auth,
-                state_dir: state_dir.to_path_buf(),
                 secret_ref,
                 account_hint: args.account.clone(),
                 expected_organization: args.organization.clone(),
@@ -1518,9 +1372,11 @@ fn build_profile(
                     }
                     None
                 }
-                CodexAuth::ApiKey | CodexAuth::AccessToken => {
-                    Some(resolve_secret_ref(profile_id, args.secret_ref.as_deref())?)
-                }
+                CodexAuth::ApiKey | CodexAuth::AccessToken => args
+                    .secret_ref
+                    .as_deref()
+                    .map(str::parse::<SecretRef>)
+                    .transpose()?,
             };
             if auth == CodexAuth::AccessToken && args.workspace.as_deref().is_none_or(str::is_empty)
             {
@@ -1534,15 +1390,9 @@ fn build_profile(
                         .to_owned(),
                 ));
             }
-            Ok(Profile::Codex {
-                billing_domain: match auth {
-                    CodexAuth::ApiKey => BillingDomain::OpenaiApi,
-                    CodexAuth::ChatgptOauth | CodexAuth::AccessToken => {
-                        BillingDomain::ChatgptSubscription
-                    }
-                },
+            Ok(ProfileDraft::Codex {
+                name: args.name.clone(),
                 auth,
-                state_dir: state_dir.to_path_buf(),
                 secret_ref,
                 account_hint: args.account.clone(),
                 expected_workspace_id: args.workspace.clone(),
@@ -1641,15 +1491,6 @@ fn require_interactive_setup_token_terminal(non_interactive: bool, operation: &s
         )));
     }
     Ok(())
-}
-
-fn resolve_secret_ref(profile_id: &ProfileId, supplied: Option<&str>) -> Result<String> {
-    let reference = if let Some(supplied) = supplied {
-        supplied.parse::<SecretRef>()?
-    } else {
-        SecretRef::default_for(profile_id)
-    };
-    Ok(reference.to_string())
 }
 
 fn validate_context_profile(

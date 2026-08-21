@@ -16,17 +16,20 @@ In this project, “automated end to end” means that the compiled `ctxlane` bi
 
 | Layer | Location | What it checks |
 | --- | --- | --- |
-| Unit | `src/**` test modules | parsing, validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and TUI state/rendering |
+| Unit | `src/**` test modules | parsing, validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and deterministic TUI state, rendering, and form-input checks |
+| Metadata management | `tests/management_service.rs` | temporary-root profile, context, and binding Add/Edit/Rename/Remove lifecycles, reference rewrites, active-context rename refusal, stale snapshots, collision guards, immutable private state, secret-reference preservation, detached-state retention without reuse, and missing-path binding removal |
 | CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, bindings, status, doctor readiness/JSON, shell output, completions, stable exit categories, recovery hints, locking, and local filesystem policy |
 | v0.1 migration | `tests/migration_core.rs`, `tests/migration_cli.rs`, `tests/migration_locking.rs`, `tests/migration_recovery.rs`, `tests/migration_windows.rs`, `tests/v01_migration_compat.rs` | frozen v0.1 input, explicit dry run/copy/recovery, path rewriting, keyring-reference preservation, source-data preservation with advisory lock coordination, simultaneous startup, collisions, symlinks/reparse points, journals, and every interrupted recovery transition |
 | Branding contract | `tests/branding_contract.rs` | current product naming across tracked files and an exact allowlist for required v0.1 migration literals |
 | Unix runner contracts | `tests/runner_contract.rs` | argument and exit propagation, environment cleaning, lifecycle locks, process signals, repository-policy refusals, and injected-secret routing through temporary shell fixtures |
 | Native fake-vendor E2E | `tests/native_vendor_contract.rs`, `tests/setup_token_pty.rs`, `tests/fixtures/native_vendor.rs` | a compiled fake vendor executable on the host OS, including guided Claude setup-token invocation/failure, WIF selectors, Codex OAuth preflight, static Claude route checks, isolated state, secret absence, and vendor exit status |
-| Terminal/PTY | `tests/tui_pty.rs`, `tests/setup_token_pty.rs` | dashboard startup/resize/exit restoration plus guided setup-token preflight preservation, protected wrapped-paste handling, queued-input draining into a next-shell check, cancellation, signals, bracketed-paste cleanup, and terminal-mode restoration |
+| Terminal/PTY | `tests/tui_pty.rs`, `tests/setup_token_pty.rs` | dashboard startup, resize, scripted profile Add/Edit/Rename/Remove with persisted-state checks and secret-reference non-disclosure, `Ctrl-C`/normal exit, output synchronization, and terminal restoration; plus guided setup-token preflight preservation, protected wrapped-paste handling, queued-input draining into a next-shell check, cancellation, signals, and bracketed-paste cleanup |
 | Toolchain and OS matrix | `.github/workflows/ci.yml` | Rust 1.89 check/tests on Linux and pinned Rust tests on native Linux, macOS, and Windows runners |
 | Security and release gates | `.github/workflows/ci.yml`, `.github/workflows/release.yml` | formatting, Clippy, rustdoc tests, package creation, dependency policy, full-history secret scanning, checksums, SBOM generation, Sigstore bundles, and GitHub provenance |
 
 The Unix runner suite uses shell fixtures and is disabled on Windows. The native fake-vendor and CLI suites provide process coverage without a shell fixture. Platform-gated code still needs a native job on the matching operating system.
+
+Deterministic TUI tests cover editor input, supported profile-auth form shapes, form navigation, and non-disclosure of stored identity metadata. Separate temporary-root lifecycle tests cover the metadata mutations without reading a host keyring or starting a vendor CLI. The real dashboard PTY suite drives a metadata-only profile through Add, Edit, Rename, and Remove, reloads persisted configuration after every transition, proves its secret reference is never rendered, and verifies terminal restoration. It does not call login, logout, a vendor process, or a native keyring.
 
 The Claude static-auth contracts prove that the selected credential reaches the expected local `claude auth status --json` route. They do not make a model request. The public suite therefore cannot prove remote credential validity; that evidence starts with a successful request in the protected qualification environment.
 
@@ -48,6 +51,7 @@ Run one integration layer while developing:
 ```bash
 cargo test --locked --test cli_workflow
 cargo test --locked --test error_contract
+cargo test --locked --test management_service
 cargo test --locked --test migration_core
 cargo test --locked --test migration_cli
 cargo test --locked --test migration_locking
@@ -117,6 +121,7 @@ Use the lowest layer that proves the behavior, then add a process-level test whe
 - Keep guided-login tests synthetic: prove initialization, the exact setup-token process call, wrapped-paste normalization, and malformed-input rejection without storing a real credential.
 - Use the native fake vendor when executable discovery, stdin/stdout, environment, state, or exit status is part of the contract.
 - Use a PTY only for terminal behavior. Always set a short timeout and verify terminal restoration.
+- Keep TUI CRUD rules in deterministic form and metadata-store tests. Add only a small real-PTY journey, and claim it only after it passes on the native CI targets.
 - Add native platform coverage for platform-gated behavior. A cross-compile check cannot prove runtime permissions or process behavior.
 - Test the refusal path before the credential-access or vendor-spawn marker.
 - Assert that diagnostics, records, and debug output do not contain the synthetic secret.

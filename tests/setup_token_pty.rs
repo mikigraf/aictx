@@ -14,6 +14,11 @@ use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use rustix::process::{Pid, Signal, kill_process};
 use tempfile::TempDir;
 
+use ctxlane::{
+    config::{AppPaths, MetadataStore},
+    model::ProfileId,
+};
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const BRACKETED_PASTE_ENABLED: &str = "\u{1b}[?2004h";
 const BRACKETED_PASTE_DISABLED: &str = "\u{1b}[?2004l";
@@ -174,6 +179,21 @@ fn run_ok(root: &Path, current_directory: &Path, arguments: &[&str]) {
     );
 }
 
+fn configured_profile_state(root: &Path, profile: &str) -> PathBuf {
+    let store = MetadataStore::new(AppPaths::for_root(root));
+    let profile: ProfileId = profile
+        .parse()
+        .unwrap_or_else(|error| panic!("parse profile ID: {error}"));
+    store
+        .load_config()
+        .unwrap_or_else(|error| panic!("load profile config: {error}"))
+        .profiles
+        .get(&profile)
+        .unwrap_or_else(|| panic!("missing profile {profile}"))
+        .state_dir()
+        .to_path_buf()
+}
+
 fn run_guided_preflight(root: &Path, current_directory: &Path, fake_claude: &Path) -> GuidedRun {
     let pty = native_pty_system();
     let pair = pty
@@ -250,10 +270,13 @@ fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
             .unwrap_or_else(|error| panic!("read preserved malformed metadata: {error}")),
         malformed
     );
+    let malformed_claude_root = malformed_root.join("data/vendor-state/claude");
     assert!(
-        !malformed_root
-            .join("data/vendor-state/claude/personal/native-vendor-record.json")
-            .exists()
+        !malformed_claude_root.exists()
+            || fs::read_dir(&malformed_claude_root)
+                .unwrap_or_else(|error| panic!("read malformed-test vendor root: {error}"))
+                .next()
+                .is_none()
     );
 
     let incompatible_temporary =
@@ -273,6 +296,7 @@ fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
     let incompatible_config = incompatible_root.join("config/config.toml");
     let before = fs::read_to_string(&incompatible_config)
         .unwrap_or_else(|error| panic!("read incompatible profile metadata: {error}"));
+    let incompatible_state = configured_profile_state(&incompatible_root, "claude:personal");
 
     let incompatible_run = run_guided_preflight(
         &incompatible_root,
@@ -295,8 +319,8 @@ fn guided_preflight_preserves_malformed_or_incompatible_metadata() {
         before
     );
     assert!(
-        !incompatible_root
-            .join("data/vendor-state/claude/personal/native-vendor-record.json")
+        !incompatible_state
+            .join("native-vendor-record.json")
             .exists()
     );
 }
@@ -314,8 +338,9 @@ fn guided_vendor_failure_warns_that_the_generated_token_may_need_revocation() {
     assert_eq!(run.code, 23, "PTY output:\n{}", run.output);
     assert!(run.output.contains(REVOCATION_WARNING));
     assert!(!run.output.contains(BRACKETED_PASTE_ENABLED));
+    let state_dir = configured_profile_state(&root, "claude:personal");
     let record: serde_json::Value = serde_json::from_slice(
-        &fs::read(root.join("data/vendor-state/claude/personal/native-vendor-record.json"))
+        &fs::read(state_dir.join("native-vendor-record.json"))
             .unwrap_or_else(|error| panic!("read failed setup-token vendor record: {error}")),
     )
     .unwrap_or_else(|error| panic!("parse failed setup-token vendor record: {error}"));
@@ -599,8 +624,9 @@ fn run_guided_prompt(exit: PromptExit) -> GuidedRun {
         config.contains(&format!("-{child_process_id:08x}-")),
         "guided profile did not receive a generation-specific keyring account: {config}"
     );
+    let state_dir = configured_profile_state(&root, "claude:personal");
     let record: serde_json::Value = serde_json::from_slice(
-        &fs::read(root.join("data/vendor-state/claude/personal/native-vendor-record.json"))
+        &fs::read(state_dir.join("native-vendor-record.json"))
             .unwrap_or_else(|error| panic!("read setup-token vendor record: {error}")),
     )
     .unwrap_or_else(|error| panic!("parse setup-token vendor record: {error}"));

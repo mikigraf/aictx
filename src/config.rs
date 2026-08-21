@@ -141,10 +141,20 @@ impl AppPaths {
 
     #[must_use]
     pub fn profile_state_dir(&self, provider: Provider, name: &Name) -> PathBuf {
+        self.profile_state_root(provider).join(name.as_str())
+    }
+
+    #[must_use]
+    pub fn profile_state_root(&self, provider: Provider) -> PathBuf {
         self.data_dir
             .join("vendor-state")
             .join(provider.to_string())
-            .join(name.as_str())
+    }
+
+    #[must_use]
+    pub fn is_managed_profile_state_dir(&self, provider: Provider, path: &Path) -> bool {
+        path.parent() == Some(self.profile_state_root(provider).as_path())
+            && path.file_name().is_some_and(valid_profile_state_leaf)
     }
 
     #[must_use]
@@ -154,6 +164,11 @@ impl AppPaths {
             name.as_str().to_ascii_lowercase()
         ))
     }
+}
+
+fn valid_profile_state_leaf(leaf: &std::ffi::OsStr) -> bool {
+    leaf.to_str()
+        .is_some_and(|value| Name::parse(value.to_owned()).is_ok())
 }
 
 fn reject_repository_override(variable: &str, path: &Path) -> Result<()> {
@@ -359,13 +374,15 @@ impl MetadataStore {
     fn validate_config(&self, config: &Config) -> Result<()> {
         config.validate()?;
         for (profile_id, profile) in &config.profiles {
-            let expected = self
+            if !self
                 .paths
-                .profile_state_dir(profile_id.provider(), profile_id.name());
-            if profile.state_dir() != expected {
+                .is_managed_profile_state_dir(profile_id.provider(), profile.state_dir())
+            {
                 return Err(Error::InvalidConfig(format!(
-                    "profile `{profile_id}` state_dir must be the managed directory {}",
-                    expected.display()
+                    "profile `{profile_id}` state_dir must be the managed directory's immediate child beneath {}",
+                    self.paths
+                        .profile_state_root(profile_id.provider())
+                        .display()
                 )));
             }
         }
