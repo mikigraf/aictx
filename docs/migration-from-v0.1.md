@@ -6,26 +6,36 @@
 
 Keep the old executable and data until the new installation works.
 
-1. Preview the copy:
+1. If v0.1 was installed with Homebrew, update the renamed formula and install `ctxlane`:
+
+   ```bash
+   brew update
+   brew migrate ctxlane
+   HOMEBREW_NO_INSTALL_CLEANUP=1 brew upgrade ctxlane
+   ```
+
+   `brew migrate` changes the package name only. The no-cleanup setting retains the old v0.1 keg while you validate v0.2. Neither command migrates your local profiles or vendor state.
+
+2. Preview the local data copy:
 
    ```bash
    ctxlane migrate aictx --dry-run
    ```
 
-2. Run the migration:
+3. Run the migration:
 
    ```bash
    ctxlane migrate aictx
    ```
 
-3. Check the result:
+4. Check the result:
 
    ```bash
    ctxlane doctor
    ctxlane status
    ```
 
-4. Test each account you use. Remove the old executable only after those checks pass.
+5. Test each account you use. Remove the old executable only after those checks pass.
 
 There is no `aictx` executable or Cargo alias. Update scripts and shell configuration to call `ctxlane`.
 
