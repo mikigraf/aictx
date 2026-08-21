@@ -12,6 +12,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::{
     Error, Result,
     binary::is_in_current_repository,
+    identity::{AppIdentity, CURRENT_APPLICATION},
     model::{Config, MutableState, Name, Provider},
 };
 
@@ -29,6 +30,15 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn discover(explicit_root: Option<&Path>) -> Result<Self> {
+        Self::discover_for(CURRENT_APPLICATION, explicit_root)
+    }
+
+    /// Discover platform paths for an explicit application identity.
+    ///
+    /// An explicit root is independent of the application identity. This lets
+    /// callers preserve `--root` behavior while inspecting legacy and target
+    /// default paths during an application-name migration.
+    pub fn discover_for(identity: AppIdentity, explicit_root: Option<&Path>) -> Result<Self> {
         if let Some(root) = explicit_root {
             let root = root.to_path_buf();
             if !root.is_absolute() {
@@ -42,7 +52,12 @@ impl AppPaths {
             return Ok(Self::for_root(root));
         }
 
-        let project = ProjectDirs::from("dev", "Cloudsail", "aictx").ok_or_else(|| {
+        let project = ProjectDirs::from(
+            identity.qualifier(),
+            identity.organization(),
+            identity.application(),
+        )
+        .ok_or_else(|| {
             Error::InvalidConfig("could not determine platform application directories".to_owned())
         })?;
 
@@ -764,9 +779,85 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::model::{
-        BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Profile, ProfileId,
+    use crate::{
+        identity::{LEGACY_AICTX, TARGET_CTXLANE},
+        model::{
+            BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Context, Profile, ProfileId,
+        },
     };
+
+    fn assert_same_paths(left: &AppPaths, right: &AppPaths) {
+        assert_eq!(left.config_dir, right.config_dir);
+        assert_eq!(left.data_dir, right.data_dir);
+        assert_eq!(left.state_dir, right.state_dir);
+        assert_eq!(left.config_file, right.config_file);
+        assert_eq!(left.state_file, right.state_file);
+        assert_eq!(left.metadata_lock, right.metadata_lock);
+        assert_eq!(left.config_lock, right.config_lock);
+        assert_eq!(left.state_lock, right.state_lock);
+    }
+
+    fn assert_matches_platform_identity(paths: &AppPaths, identity: AppIdentity) {
+        let project = ProjectDirs::from(
+            identity.qualifier(),
+            identity.organization(),
+            identity.application(),
+        )
+        .unwrap_or_else(|| panic!("platform application directories should be available"));
+        let data_dir = project.data_dir().to_path_buf();
+        let state_dir = project
+            .state_dir()
+            .map_or_else(|| data_dir.join("state"), Path::to_path_buf);
+
+        assert_eq!(paths.config_dir, project.config_dir());
+        assert_eq!(paths.data_dir, data_dir);
+        assert_eq!(paths.state_dir, state_dir);
+    }
+
+    #[test]
+    fn default_discovery_uses_the_legacy_application_identity() {
+        let current = AppPaths::discover(None)
+            .unwrap_or_else(|error| panic!("discover current paths: {error}"));
+        let legacy = AppPaths::discover_for(LEGACY_AICTX, None)
+            .unwrap_or_else(|error| panic!("discover legacy paths: {error}"));
+
+        assert_same_paths(&current, &legacy);
+        assert_matches_platform_identity(&current, LEGACY_AICTX);
+    }
+
+    #[test]
+    fn discovery_supports_legacy_and_target_platform_identities() {
+        assert_eq!(LEGACY_AICTX.qualifier(), "dev");
+        assert_eq!(LEGACY_AICTX.organization(), "Cloudsail");
+        assert_eq!(LEGACY_AICTX.application(), "aictx");
+        assert_eq!(TARGET_CTXLANE.qualifier(), "dev");
+        assert_eq!(TARGET_CTXLANE.organization(), "Cloudsail");
+        assert_eq!(TARGET_CTXLANE.application(), "ctxlane");
+
+        let legacy = AppPaths::discover_for(LEGACY_AICTX, None)
+            .unwrap_or_else(|error| panic!("discover legacy paths: {error}"));
+        let target = AppPaths::discover_for(TARGET_CTXLANE, None)
+            .unwrap_or_else(|error| panic!("discover target paths: {error}"));
+
+        assert_matches_platform_identity(&legacy, LEGACY_AICTX);
+        assert_matches_platform_identity(&target, TARGET_CTXLANE);
+        assert_ne!(legacy.config_dir, target.config_dir);
+        assert_ne!(legacy.data_dir, target.data_dir);
+        assert_ne!(legacy.state_dir, target.state_dir);
+    }
+
+    #[test]
+    fn explicit_root_is_independent_of_application_identity() {
+        let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let root = temporary.path().join("explicit-root");
+        let legacy = AppPaths::discover_for(LEGACY_AICTX, Some(&root))
+            .unwrap_or_else(|error| panic!("discover legacy paths: {error}"));
+        let target = AppPaths::discover_for(TARGET_CTXLANE, Some(&root))
+            .unwrap_or_else(|error| panic!("discover target paths: {error}"));
+
+        assert_same_paths(&legacy, &target);
+        assert_same_paths(&legacy, &AppPaths::for_root(root));
+    }
 
     #[test]
     fn initialize_is_idempotent_and_secure() {

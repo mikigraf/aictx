@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod doctor;
 pub mod error;
+pub mod identity;
 pub mod model;
 pub mod resolver;
 pub mod runner;
