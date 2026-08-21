@@ -6,7 +6,7 @@
 
 In `ctxlane`, a profile represents one Claude or Codex account or authentication path. Each profile gets a separate vendor state directory. A context can switch both tools together or bind the selection to a project directory.
 
-At launch, `ctxlane` removes known competing selectors and refuses inspected repository settings that could change the selected route. Static secrets stay in the native OS credential store, outside repository files and shell configuration. The official vendor CLIs still handle login and model traffic; `ctxlane` adds no API proxy or remote credential service.
+At launch, `ctxlane` removes known competing selectors and refuses inspected repository settings that could change the selected route. Wrapper-managed static secrets stay in the native OS credential store, outside repository files and shell configuration. The official vendor CLIs still handle login and model traffic; `ctxlane` adds no API proxy or remote credential service.
 
 ## Quick start
 
