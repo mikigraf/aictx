@@ -17,6 +17,7 @@ In this project, “automated end to end” means that the compiled `ctxlane` bi
 | Layer | Location | What it checks |
 | --- | --- | --- |
 | Unit | `src/**` test modules | parsing, validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and deterministic TUI state, rendering, and form-input checks |
+| Automation wire contracts | `src/automation/contracts/**`, `schemas/**` | strict Rust serialization and validation, Draft 2020-12 schemas, schema/Rust parity, authority-field sensitivity, stable status/reason matrices, secret-surface exclusions, canonical request hashing, and the public Ed25519 signing vector |
 | Metadata management | `tests/management_service.rs` | temporary-root profile, context, and binding Add/Edit/Rename/Remove lifecycles, reference rewrites, active-context rename refusal, stale snapshots, collision guards, immutable private state, secret-reference preservation, detached-state retention without reuse, and missing-path binding removal |
 | CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, bindings, status, doctor readiness/JSON, shell output, completions, stable exit categories, recovery hints, locking, and local filesystem policy |
 | v0.1 migration | `tests/migration_core.rs`, `tests/migration_cli.rs`, `tests/migration_locking.rs`, `tests/migration_recovery.rs`, `tests/migration_windows.rs`, `tests/v01_migration_compat.rs` | frozen v0.1 input, explicit dry run/copy/recovery, path rewriting, keyring-reference preservation, source-data preservation with advisory lock coordination, simultaneous startup, collisions, symlinks/reparse points, journals, and every interrupted recovery transition |
@@ -43,6 +44,16 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo test --doc --locked
 ```
+
+CI also creates an isolated pinned Python environment from the hash-locked
+`schemas/tests/requirements.txt` file and runs:
+
+```bash
+python3 schemas/tests/validate_contracts.py
+```
+
+That gate validates every published example and negative invariant against the
+actual Draft 2020-12 schemas and verifies the public Ed25519 signing vector.
 
 `--all-features` enables the compiled `ctxlane-test-vendor` fixture. Default builds and installs exclude it. The feature exists only for repository tests; do not use `cargo install --all-features --bins` for a production installation because that explicit command also builds the fixture target.
 

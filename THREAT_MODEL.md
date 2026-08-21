@@ -6,6 +6,12 @@
 
 The primary protected assets are API keys, subscription/setup tokens, Codex access tokens, vendor-managed OAuth state, WIF identity tokens, and the integrity of profile/context selection.
 
+### Automation implementation status
+
+The current code is a local CLI and TUI, not a production automation identity plane. It has no supported identity-lease service, production MCP server, authenticated controller channel, signed work-order verifier, durable lease journal, or lease-enforced provider harness. `--trusted-runner` is an assertion for existing CLI flows; it is not caller attestation and never grants production automation authority.
+
+[Automation identity plane](docs/automation-identity-plane.md) records the Phase-0 security and architecture contract for later implementation. Until the later service, integration, native-provider, recovery, and negative-security phases pass their release gates, no deployment of the current code may claim production automation isolation on Linux, macOS, or Windows.
+
 ## Trust boundary
 
 Trusted components:
@@ -25,7 +31,7 @@ Untrusted or potentially hostile inputs:
 - malformed metadata, symlinks, loose permissions, and executable search paths;
 - vendor output and exit status.
 
-## Threats and mitigations
+## Current threats and mitigations
 
 | Threat | Consequence | Implemented mitigation | Residual risk |
 | --- | --- | --- | --- |
@@ -40,6 +46,21 @@ Untrusted or potentially hostile inputs:
 | supply-chain compromise | theft of all selected credentials | small adapter surface, Rust safety policy, lockfile, CI lint/test/deny/secret-scan checks, checksums/Sigstore bundles/SBOM/provenance workflow | a compromised dependency/build runner/vendor binary remains a severe threat |
 | local logout misunderstood | credential remains usable remotely | explicit warning that local cleanup is not revocation | operator must use vendor/IdP controls |
 
+## Phase-0 automation threats
+
+The controls in this table are requirements, not implemented mitigations. The detailed authority matrix and release gates are in [Automation identity plane](docs/automation-identity-plane.md).
+
+| Threat | Consequence | Required control before production | Residual risk |
+| --- | --- | --- | --- |
+| controller impersonation | an unrelated same-user process acquires model-provider authority | Linux private service channel authenticated with peer UID/GID, trusted executable canonical path and digest, and expected service-manager/cgroup membership; production STDIO inherits an already-authenticated channel | root or a compromise of the trusted controller, service manager, kernel, or allowlisted executable remains decisive |
+| forged or widened work order | a controller selects a profile, role, repository, or lifetime it was not granted | operator-managed Ed25519 public keys verify canonical signed work-order digest references; the service intersects all constraints and computes the effective policy digest itself | compromise of an authorized signing key or operator policy can grant valid but unwanted authority |
+| mutable profile-name confusion | rename, reuse, or stale display metadata redirects a lease to another identity | leases, policies, state ownership, and audit records bind an immutable internal profile UID; the human-readable profile reference is only an alias | incorrect initial profile enrollment or provider-side identity changes still require runtime verification |
+| concurrent vendor-home use | two leases race through shared cookies, caches, or refresh state | mutable vendor homes are exclusive; concurrency is refused unless each lease receives independently isolated writable state | vendor-owned storage outside the isolated home may defeat the isolation claim and must be qualified |
+| stale harness after renewal | an attached process continues under superseded authority | every renewal rotates the fencing generation; the harness must acknowledge the new generation or the lease is revoked and the harness terminated | termination can be delayed by kernel or process failure, so new access must still be fenced immediately |
+| MCP or prompt-injection privilege expansion | an agent edits trust policy, obtains a credential, or launches a host command | production MCP is controller-only and bounded; Phase 0 policy editing is local-operator CLI only; the execution gate launches a fixed structured harness and exposes no arbitrary execution | compromise of the controller or trusted harness remains inside the trusted computing base |
+| audit history hides misuse or grows without bound | attribution is unavailable or the service exhausts storage | append-only lease events are retained for seven days; pruning is transactional, excludes live/unresolved state, and emits its own non-secret audit event | a privileged attacker can tamper with a local-only store unless evidence is exported to an external protected system |
+| unsupported host weakens caller identity | deployment silently omits required peer and process binding | Linux is the only production target; macOS is development-only; Windows automation entry points fail closed | Linux host configuration and native behavior still require protected deployment qualification |
+
 ## Explicit non-goals
 
 `ctxlane` does not protect against:
@@ -50,6 +71,9 @@ Untrusted or potentially hostile inputs:
 - intentional credential disclosure by the user or a command they authorize;
 - remote revocation, MFA enforcement, SCIM/offboarding, or vendor-side authorization policy;
 - full native Claude subscription-login isolation on macOS;
+- production automation on macOS or Windows;
+- treating `--trusted-runner`, STDIO parentage, a profile name, or a client-supplied policy digest as production authority;
+- scheduling, durable delivery, GitHub/backlog credentials, a general secret vault, or arbitrary execution through automation MCP;
 - arbitrary custom model providers, base URLs, credential helpers, or repository command hooks;
 - undocumented OAuth/cache compatibility or independent token verification.
 
@@ -57,7 +81,7 @@ OS keyrings are useful at-rest storage, not a sandbox from code already executin
 
 ## Secret lifecycle
 
-Static credentials are resolved immediately before a vendor operation and held in a `SecretString`; selected credentials are scoped to the child environment or written to official Codex login stdin. Official Codex login can persist a second copy in the profile's configured vendor credential store. File-backed copies live under the isolated private `CODEX_HOME`; keyring/auto behavior is vendor- and OS-defined. Retired vendor-state archives may therefore remain credential-bearing. The wrapper avoids logging values and drops its local secret objects after use.
+Static credentials are resolved immediately before a vendor operation and held in a `SecretString`; selected credentials are scoped to the child environment or written to official Codex login stdin. Official Codex login can persist a second copy in the profile's configured vendor credential store. File-backed copies live under the isolated private `CODEX_HOME`; keyring/auto behavior is vendor- and OS-defined. Detached vendor-state directories may therefore remain credential-bearing. The wrapper avoids logging values and drops its local secret objects after use.
 
 This is lifetime minimization, not a claim of perfect memory zeroization. Rust libraries, the OS, vendor child, allocators, or crash facilities may copy data. Disable core dumps and process tracing where the deployment requires it, and prefer short-lived workload identity over static bearer tokens.
 
@@ -74,6 +98,15 @@ Changes should preserve these invariants:
 7. fail closed on malformed/uninspectable security-sensitive files and unavailable credentials;
 8. preserve vendor exit behavior without exposing secrets.
 
+Production automation must additionally preserve these future invariants:
+
+9. no production authority from `--trusted-runner`, active contexts, directory bindings, repository input, STDIO parentage, or client-asserted identity/policy fields;
+10. no activated or resolved lease authority without an authenticated, operator-trusted Linux controller, a verified signed work-order authorization, an immutable profile UID, and a server-computed effective policy digest; `REQUESTED` and `REFUSED` records carry no execution authority;
+11. no shared mutable vendor home across concurrent leases and no stale-generation harness after renewal, revocation, or expiration;
+12. no credential, credential path, vendor-home path, reconstructed environment, or arbitrary executable returned or selected through MCP;
+13. no production harness launch except the operator-configured fixed structured harness, with model-proposed tool execution kept in a controller-owned credential-free sandbox;
+14. no silent deletion of the seven-day attribution record and no pruning of active or unresolved lease state.
+
 ## Review triggers
 
-Revisit this model when a release adds a provider, credential storage mechanism, repository configuration, custom endpoint, OAuth/cache parser, remote service, telemetry, self-update mechanism, or a bypass for repository settings. Also review whenever vendor credential precedence or storage contracts change.
+Revisit this model when a release adds a provider, credential storage mechanism, repository configuration, custom endpoint, OAuth/cache parser, automation service or transport, controller-authentication mechanism, work-order signature format, lease store, provider harness, telemetry, self-update mechanism, or a bypass for repository settings. Also review whenever vendor credential precedence or storage contracts change.

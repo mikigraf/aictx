@@ -7,6 +7,7 @@ All notable changes are documented here. The project follows [Semantic Versionin
 ### Added
 
 - Added interactive dashboard forms for profile, context, and binding metadata. Use `a` to add, `e` to edit, `R` or `F2` to rename a profile or context or edit a binding path, and `d` to remove.
+- Published closed Phase-0 JSON schemas and matching Rust wire contracts for signed work-order authorization, identity-lease requests and responses, readiness, stable refusal codes, and credential-isolation classification.
 
 ### Changed
 
@@ -14,12 +15,14 @@ All notable changes are documented here. The project follows [Semantic Versionin
 - Aligned package, command-help, and dashboard positioning around local account isolation.
 - Added exact selected-profile recovery hints for missing credentials without exposing opaque keyring handles.
 - Completed argument descriptions and copyable examples on the remaining high-value CLI help surfaces.
+- Added the automation identity-plane architecture, authority matrix, platform boundary, fencing and renewal rules, fixed-harness boundary, and seven-day audited-retention contract. The current binary remains explicitly unqualified for production automation.
 - Profile Rename now preserves private vendor state and the secret reference while updating context links. Context Rename refuses a name change while the context is active; otherwise it updates default and directory-binding references. Binding Edit can change both path and context.
 
 ### Security
 
 - Kept dashboard forms metadata-only. They never read or delete keyring credentials and never start a vendor CLI. Dashboard profile removal retains its keyring credential and leaves immutable managed vendor state detached in place without automatic reuse or cleanup.
 - Made `profile remove --delete-secret` restore profile metadata when keyring cleanup fails and rollback succeeds; a rollback failure reports both failures explicitly.
+- Defined the signed work-order and lease wire surfaces so credentials, credential paths, vendor homes, reconstructed environments, prompts, source, tool input, and model output cannot appear as contract fields.
 
 ## 0.2.0 - 2026-08-21
 

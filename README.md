@@ -328,11 +328,18 @@ These checks still need real deployment evidence:
 
 Read [Testing](docs/testing.md) for the exact automated layers, commands, coverage method, and evidence boundary. The deployment checklist is in [Compatibility and validation status](docs/compatibility.md).
 
+`ctxlane` remains fully standalone. Normal CLI, TUI, login, profile, context,
+and run workflows do not require ASF, Runmill, MCP, or an automation service.
+The automation identity plane is an optional controller-neutral capability;
+ASF and Runmill are one integration of it.
+
 ## Project documentation
 
 - [Configuration](docs/configuration.md)
 - [Command reference](docs/command-reference.md)
 - [CI and automation](docs/ci.md)
+- [Automation identity plane (Phase-0 contract)](docs/automation-identity-plane.md)
+- [Automation JSON schemas](schemas/README.md)
 - [Testing](docs/testing.md)
 - [Compatibility and validation status](docs/compatibility.md)
 - [Migration from v0.1](docs/migration-from-v0.1.md)
