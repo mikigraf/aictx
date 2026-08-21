@@ -1115,7 +1115,8 @@ fn termination_signal_is_forwarded_to_vendor_child() {
         ),
     );
     setup_wif_profile(&root);
-    let mut wrapper = aictx(&root)
+    let mut wrapper_command = aictx(&root);
+    wrapper_command
         .arg("--claude-bin")
         .arg(&fake_claude)
         .args([
@@ -1128,6 +1129,11 @@ fn termination_signal_is_forwarded_to_vendor_child() {
             "--",
             "wait",
         ])
+        // This contract sends SIGTERM to the CLI by design. Keep its raw profile in the
+        // temporary directory so a signal cannot corrupt cargo-llvm-cov's aggregate.
+        .env_remove("LLVM_PROFILE_FILE")
+        .current_dir(temporary.path());
+    let mut wrapper = wrapper_command
         .spawn()
         .unwrap_or_else(|error| panic!("start signal forwarding run: {error}"));
     wait_for_path(&started);

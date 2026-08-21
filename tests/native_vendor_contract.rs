@@ -91,6 +91,40 @@ fn trusted_vendor(temporary: &TempDir, name: &str) -> PathBuf {
     destination
 }
 
+#[cfg(unix)]
+fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "'\\''")
+}
+
+fn terminating_version_vendor(temporary: &TempDir) -> PathBuf {
+    let target = trusted_vendor(temporary, "claude-version-large-target");
+
+    #[cfg(unix)]
+    if env::var_os("LLVM_PROFILE_FILE").is_some() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The output-limit contract intentionally kills this hostile fixture. Keep that child
+        // out of cargo-llvm-cov's aggregate so a signal cannot leave a partial raw profile while
+        // the calling integration test still records coverage for the production limit path.
+        let launcher = temporary.path().join("claude-version-large");
+        let ignored_profile = temporary.path().join("terminated-vendor-%p-%m.profraw");
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nLLVM_PROFILE_FILE='{}' exec '{}' \"$@\"\n",
+                shell_path(&ignored_profile),
+                shell_path(&target)
+            ),
+        )
+        .unwrap_or_else(|error| panic!("write coverage-isolated vendor launcher: {error}"));
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("make vendor launcher executable: {error}"));
+        return launcher;
+    }
+
+    target
+}
+
 fn private_file(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
     #[cfg(unix)]
@@ -120,7 +154,11 @@ fn native_version_preflight_rejects_exit_oversize_and_terminal_controls() {
             "returned terminal control characters",
         ),
     ] {
-        let executable = trusted_vendor(&temporary, name);
+        let executable = if name == "claude-version-large" {
+            terminating_version_vendor(&temporary)
+        } else {
+            trusted_vendor(&temporary, name)
+        };
         let mut config = Config::default();
         config.binaries.claude = executable;
         let error = match vendor_version(&config, aictx::model::Provider::Claude) {

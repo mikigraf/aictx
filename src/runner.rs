@@ -1984,6 +1984,8 @@ mod tests {
 
     #[test]
     fn preflight_timeout_kills_reaps_and_unblocks_output_capture() {
+        let temporary = TempDir::new()
+            .unwrap_or_else(|error| panic!("create preflight fixture tempdir: {error}"));
         let program = env::current_exe()
             .unwrap_or_else(|error| panic!("resolve current test executable: {error}"));
         let mut command = Command::new(&program);
@@ -1991,6 +1993,10 @@ mod tests {
             .arg("--exact")
             .arg("runner::tests::preflight_sleep_fixture")
             .env("AICTX_TEST_PREFLIGHT_SLEEP", "1")
+            // This subprocess is the kill target. Its parent remains instrumented, while an
+            // incomplete profile from the terminated child stays outside the coverage merge.
+            .env_remove("LLVM_PROFILE_FILE")
+            .current_dir(temporary.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -2041,6 +2047,10 @@ mod tests {
             .arg("runner::tests::preflight_sleep_fixture")
             .env("AICTX_TEST_PREFLIGHT_DESCENDANT", "1")
             .env("AICTX_TEST_PREFLIGHT_READY", &ready)
+            // The finite-lived descendant intentionally outlives its direct parent. Do not let
+            // either fixture race cargo-llvm-cov's merge after this test has completed.
+            .env_remove("LLVM_PROFILE_FILE")
+            .current_dir(temporary.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

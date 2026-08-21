@@ -532,6 +532,11 @@ fn run_guided_prompt(exit: PromptExit) -> GuidedRun {
     command.env("TERM", "xterm-256color");
     command.env_remove("CI");
     command.env_remove("GITHUB_EVENT_NAME");
+    if matches!(exit, PromptExit::Terminate) {
+        // This branch deliberately signals the instrumented CLI. The escape branch still
+        // contributes child-process coverage; the signal branch writes only inside the tempdir.
+        command.env_remove("LLVM_PROFILE_FILE");
+    }
     let mut child = ChildGuard::new(
         pair.slave
             .spawn_command(command)
