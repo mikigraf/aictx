@@ -20,7 +20,7 @@ fn migration_refuses_a_windows_directory_junction_in_vendor_state() {
     let outside = temporary.path().join("outside-vendor-state");
     ensure_secure_directory(&outside)
         .unwrap_or_else(|error| panic!("create junction target: {error}"));
-    let junction = legacy.data_dir.join("vendor-state/junction");
+    let junction = legacy.data_dir.join("vendor-state").join("junction");
     let output = Command::new("cmd.exe")
         .args(["/D", "/C", "mklink", "/J"])
         .arg(&junction)
