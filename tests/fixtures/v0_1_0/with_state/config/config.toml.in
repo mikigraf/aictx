@@ -1,0 +1,38 @@
+version = 1
+default_context = "mixed"
+
+[settings]
+require_billing_confirmation_on_change = true
+show_run_banner = true
+telemetry = false
+
+[binaries]
+claude = "claude"
+codex = "codex"
+
+[profiles."claude:personal"]
+provider = "claude"
+billing_domain = "claude-subscription"
+auth = "subscription-token"
+state_dir = "{{LEGACY_ROOT}}/data/vendor-state/claude/personal"
+secret_ref = "keyring://aictx/claude-personal-frozen-v010"
+account_hint = "personal-v010@example.test"
+expected_organization = "org-v010"
+
+[profiles."codex:work"]
+provider = "codex"
+billing_domain = "chatgpt-subscription"
+auth = "chatgpt-oauth"
+state_dir = "{{LEGACY_ROOT}}/data/vendor-state/codex/work"
+account_hint = "work-v010@example.test"
+expected_workspace_id = "workspace-v010"
+credential_store = "file"
+trusted_runners_only = false
+
+[contexts.mixed]
+claude = "claude:personal"
+codex = "codex:work"
+
+[[bindings]]
+path = "{{BINDING_PATH}}"
+context = "mixed"

@@ -338,6 +338,8 @@ fn recovery_command_rolls_back_owned_partial_state_and_reports_noop_truthfully()
     let output = run_success(&mut fixture.recovery_command());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Rolled back the incomplete"));
+    assert!(stdout.contains("Archived committed partial target directories"));
+    assert!(stdout.contains("Review these private archives before deleting them"));
     assert!(stdout.contains("old aictx store remains available"));
     assert!(stdout.contains("metadata, vendor state, and credentials were not changed"));
     assert!(!migration_journal_path(&fixture.target).exists());
@@ -345,6 +347,13 @@ fn recovery_command_rolls_back_owned_partial_state_and_reports_noop_truthfully()
         assert!(!anchor.target.exists());
         assert!(!anchor.stage.exists());
     }
+    let archives = recovery_archives(&fixture.target_root, transaction_id);
+    assert_eq!(archives.len(), 1);
+    assert_eq!(
+        fs::read(archives[0].join("partial-data"))
+            .unwrap_or_else(|error| panic!("read archived partial target: {error}")),
+        b"partial\n"
+    );
     fixture.assert_source_unchanged();
 
     let output = run_success(&mut fixture.recovery_command());
@@ -352,6 +361,24 @@ fn recovery_command_rolls_back_owned_partial_state_and_reports_noop_truthfully()
         String::from_utf8_lossy(&output.stdout)
             .contains("No incomplete aictx-to-ctxlane migration was found")
     );
+}
+
+fn recovery_archives(root: &Path, transaction_id: &str) -> Vec<PathBuf> {
+    let mut archives = fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("list recovery archives: {error}"))
+        .filter_map(|entry| {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("read recovery archive entry: {error}"));
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy();
+            (path.is_dir()
+                && name.contains(".ctxlane-migration-rollback-")
+                && name.contains(transaction_id))
+            .then_some(path)
+        })
+        .collect::<Vec<_>>();
+    archives.sort();
+    archives
 }
 
 #[derive(Clone, Serialize)]

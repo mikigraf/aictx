@@ -1,13 +1,17 @@
 //! Explicit, copy-only migration support for the `aictx` to `ctxlane` rename.
 //!
 //! This module deliberately has no startup hook. Callers must first inspect a
-//! [`MigrationPlan`] and then explicitly execute it. The legacy store is never
-//! changed or removed, so it remains available for rollback.
+//! [`MigrationPlan`] and then explicitly execute it. Legacy metadata, vendor
+//! state, and credential references are never changed or removed, so they
+//! remain available for rollback. Execution may create or normalize advisory
+//! profile lock files in the legacy store while coordinating the copy.
 
 mod filesystem;
 mod journal;
+mod platform;
+mod recovery;
 
-use std::{fmt, path::Path};
+use std::{fmt, fs::File, path::Path};
 
 use crate::{
     Error, Result,
@@ -17,37 +21,55 @@ use crate::{
 use filesystem::{VendorEntry, VendorEntryKind};
 
 /// Counts discovered while inspecting a legacy store.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct MigrationSummary {
     profiles: usize,
     vendor_files: usize,
     vendor_directories: usize,
-    skipped_locks: usize,
+    skipped_locks: Vec<std::path::PathBuf>,
+}
+
+impl fmt::Debug for MigrationSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MigrationSummary")
+            .field("profiles", &self.profiles)
+            .field("vendor_files", &self.vendor_files)
+            .field("vendor_directories", &self.vendor_directories)
+            .field("skipped_lock_count", &self.skipped_locks.len())
+            .finish()
+    }
 }
 
 impl MigrationSummary {
     /// Return the number of configured provider profiles.
     #[must_use]
-    pub const fn profile_count(self) -> usize {
+    pub const fn profile_count(&self) -> usize {
         self.profiles
     }
 
     /// Return the number of regular vendor-state files that will be copied.
     #[must_use]
-    pub const fn vendor_file_count(self) -> usize {
+    pub const fn vendor_file_count(&self) -> usize {
         self.vendor_files
     }
 
     /// Return the number of vendor-state directories that will be copied.
     #[must_use]
-    pub const fn vendor_directory_count(self) -> usize {
+    pub const fn vendor_directory_count(&self) -> usize {
         self.vendor_directories
     }
 
     /// Return the number of lock entries that will be deliberately skipped.
     #[must_use]
-    pub const fn skipped_lock_count(self) -> usize {
-        self.skipped_locks
+    pub const fn skipped_lock_count(&self) -> usize {
+        self.skipped_locks.len()
+    }
+
+    /// Return vendor-state-relative paths of skipped regular runtime lock files.
+    #[must_use]
+    pub fn skipped_lock_paths(&self) -> &[std::path::PathBuf] {
+        &self.skipped_locks
     }
 }
 
@@ -62,8 +84,8 @@ pub struct MigrationReceipt {
 impl MigrationReceipt {
     /// Return the counts from the executed plan.
     #[must_use]
-    pub const fn summary(&self) -> MigrationSummary {
-        self.summary
+    pub fn summary(&self) -> MigrationSummary {
+        self.summary.clone()
     }
 
     /// Return the new configuration file path.
@@ -80,14 +102,31 @@ impl MigrationReceipt {
 }
 
 /// The outcome of cleaning up an interrupted migration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryOutcome {
     /// No migration journal was present.
     NothingToRecover,
-    /// An incomplete staged or partially committed target was removed.
-    RolledBack,
+    /// An incomplete migration was rolled back; committed targets were archived.
+    RolledBack {
+        /// Private sibling directories containing committed partial targets.
+        archives: Vec<std::path::PathBuf>,
+    },
     /// A fully verified target was kept and its journal was finalized.
     Finalized,
+}
+
+/// A shared guard that prevents migration while ordinary startup reads target state.
+///
+/// Keep this value alive for the complete ordinary command.
+#[must_use = "dropping the guard permits migration to start"]
+pub struct MigrationStartupGuard {
+    _lock: File,
+}
+
+impl fmt::Debug for MigrationStartupGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MigrationStartupGuard { .. }")
+    }
 }
 
 /// A validated, non-mutating migration plan.
@@ -101,7 +140,7 @@ pub struct MigrationPlan {
     legacy: AppPaths,
     target: AppPaths,
     source_config_bytes: Vec<u8>,
-    source_state_bytes: Vec<u8>,
+    source_state_bytes: Option<Vec<u8>>,
     migrated_config: Config,
     state: MutableState,
     vendor_entries: Vec<VendorEntry>,
@@ -132,13 +171,24 @@ impl MigrationPlan {
         let anchors = filesystem::target_anchors(target);
         filesystem::validate_target_is_absent(&anchors)?;
         filesystem::validate_target_parents(&anchors, &journal::journal_path(target))?;
+        Self::inspect_source(legacy, target, anchors)
+    }
 
+    fn inspect_source(
+        legacy: &AppPaths,
+        target: &AppPaths,
+        anchors: Vec<std::path::PathBuf>,
+    ) -> Result<Self> {
+        filesystem::validate_distinct_layouts(legacy, target)?;
         legacy.validate_layout()?;
         let source_config_bytes = filesystem::read_sensitive_bytes(&legacy.config_file)?;
-        let source_state_bytes = filesystem::read_sensitive_bytes(&legacy.state_file)?;
+        let source_state_bytes = filesystem::read_optional_sensitive_bytes(&legacy.state_file)?;
         let source_config: Config =
             filesystem::parse_toml(&legacy.config_file, &source_config_bytes)?;
-        let state: MutableState = filesystem::parse_toml(&legacy.state_file, &source_state_bytes)?;
+        let state: MutableState = source_state_bytes.as_deref().map_or_else(
+            || Ok(MutableState::default()),
+            |bytes| filesystem::parse_toml(&legacy.state_file, bytes),
+        )?;
         validate_managed_metadata(&source_config, &state, legacy, "legacy")?;
 
         let mut migrated_config = source_config;
@@ -175,8 +225,8 @@ impl MigrationPlan {
 
     /// Return the inspected migration counts.
     #[must_use]
-    pub const fn summary(&self) -> MigrationSummary {
-        self.summary
+    pub fn summary(&self) -> MigrationSummary {
+        self.summary.clone()
     }
 
     /// Return the legacy paths that will only be read.
@@ -198,6 +248,7 @@ impl MigrationPlan {
     /// incomplete target never looks initialized. Any ordinary error triggers
     /// a rollback of migration-owned target paths.
     pub fn execute(self) -> Result<MigrationReceipt> {
+        let _operation_lock = journal::acquire_operation_lock(&self.target)?;
         // Match the lock order used by profile lifecycle operations and keep
         // all guards alive until the target has been committed and verified.
         let _profile_locks = self.acquire_legacy_profile_locks()?;
@@ -222,6 +273,7 @@ impl MigrationPlan {
     }
 
     fn revalidate_source_and_target(&self) -> Result<()> {
+        filesystem::validate_distinct_layouts(&self.legacy, &self.target)?;
         journal::ensure_no_journal(&self.target)?;
         filesystem::validate_target_is_absent(&self.anchors)?;
         self.revalidate_source()
@@ -229,7 +281,7 @@ impl MigrationPlan {
 
     fn revalidate_source(&self) -> Result<()> {
         let config_bytes = filesystem::read_sensitive_bytes(&self.legacy.config_file)?;
-        let state_bytes = filesystem::read_sensitive_bytes(&self.legacy.state_file)?;
+        let state_bytes = filesystem::read_optional_sensitive_bytes(&self.legacy.state_file)?;
         if config_bytes != self.source_config_bytes || state_bytes != self.source_state_bytes {
             return Err(Error::ConfigBusy);
         }
@@ -248,13 +300,30 @@ pub fn migration_journal_path(target: &AppPaths) -> std::path::PathBuf {
     journal::journal_path(target)
 }
 
+/// Return the stable per-target migration-operation lock path.
+#[must_use]
+pub fn migration_operation_lock_path(target: &AppPaths) -> std::path::PathBuf {
+    journal::operation_lock_path(target)
+}
+
+/// Acquire a shared startup guard and recheck that no migration needs recovery.
+///
+/// Renamed ordinary commands should retain this guard from path discovery
+/// through command completion. Migration execution and recovery take the
+/// corresponding exclusive lock.
+pub fn acquire_migration_startup_guard(target: &AppPaths) -> Result<MigrationStartupGuard> {
+    let lock = journal::acquire_startup_lock(target)?;
+    journal::ensure_no_journal(target)?;
+    Ok(MigrationStartupGuard { _lock: lock })
+}
+
 /// Recover an interrupted migration for the exact supplied path pair.
 ///
 /// A verified migration is finalized and kept. Any earlier phase is rolled
 /// back, but only directories carrying this transaction's private owner marker
 /// can be removed.
 pub fn recover_incomplete(legacy: &AppPaths, target: &AppPaths) -> Result<RecoveryOutcome> {
-    journal::recover(legacy, target)
+    recovery::recover(legacy, target)
 }
 
 fn rewrite_profile_state_directories(config: &mut Config, target: &AppPaths) {

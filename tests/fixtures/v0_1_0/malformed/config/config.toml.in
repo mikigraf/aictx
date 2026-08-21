@@ -1,0 +1,17 @@
+version = 1
+
+[settings]
+require_billing_confirmation_on_change = true
+show_run_banner = true
+telemetry = false
+
+[binaries]
+claude = "claude"
+codex = "codex"
+
+[profiles."claude:leak-check"]
+provider = "claude"
+billing_domain = "anthropic-api"
+auth = "api-key"
+state_dir = "{{LEGACY_ROOT}}/data/vendor-state/claude/leak-check"
+secret_ref = "keyring://aictx/keyring-leak-canary-v010" account_hint = "account-leak-canary-v010"

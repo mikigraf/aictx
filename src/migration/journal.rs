@@ -1,6 +1,6 @@
 use std::{
     ffi::OsStr,
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,7 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    MigrationPlan, MigrationReceipt, RecoveryOutcome, filesystem, validate_managed_metadata,
+    MigrationPlan, MigrationReceipt, filesystem, platform, recovery, validate_managed_metadata,
 };
 use crate::{
     Error, Result,
@@ -16,24 +16,24 @@ use crate::{
     model::{Config, MutableState},
 };
 
-const JOURNAL_VERSION: u32 = 1;
-const OWNER_MARKER: &str = ".ctxlane-migration-owner";
+pub(super) const JOURNAL_VERSION: u32 = 1;
+pub(super) const OWNER_MARKER: &str = ".ctxlane-migration-owner";
 const STAGE_FRAGMENT: &str = ".ctxlane-migration-stage-";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MigrationJournal {
-    version: u32,
-    transaction_id: String,
-    legacy: PathSignature,
-    target: PathSignature,
-    phase: JournalPhase,
-    anchors: Vec<JournalAnchor>,
+pub(super) struct MigrationJournal {
+    pub(super) version: u32,
+    pub(super) transaction_id: String,
+    pub(super) legacy: PathSignature,
+    pub(super) target: PathSignature,
+    pub(super) phase: JournalPhase,
+    pub(super) anchors: Vec<JournalAnchor>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PathSignature {
+pub(super) struct PathSignature {
     config: PathBuf,
     data: PathBuf,
     state: PathBuf,
@@ -51,7 +51,7 @@ impl From<&AppPaths> for PathSignature {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum JournalPhase {
+pub(super) enum JournalPhase {
     Staging,
     Staged,
     Committing,
@@ -60,10 +60,12 @@ enum JournalPhase {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct JournalAnchor {
-    target: PathBuf,
-    stage: PathBuf,
-    committed: bool,
+pub(super) struct JournalAnchor {
+    pub(super) target: PathBuf,
+    pub(super) stage: PathBuf,
+    pub(super) committed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) archive: Option<PathBuf>,
 }
 
 pub(super) fn journal_path(target: &AppPaths) -> PathBuf {
@@ -79,10 +81,55 @@ pub(super) fn journal_path(target: &AppPaths) -> PathBuf {
         .join(format!(".{config_name}.aictx-to-ctxlane-migration.toml"))
 }
 
+pub(super) fn operation_lock_path(target: &AppPaths) -> PathBuf {
+    let explicit_root = [
+        (target.config_dir.as_path(), "config"),
+        (target.data_dir.as_path(), "data"),
+        (target.state_dir.as_path(), "state"),
+    ]
+    .iter()
+    .all(|(path, name)| path.file_name().is_some_and(|value| value == *name))
+        && target.config_dir.parent() == target.data_dir.parent()
+        && target.config_dir.parent() == target.state_dir.parent();
+    let parent = if explicit_root {
+        target
+            .config_dir
+            .parent()
+            .and_then(Path::parent)
+            .or_else(|| target.config_dir.parent())
+    } else {
+        target.config_dir.parent()
+    }
+    .unwrap_or(&target.config_dir);
+    parent.join(format!(
+        ".ctxlane-migration-operation-{:016x}.lock",
+        layout_hash(target)
+    ))
+}
+
+fn layout_hash(paths: &AppPaths) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for path in [&paths.config_dir, &paths.data_dir, &paths.state_dir] {
+        for byte in path.to_string_lossy().bytes().chain(std::iter::once(0xff)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+pub(super) fn acquire_operation_lock(target: &AppPaths) -> Result<File> {
+    filesystem::acquire_operation_lock(&operation_lock_path(target), true)
+}
+
+pub(super) fn acquire_startup_lock(target: &AppPaths) -> Result<File> {
+    filesystem::acquire_operation_lock(&operation_lock_path(target), false)
+}
+
 pub(super) fn ensure_no_journal(target: &AppPaths) -> Result<()> {
     let journal = journal_path(target);
     match fs::symlink_metadata(&journal) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+        Ok(metadata) if platform::is_symlink_or_reparse(&metadata) || !metadata.is_file() => {
             Err(Error::PolicyRefused(format!(
                 "unexpected migration journal object at {}",
                 journal.display()
@@ -107,10 +154,21 @@ pub(super) fn execute(plan: &MigrationPlan) -> Result<MigrationReceipt> {
 
     match execute_transaction(plan, &mut journal, &path) {
         Ok(receipt) => Ok(receipt),
-        Err(error) => match rollback(&journal, &path) {
-            Ok(()) => {
+        Err(error) => match recovery::rollback(&mut journal, &path) {
+            Ok(archives) => {
                 filesystem::remove_created_parents(&created_parents);
-                Err(error)
+                if archives.is_empty() {
+                    Err(error)
+                } else {
+                    let archive_paths = archives
+                        .iter()
+                        .map(|archive| archive.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Err(Error::PolicyRefused(format!(
+                        "migration failed ({error}); committed partial target state was archived for review at {archive_paths}"
+                    )))
+                }
             }
             Err(cleanup_error) => Err(Error::PolicyRefused(format!(
                 "migration failed ({error}); cleanup also failed ({cleanup_error}); recover the journal at {} before retrying",
@@ -153,6 +211,7 @@ fn prepare(
                 target: target.clone(),
                 stage: stage_path(target, transaction_id, index),
                 committed: false,
+                archive: None,
             })
             .collect::<Vec<_>>();
         for anchor in &anchors {
@@ -224,6 +283,9 @@ fn execute_transaction(
             }
         }
     }
+    for anchor in &journal.anchors {
+        filesystem::sync_tree(&anchor.stage)?;
+    }
 
     plan.revalidate_source()?;
     journal.phase = JournalPhase::Staged;
@@ -236,12 +298,13 @@ fn execute_transaction(
             path: anchor.target.clone(),
             source,
         })?;
+        filesystem::sync_parent(&anchor.target)?;
         anchor.committed = true;
         journal.phase = JournalPhase::Committing;
         write(path, journal)?;
     }
 
-    verify_committed_target(plan, &journal.anchors, &journal.transaction_id)?;
+    verify_committed_target(plan, &journal.anchors, &journal.transaction_id, true)?;
     journal.phase = JournalPhase::Verified;
     write(path, journal)?;
     for anchor in &journal.anchors {
@@ -250,19 +313,27 @@ fn execute_transaction(
     remove_regular_file(path)?;
 
     Ok(MigrationReceipt {
-        summary: plan.summary,
+        summary: plan.summary.clone(),
         config_file: plan.target.config_file.clone(),
         state_file: plan.target.state_file.clone(),
     })
 }
 
-fn verify_committed_target(
+pub(super) fn verify_committed_target(
     plan: &MigrationPlan,
     anchors: &[JournalAnchor],
     transaction_id: &str,
+    require_markers: bool,
 ) -> Result<()> {
     let config_bytes = filesystem::read_sensitive_bytes(&plan.target.config_file)?;
     let state_bytes = filesystem::read_sensitive_bytes(&plan.target.state_file)?;
+    let expected_config = format!("{}\n", toml::to_string_pretty(&plan.migrated_config)?);
+    let expected_state = format!("{}\n", toml::to_string_pretty(&plan.state)?);
+    if config_bytes != expected_config.as_bytes() || state_bytes != expected_state.as_bytes() {
+        return Err(Error::InvalidConfig(
+            "committed migration metadata bytes do not match the staged plan".to_owned(),
+        ));
+    }
     let config: Config = filesystem::parse_toml(&plan.target.config_file, &config_bytes)?;
     let state: MutableState = filesystem::parse_toml(&plan.target.state_file, &state_bytes)?;
     if config != plan.migrated_config || state != plan.state {
@@ -276,158 +347,42 @@ fn verify_committed_target(
         &plan.legacy.data_dir.join("vendor-state"),
         &plan.target.data_dir.join("vendor-state"),
     )?;
+    let mut marker_paths = Vec::new();
     for anchor in anchors {
-        validate_owner_marker(&anchor.target, transaction_id)?;
-    }
-    Ok(())
-}
-
-pub(super) fn recover(legacy: &AppPaths, target: &AppPaths) -> Result<RecoveryOutcome> {
-    let path = journal_path(target);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RecoveryOutcome::NothingToRecover);
-        }
-        Err(source) => {
-            return Err(Error::ReadFile { path, source });
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::PolicyRefused(format!(
-            "migration journal {} is not a regular file",
-            path.display()
-        )));
-    }
-
-    let bytes = filesystem::read_sensitive_bytes(&path)?;
-    let journal: MigrationJournal = filesystem::parse_toml(&path, &bytes)?;
-    validate(&journal, legacy, target)?;
-    if journal.phase == JournalPhase::Verified {
-        validate_committed_metadata(target)?;
-        for anchor in &journal.anchors {
-            remove_owner_marker_if_present(&anchor.target, &journal.transaction_id)?;
-            remove_owned_tree_if_present(&anchor.stage, &journal.transaction_id)?;
-        }
-        remove_regular_file(&path)?;
-        return Ok(RecoveryOutcome::Finalized);
-    }
-
-    rollback(&journal, &path)?;
-    Ok(RecoveryOutcome::RolledBack)
-}
-
-fn validate_committed_metadata(target: &AppPaths) -> Result<()> {
-    let config_bytes = filesystem::read_sensitive_bytes(&target.config_file)?;
-    let state_bytes = filesystem::read_sensitive_bytes(&target.state_file)?;
-    let config: Config = filesystem::parse_toml(&target.config_file, &config_bytes)?;
-    let state: MutableState = filesystem::parse_toml(&target.state_file, &state_bytes)?;
-    validate_managed_metadata(&config, &state, target, "migrated")
-}
-
-fn validate(journal: &MigrationJournal, legacy: &AppPaths, target: &AppPaths) -> Result<()> {
-    if journal.version != JOURNAL_VERSION
-        || !valid_transaction_id(&journal.transaction_id)
-        || journal.legacy != PathSignature::from(legacy)
-        || journal.target != PathSignature::from(target)
-    {
-        return Err(Error::PolicyRefused(
-            "migration journal does not match the requested legacy and target paths".to_owned(),
-        ));
-    }
-    let expected_targets = filesystem::target_anchors(target);
-    if journal.anchors.len() != expected_targets.len() {
-        return Err(Error::PolicyRefused(
-            "migration journal contains an unexpected target layout".to_owned(),
-        ));
-    }
-    for (index, (anchor, expected)) in journal
-        .anchors
-        .iter()
-        .zip(expected_targets.iter())
-        .enumerate()
-    {
-        if &anchor.target != expected
-            || anchor.stage != stage_path(expected, &journal.transaction_id, index)
-        {
-            return Err(Error::PolicyRefused(
-                "migration journal contains an unexpected staging path".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn valid_transaction_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 80
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-}
-
-fn rollback(journal: &MigrationJournal, path: &Path) -> Result<()> {
-    for anchor in &journal.anchors {
-        remove_owned_tree_if_present(&anchor.target, &journal.transaction_id)?;
-        remove_owned_tree_if_present(&anchor.stage, &journal.transaction_id)?;
-    }
-    remove_regular_file_if_present(path)
-}
-
-fn remove_owned_tree_if_present(path: &Path, transaction_id: &str) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(Error::PolicyRefused(format!(
-                    "refusing to remove unexpected migration artifact {}",
-                    path.display()
+        let marker = anchor.target.join(OWNER_MARKER);
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => {
+                validate_owner_marker(&anchor.target, transaction_id)?;
+                marker_paths.push(marker);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound && !require_markers => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::InvalidConfig(format!(
+                    "migration ownership marker is missing from {}",
+                    anchor.target.display()
                 )));
             }
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(Error::ReadFile {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    }
-    validate_owner_marker(path, transaction_id)?;
-    validate_removable_tree(path)?;
-    fs::remove_dir_all(path).map_err(|source| Error::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn validate_removable_tree(path: &Path) -> Result<()> {
-    for entry in fs::read_dir(path).map_err(|source| Error::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| Error::ReadFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let child = entry.path();
-        let metadata = fs::symlink_metadata(&child).map_err(|source| Error::ReadFile {
-            path: child.clone(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
-            return Err(Error::PolicyRefused(format!(
-                "refusing to remove migration tree containing an unexpected object: {}",
-                child.display()
-            )));
-        }
-        if metadata.is_dir() {
-            validate_removable_tree(&child)?;
+            Err(source) => {
+                return Err(Error::ReadFile {
+                    path: marker,
+                    source,
+                });
+            }
         }
     }
+    filesystem::verify_exact_target_layout(
+        &plan.target,
+        &plan.vendor_entries,
+        &anchors
+            .iter()
+            .map(|anchor| anchor.target.clone())
+            .collect::<Vec<_>>(),
+        &marker_paths,
+    )?;
     Ok(())
 }
 
-fn validate_owner_marker(path: &Path, transaction_id: &str) -> Result<()> {
+pub(super) fn validate_owner_marker(path: &Path, transaction_id: &str) -> Result<()> {
     let actual = read_marker(&path.join(OWNER_MARKER))?;
     if actual != transaction_id {
         return Err(Error::PolicyRefused(format!(
@@ -445,7 +400,7 @@ fn read_marker(path: &Path) -> Result<String> {
         .map_err(|_| Error::InvalidConfig(format!("invalid migration marker {}", path.display())))
 }
 
-fn remove_owner_marker_if_present(path: &Path, transaction_id: &str) -> Result<()> {
+pub(super) fn remove_owner_marker_if_present(path: &Path, transaction_id: &str) -> Result<()> {
     let marker = path.join(OWNER_MARKER);
     match fs::symlink_metadata(&marker) {
         Ok(_) => {
@@ -460,9 +415,10 @@ fn remove_owner_marker_if_present(path: &Path, transaction_id: &str) -> Result<(
     }
 }
 
-fn write(path: &Path, journal: &MigrationJournal) -> Result<()> {
+pub(super) fn write(path: &Path, journal: &MigrationJournal) -> Result<()> {
     let text = toml::to_string_pretty(journal)?;
-    write_secure_text(path, &format!("{text}\n"))
+    write_secure_text(path, &format!("{text}\n"))?;
+    filesystem::sync_parent(path)
 }
 
 fn map_target_to_stage(target: &Path, anchors: &[JournalAnchor]) -> Result<PathBuf> {
@@ -486,7 +442,7 @@ fn commit_order(anchors: &[JournalAnchor], config_file: &Path) -> Vec<usize> {
     order
 }
 
-fn stage_path(target: &Path, transaction_id: &str, index: usize) -> PathBuf {
+pub(super) fn stage_path(target: &Path, transaction_id: &str, index: usize) -> PathBuf {
     let name = target
         .file_name()
         .and_then(OsStr::to_str)
@@ -501,31 +457,12 @@ fn transaction_id() -> Result<String> {
     Ok(format!("{:x}-{:x}", std::process::id(), elapsed.as_nanos()))
 }
 
-fn remove_regular_file_if_present(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(Error::PolicyRefused(format!(
-                    "refusing to remove unexpected file object {}",
-                    path.display()
-                )));
-            }
-            remove_regular_file(path)
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::ReadFile {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-fn remove_regular_file(path: &Path) -> Result<()> {
+pub(super) fn remove_regular_file(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path).map_err(|source| Error::ReadFile {
         path: path.to_path_buf(),
         source,
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if platform::is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err(Error::PolicyRefused(format!(
             "refusing to remove non-regular migration file {}",
             path.display()
@@ -534,5 +471,6 @@ fn remove_regular_file(path: &Path) -> Result<()> {
     fs::remove_file(path).map_err(|source| Error::WriteFile {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    filesystem::sync_parent(path)
 }

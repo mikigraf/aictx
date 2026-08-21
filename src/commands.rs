@@ -255,14 +255,14 @@ fn execute_migration(target_root: Option<&Path>, command: MigrateCommand) -> Res
             if args.dry_run {
                 println!("Migration plan (dry run; no files were changed).");
                 print_migration_paths(&legacy, &target);
-                print_migration_summary(plan.summary());
+                print_migration_summary(&plan.summary());
                 return Ok(0);
             }
 
             let receipt = plan.execute()?;
             println!("Copied the aictx store into the ctxlane layout.");
             print_migration_paths(&legacy, &target);
-            print_migration_summary(receipt.summary());
+            print_migration_summary(&receipt.summary());
             print_safe_path("new config", receipt.config_file());
             print_safe_path("new state", receipt.state_file());
             print_source_preservation_receipt();
@@ -274,8 +274,17 @@ fn execute_migration(target_root: Option<&Path>, command: MigrateCommand) -> Res
                 RecoveryOutcome::NothingToRecover => {
                     println!("No incomplete aictx-to-ctxlane migration was found.");
                 }
-                RecoveryOutcome::RolledBack => {
+                RecoveryOutcome::RolledBack { archives } => {
                     println!("Rolled back the incomplete aictx-to-ctxlane migration.");
+                    if archives.is_empty() {
+                        println!("No committed target directories required archival.");
+                    } else {
+                        println!("Archived committed partial target directories:");
+                        for archive in &archives {
+                            print_safe_path("archive", archive);
+                        }
+                        println!("Review these private archives before deleting them.");
+                    }
                     print_source_preservation_receipt();
                 }
                 RecoveryOutcome::Finalized => {
@@ -337,7 +346,7 @@ fn print_migration_paths(legacy: &AppPaths, target: &AppPaths) {
     print_safe_path("new state", &target.state_dir);
 }
 
-fn print_migration_summary(summary: MigrationSummary) {
+fn print_migration_summary(summary: &MigrationSummary) {
     println!("  profiles: {}", summary.profile_count());
     println!("  vendor files: {}", summary.vendor_file_count());
     println!("  vendor directories: {}", summary.vendor_directory_count());
