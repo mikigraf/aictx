@@ -16,7 +16,6 @@ const RELOAD_MESSAGE_MARKER: &str = "Metadata reloaded.";
 const SMALL_TERMINAL_MARKER: &str = "Terminal";
 const SMALL_TERMINAL_RESIZE_MARKER: &str = "Resize";
 const SMALL_TERMINAL_FOOTER_MARKER: &str = "quit";
-const INITIAL_DRAW_COMPLETE_MARKER: &str = "\u{1b}[?25l";
 const MAX_TERMINAL_QUERY_LENGTH: usize = 5;
 
 type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -280,25 +279,17 @@ fn run_in_pty(
             deadline,
             "the initial dashboard footer",
         );
-        let initial_render = wait_for_output(
+        write_pty(&writer, b"r")
+            .unwrap_or_else(|error| panic!("write PTY readiness input: {error}"));
+        let event_loop_ready = wait_for_output(
             &output,
             &mut child,
-            INITIAL_DRAW_COMPLETE_MARKER,
+            RELOAD_MESSAGE_MARKER,
             dashboard_footer,
             deadline,
-            "the completed initial dashboard draw",
+            "the event-loop readiness render",
         );
         if exercise_resize {
-            write_pty(&writer, b"r")
-                .unwrap_or_else(|error| panic!("write PTY readiness input: {error}"));
-            let event_loop_ready = wait_for_output(
-                &output,
-                &mut child,
-                RELOAD_MESSAGE_MARKER,
-                initial_render,
-                deadline,
-                "the event-loop readiness render",
-            );
             pair.master
                 .resize(PtySize {
                     rows: 6,
