@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use aictx::{
+use ctxlane::{
     config::{AppPaths, MetadataStore, ensure_secure_directory},
     migration::MigrationPlan,
 };

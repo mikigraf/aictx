@@ -91,20 +91,26 @@ pub(super) fn operation_lock_path(target: &AppPaths) -> PathBuf {
     .all(|(path, name)| path.file_name().is_some_and(|value| value == *name))
         && target.config_dir.parent() == target.data_dir.parent()
         && target.config_dir.parent() == target.state_dir.parent();
-    let parent = if explicit_root {
-        target
+    let layout_hash = layout_hash(target);
+    if explicit_root {
+        let parent = target
             .config_dir
             .parent()
             .and_then(Path::parent)
             .or_else(|| target.config_dir.parent())
-    } else {
-        target.config_dir.parent()
+            .unwrap_or(&target.config_dir);
+        return parent
+            .join(format!(".ctxlane-migration-locks-{layout_hash:016x}"))
+            .join("operation.lock");
     }
-    .unwrap_or(&target.config_dir);
-    parent.join(format!(
-        ".ctxlane-migration-operation-{:016x}.lock",
-        layout_hash(target)
-    ))
+
+    target
+        .config_dir
+        .parent()
+        .unwrap_or(&target.config_dir)
+        .join(format!(
+            ".ctxlane-migration-operation-{layout_hash:016x}.lock"
+        ))
 }
 
 fn layout_hash(paths: &AppPaths) -> u64 {
@@ -136,7 +142,7 @@ pub(super) fn ensure_no_journal(target: &AppPaths) -> Result<()> {
             )))
         }
         Ok(_) => Err(Error::PolicyRefused(format!(
-            "an incomplete migration journal exists at {}; recover it before retrying",
+            "an incomplete migration journal exists at {}; run `ctxlane migrate recover` with the same `--root` and `--from-root` path selection used for migration",
             journal.display()
         ))),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),

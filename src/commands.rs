@@ -18,8 +18,8 @@ use crate::{
     doctor,
     identity::{LEGACY_AICTX, TARGET_CTXLANE},
     migration::{
-        MigrationPlan, MigrationSummary, RecoveryOutcome, migration_journal_path,
-        recover_incomplete,
+        MigrationPlan, MigrationStartupGuard, MigrationSummary, RecoveryOutcome,
+        acquire_migration_startup_guard, recover_incomplete,
     },
     model::{
         AuthArg, BillingDomain, ClaudeAuth, CodexAuth, CodexCredentialStore, Config, Context, Name,
@@ -247,24 +247,24 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
     }
 }
 
-/// Apply rename-specific startup policy before any ordinary command touches metadata.
+/// Hold the migration startup lock and apply rename policy before metadata access.
 ///
-/// Keep this as one narrow entry-point seam: the shared startup guard can replace
-/// this implementation after the migration branches are rebased. Migration
-/// commands perform their own journal and path validation and must remain able
-/// to recover an interrupted transaction.
-pub fn guard_startup(cli: &Cli, target: &AppPaths) -> Result<()> {
+/// The caller must retain the returned guard through ordinary command completion.
+/// Migration commands acquire their own exclusive operation lock and therefore
+/// bypass this shared startup guard.
+pub fn guard_startup(cli: &Cli, target: &AppPaths) -> Result<Option<MigrationStartupGuard>> {
     if matches!(cli.command.as_ref(), Some(Command::Migrate(_))) {
-        return Ok(());
+        return Ok(None);
     }
 
-    guard_against_incomplete_migration(target)?;
+    let guard = acquire_migration_startup_guard(target)?;
     if cli.root.is_some() || path_entry_exists(&target.config_file)? {
-        return Ok(());
+        return Ok(Some(guard));
     }
 
     let legacy = AppPaths::discover_for(LEGACY_AICTX, None)?;
-    guard_against_detected_legacy(cli, &legacy)
+    guard_against_detected_legacy(cli, &legacy)?;
+    Ok(Some(guard))
 }
 
 fn guard_against_detected_legacy(cli: &Cli, legacy: &AppPaths) -> Result<()> {
@@ -397,6 +397,9 @@ fn print_migration_summary(summary: &MigrationSummary) {
     println!("  vendor files: {}", summary.vendor_file_count());
     println!("  vendor directories: {}", summary.vendor_directory_count());
     println!("  skipped lock entries: {}", summary.skipped_lock_count());
+    for path in summary.skipped_lock_paths() {
+        print_safe_path("skipped lock", path);
+    }
 }
 
 fn print_safe_path(label: &str, path: &Path) {
@@ -406,25 +409,6 @@ fn print_safe_path(label: &str, path: &Path) {
 fn print_source_preservation_receipt() {
     println!("The old aictx store remains available.");
     println!("Its metadata, vendor state, and credentials were not changed.");
-}
-
-/// Refuse ordinary startup while a ctxlane migration journal needs recovery.
-///
-/// The public entry point calls this before ordinary metadata access. It stays
-/// separate from migration execution so recovery remains possible.
-pub fn guard_against_incomplete_migration(target: &AppPaths) -> Result<()> {
-    let journal = migration_journal_path(target);
-    match fs::symlink_metadata(&journal) {
-        Ok(_) => Err(Error::PolicyRefused(format!(
-            "an incomplete migration journal exists at {}; run `ctxlane migrate recover` before using ctxlane",
-            terminal_safe(&journal.display().to_string())
-        ))),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::ReadFile {
-            path: journal,
-            source,
-        }),
-    }
 }
 
 fn execute_init(
@@ -1939,6 +1923,7 @@ mod startup_guard_tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::migration::migration_journal_path;
 
     fn cli(arguments: &[&str]) -> Cli {
         Cli::try_parse_from(arguments)
@@ -2021,7 +2006,9 @@ mod startup_guard_tests {
         let Err(error) = guard_startup(&ordinary, &target) else {
             panic!("ordinary command must refuse an incomplete journal");
         };
-        assert!(error.to_string().contains("ctxlane migrate recover"));
+        let message = error.to_string();
+        assert!(message.contains("ctxlane migrate recover"));
+        assert!(message.contains("same `--root` and `--from-root`"));
 
         let recovery = cli(&[
             "ctxlane",

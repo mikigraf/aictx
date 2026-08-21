@@ -163,10 +163,71 @@ fn dry_run_reports_safe_plan_without_creating_target_state() {
     assert!(stdout.contains("vendor files: 2"));
     assert!(stdout.contains("vendor directories: 4"));
     assert!(stdout.contains("skipped lock entries: 1"));
+    assert!(stdout.contains("skipped lock: codex/work/active.lock"));
     assert!(!stdout.contains("keyring://"));
     assert!(!fixture.target_root.exists());
     assert!(!migration_journal_path(&fixture.target).exists());
     fixture.assert_source_unchanged();
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_startup_accepts_an_explicit_root_directly_under_sticky_tmp() {
+    use std::{
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let parent = Path::new("/tmp")
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize /tmp: {error}"));
+    let metadata = fs::symlink_metadata(&parent)
+        .unwrap_or_else(|error| panic!("inspect {}: {error}", parent.display()));
+    if metadata.uid() != 0 || metadata.permissions().mode() & 0o1000 == 0 {
+        eprintln!(
+            "skipping sticky-root contract because {} is not root-owned and sticky",
+            parent.display()
+        );
+        return;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|error| panic!("system clock before Unix epoch: {error}"))
+        .as_nanos();
+    let root = parent.join(format!(
+        "ctxlane-explicit-root-test-{}-{nonce}",
+        std::process::id()
+    ));
+    assert!(!root.exists());
+    let target = AppPaths::for_root(&root);
+    let operation_lock = ctxlane::migration::migration_operation_lock_path(&target);
+    let cleanup = StickyTmpCleanup {
+        root: root.clone(),
+        lock_directory: operation_lock.parent().map(Path::to_path_buf),
+    };
+
+    run_success(ctxlane(&root).arg("init"));
+    assert!(target.config_file.is_file());
+    assert!(operation_lock.is_file());
+
+    drop(cleanup);
+}
+
+#[cfg(unix)]
+struct StickyTmpCleanup {
+    root: PathBuf,
+    lock_directory: Option<PathBuf>,
+}
+
+#[cfg(unix)]
+impl Drop for StickyTmpCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+        if let Some(lock_directory) = &self.lock_directory {
+            let _ = fs::remove_dir_all(lock_directory);
+        }
+    }
 }
 
 #[test]

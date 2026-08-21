@@ -680,7 +680,20 @@ pub(super) fn ensure_trusted_parent(path: &Path, missing: &[PathBuf]) -> Result<
     reject_reparse_points_in_existing_chain(path)?;
     validate_trusted_path_chain(path, LeafOwnership::CurrentUser)?;
     for directory in missing.iter().rev() {
-        create_secure_directory_new(directory)?;
+        match create_secure_directory_new(directory) {
+            Ok(()) => {}
+            Err(Error::CreateDir { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                // Another valid ctxlane process may win the first-use directory race.
+                // Continue only after treating the new object as fully untrusted and
+                // revalidating its type, ownership, permissions, and path chain.
+                reject_reparse_points_in_existing_chain(directory)?;
+                validate_secure_directory(directory)?;
+                sync_parent(directory)?;
+            }
+            Err(error) => return Err(error),
+        }
     }
     let metadata = fs::symlink_metadata(path).map_err(|source| Error::ReadFile {
         path: path.to_path_buf(),

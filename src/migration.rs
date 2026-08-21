@@ -320,8 +320,8 @@ pub fn acquire_migration_startup_guard(target: &AppPaths) -> Result<MigrationSta
 /// Recover an interrupted migration for the exact supplied path pair.
 ///
 /// A verified migration is finalized and kept. Any earlier phase is rolled
-/// back, but only directories carrying this transaction's private owner marker
-/// can be removed.
+/// back into private sibling archives, but only directories carrying this
+/// transaction's private owner marker can be moved.
 pub fn recover_incomplete(legacy: &AppPaths, target: &AppPaths) -> Result<RecoveryOutcome> {
     recovery::recover(legacy, target)
 }

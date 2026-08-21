@@ -6,7 +6,6 @@ edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
 description = "Switch between Claude Code and Codex accounts with isolated local state"
-documentation = "https://docs.rs/ctxlane"
 repository = "https://github.com/mikigraf/ctxlane"
 readme = "README.md"
 keywords = ["claude", "codex", "cli", "credentials", "accounts"]

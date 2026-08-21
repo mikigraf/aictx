@@ -102,6 +102,7 @@ struct TerminationSignals {
 }
 
 impl TerminationSignals {
+    #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
     fn new() -> io::Result<Self> {
         #[cfg(unix)]
         {

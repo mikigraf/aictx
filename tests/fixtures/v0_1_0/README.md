@@ -1,7 +1,8 @@
 # Frozen aictx v0.1.0 migration fixture
 
-These files model metadata written by the immutable `v0.1.0` release at commit
-`a6e44c0b61cca6a35841ee4ccd7bd3bcd0bc11a3`.
+These files model metadata written by the immutable annotated `v0.1.0` tag
+(`a6e44c0b61cca6a35841ee4ccd7bd3bcd0bc11a3`) at commit
+`c4c0331104f4bc24ec62a317868c4d4f62d4a34f`.
 
 The fixture was derived with that tag's own `aictx` binary by running `init`,
 `profile add`, `context add`, `bind`, and `use`. It was then made portable in

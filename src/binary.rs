@@ -273,12 +273,11 @@ mod windows_tests {
 
     #[test]
     fn command_scripts_are_not_accepted_as_native_vendor_executables() {
-        for path in [Path::new(r"C:\tools\codex.cmd")] {
-            let Err(error) = validate_windows_native_executable(path, "vendor") else {
-                panic!("Windows command script should be rejected");
-            };
-            assert!(error.to_string().contains("configure a native .exe"));
-        }
+        let path = Path::new(r"C:\tools\codex.cmd");
+        let Err(error) = validate_windows_native_executable(path, "vendor") else {
+            panic!("Windows command script should be rejected");
+        };
+        assert!(error.to_string().contains("configure a native .exe"));
         assert!(
             validate_windows_native_executable(Path::new(r"C:\tools\codex.exe"), "codex").is_ok()
         );

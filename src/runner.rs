@@ -1828,6 +1828,7 @@ struct SignalForwarder {
 }
 
 impl SignalForwarder {
+    #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
     fn new() -> std::io::Result<Self> {
         #[cfg(unix)]
         {

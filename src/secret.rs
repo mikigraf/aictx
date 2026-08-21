@@ -545,6 +545,7 @@ struct PromptTerminationSignals {
 }
 
 impl PromptTerminationSignals {
+    #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
     fn new() -> io::Result<Self> {
         #[cfg(unix)]
         {
@@ -679,6 +680,7 @@ fn prompt_hidden_claude_setup_token(label: &str) -> Result<SecretString> {
     let drain_result = reject_queued_secret_input(&mut signals);
     let restore_result = guard.restore();
     let final_signal = signals.pending_exit_code();
+    #[cfg(unix)]
     drop(signals);
     resolve_prompt_result(read_result, drain_result, restore_result, final_signal)
 }

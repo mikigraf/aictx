@@ -26,6 +26,6 @@ fn run() -> ctxlane::Result<i32> {
         codex: cli.codex_bin.clone(),
     })?;
     let paths = AppPaths::discover(cli.root.as_deref())?;
-    commands::guard_startup(&cli, &paths)?;
+    let _migration_guard = commands::guard_startup(&cli, &paths)?;
     commands::execute(cli, &paths)
 }

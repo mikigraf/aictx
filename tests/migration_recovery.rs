@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use aictx::{
+use ctxlane::{
     config::{AppPaths, ensure_secure_directory},
     migration::{RecoveryOutcome, migration_journal_path, recover_incomplete},
 };

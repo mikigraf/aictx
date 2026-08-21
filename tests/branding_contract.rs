@@ -11,6 +11,7 @@ const LEGACY_OCCURRENCE_ALLOWLIST: &[(&str, usize)] = &[
     ("docs/command-reference.md", 2),
     ("docs/compatibility.md", 1),
     ("docs/configuration.md", 1),
+    ("docs/migration-from-v0.1.md", 8),
     ("src/brand.rs", 8),
     ("src/cli.rs", 13),
     ("src/commands.rs", 13),
@@ -21,8 +22,17 @@ const LEGACY_OCCURRENCE_ALLOWLIST: &[(&str, usize)] = &[
     ("src/runner.rs", 10),
     ("src/secret.rs", 1),
     ("tests/cli_workflow.rs", 3),
+    ("tests/fixtures/v0_1_0/README.md", 2),
+    ("tests/fixtures/v0_1_0/malformed/config/config.toml.in", 1),
+    (
+        "tests/fixtures/v0_1_0/missing_state/config/config.toml.in",
+        1,
+    ),
+    ("tests/fixtures/v0_1_0/with_state/config/config.toml.in", 1),
     ("tests/migration_cli.rs", 9),
-    ("tests/migration_core.rs", 3),
+    ("tests/migration_core.rs", 5),
+    ("tests/migration_recovery.rs", 1),
+    ("tests/migration_windows.rs", 1),
     ("tests/runner_contract.rs", 1),
 ];
 
