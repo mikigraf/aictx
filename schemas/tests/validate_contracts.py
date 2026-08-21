@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from jsonschema import Draft202012Validator
+    from jsonschema import Draft202012Validator, FormatChecker
     from referencing import Registry, Resource
 except ImportError as error:  # pragma: no cover - environment setup failure
     raise SystemExit(
@@ -206,6 +206,23 @@ def utc_nanoseconds(value: str) -> int:
     return whole_seconds * 1_000_000_000 + fractional_nanoseconds
 
 
+def contract_format_checker() -> FormatChecker:
+    """Build the mandatory, dependency-independent v1 format checker."""
+    checker = FormatChecker()
+
+    @checker.checks("date-time")
+    def strict_date_time(value: object) -> bool:
+        if not isinstance(value, str):
+            return True
+        try:
+            utc_nanoseconds(value)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    return checker
+
+
 def validate_request_semantics(request: dict[str, Any]) -> None:
     authorization = request["work_order_authorization"]
     for field in AUTHORIZATION_BINDINGS:
@@ -291,11 +308,12 @@ def main() -> None:
         resources.append((schema["$id"], Resource.from_contents(schema)))
 
     registry = Registry().with_resources(resources)
+    format_checker = contract_format_checker()
     validators = {
         name: Draft202012Validator(
             schema,
             registry=registry,
-            format_checker=Draft202012Validator.FORMAT_CHECKER,
+            format_checker=format_checker,
         )
         for name, schema in schemas.items()
     }

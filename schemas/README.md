@@ -43,6 +43,9 @@ verification is unavailable; CI must not skip the signing-vector check.
 For these contracts, `format: date-time` is normative rather than annotation
 only. Conforming decoders must assert RFC 3339 calendar validity in addition to
 the canonical UTC shape and relational timestamp checks documented below.
+Generic annotation-only validation is insufficient; the repository gate
+registers its own mandatory calendar checker so validation does not depend on
+optional `jsonschema` packages.
 
 ## Canonical request digest
 
