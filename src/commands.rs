@@ -48,34 +48,33 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
         }
         Some(Command::Context(args)) => execute_context(&store, args.command),
         Some(Command::Use(args)) => {
-            let billing_change = activation::required_billing_change(&store, &args.context)?;
-            if billing_change.is_some() && !args.yes {
+            let selection_change = activation::required_selection_change(&store, &args.context)?;
+            if let Some(change) = selection_change.as_ref().filter(|_| !args.yes) {
                 if cli.non_interactive {
                     return Err(Error::InteractionRequired(
-                        "billing-domain change requires `aictx use --yes`".to_owned(),
+                        "account profile change requires `aictx use --yes`".to_owned(),
                     ));
                 }
-                eprintln!(
-                    "This changes at least one provider's billing domain. New context: {}",
-                    args.context
-                );
+                print_selection_change(change);
                 if !confirm(
                     "Continue? [y/N] ",
-                    "billing-domain confirmation requires a terminal or `aictx use --yes`",
+                    "account profile confirmation requires a terminal or `aictx use --yes`",
                 )? {
                     return Err(Error::Cancelled);
                 }
             }
             let confirmation = if args.yes {
-                activation::BillingConfirmation::AnyChange
+                activation::SelectionConfirmation::AnyChange
             } else {
-                billing_change.map_or(
-                    activation::BillingConfirmation::None,
-                    activation::BillingConfirmation::Change,
+                selection_change.map_or(
+                    activation::SelectionConfirmation::None,
+                    activation::SelectionConfirmation::Change,
                 )
             };
-            activation::activate(&store, &args.context, &confirmation)?;
-            println!("Active context: {}", args.context);
+            let cwd = current_directory()?;
+            let receipt =
+                activation::activate_with_receipt(&store, &args.context, &confirmation, &cwd)?;
+            print_activation_receipt(&receipt);
             Ok(0)
         }
         Some(Command::Current) => {
@@ -1578,6 +1577,77 @@ fn run_identity_hint(profile: &Profile) -> String {
     } else {
         format!(" {}", hints.join(" "))
     }
+}
+
+fn print_selection_change(change: &activation::SelectionChange) {
+    eprintln!("This changes the account profile used for future runs.");
+    eprintln!(
+        "Global context: {} -> {}",
+        change.previous(),
+        change.target()
+    );
+    for (provider, (previous, target)) in [Provider::Claude, Provider::Codex].into_iter().zip(
+        change
+            .previous_profiles()
+            .iter()
+            .zip(change.target_profiles()),
+    ) {
+        if previous != target {
+            eprintln!(
+                "  {provider}: {} -> {}",
+                profile_selection_summary(previous.as_ref()),
+                profile_selection_summary(target.as_ref())
+            );
+        }
+    }
+    eprintln!("The selected account or organization may be different.");
+}
+
+fn profile_selection_summary(selection: Option<&activation::ProfileSelection>) -> String {
+    selection.map_or_else(
+        || "none".to_owned(),
+        |selection| {
+            format!(
+                "{} ({}, {})",
+                selection.id(),
+                selection.auth_label(),
+                selection.billing_domain()
+            )
+        },
+    )
+}
+
+fn print_activation_receipt(receipt: &activation::ActivationReceipt) {
+    println!("Global active context: {}", receipt.global_context());
+    println!(
+        "Global profiles: {}",
+        profile_route_summary(receipt.global_profiles())
+    );
+    println!(
+        "Effective here at commit: {} ({})",
+        receipt.effective_context(),
+        receipt.source().label()
+    );
+    println!(
+        "Effective profiles: {}",
+        profile_route_summary(receipt.effective_profiles())
+    );
+    if receipt.is_shadowed() {
+        println!("The directory binding takes precedence in this directory.");
+    }
+}
+
+fn profile_route_summary(profiles: &[Option<activation::ProfileSelection>; 2]) -> String {
+    [Provider::Claude, Provider::Codex]
+        .into_iter()
+        .zip(profiles)
+        .filter_map(|(provider, profile)| {
+            profile
+                .as_ref()
+                .map(|profile| format!("{provider}={}", profile_selection_summary(Some(profile))))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn reject_wif_options(args: &ProfileAddArgs) -> Result<()> {

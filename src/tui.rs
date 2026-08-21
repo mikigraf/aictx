@@ -23,7 +23,7 @@ use ratatui::{
 
 use crate::{
     Error, Result, activation,
-    activation::BillingConfirmation,
+    activation::SelectionConfirmation,
     config::MetadataStore,
     model::{Config, MutableState, Name, ProfileId, Provider},
     resolver::{ResolvedContext, current_directory, resolve_context},
@@ -187,7 +187,7 @@ struct Message {
 
 #[derive(Clone, Debug)]
 struct PendingActivation {
-    change: activation::BillingChange,
+    change: activation::SelectionChange,
 }
 
 struct App {
@@ -412,13 +412,13 @@ fn request_activation(app: &mut App, store: &MetadataStore) {
         );
         return;
     };
-    match activation::required_billing_change(store, &target) {
+    match activation::required_selection_change(store, &target) {
         Ok(Some(change)) => {
             app.pending_activation = Some(PendingActivation { change });
             app.message = None;
         }
         Ok(None) => {
-            let _ = commit_activation(app, store, &target, &BillingConfirmation::None);
+            let _ = commit_activation(app, store, &target, &SelectionConfirmation::None);
         }
         Err(error) => app.set_message(MessageLevel::Error, error.to_string()),
     }
@@ -429,21 +429,21 @@ fn confirm_activation(app: &mut App, store: &MetadataStore) {
         return;
     };
     let target = pending.change.target().clone();
-    let confirmation = BillingConfirmation::Change(pending.change);
+    let confirmation = SelectionConfirmation::Change(pending.change);
     if matches!(
         commit_activation(app, store, &target, &confirmation),
         Some(Error::InteractionRequired(_))
     ) {
-        match activation::required_billing_change(store, &target) {
+        match activation::required_selection_change(store, &target) {
             Ok(Some(change)) => {
                 app.pending_activation = Some(PendingActivation { change });
                 app.set_message(
                     MessageLevel::Warning,
-                    "Context state changed. Review the billing warning again.",
+                    "Context or profile state changed. Review the account warning again.",
                 );
             }
             Ok(None) => {
-                let _ = commit_activation(app, store, &target, &BillingConfirmation::None);
+                let _ = commit_activation(app, store, &target, &SelectionConfirmation::None);
             }
             Err(error) => app.set_message(MessageLevel::Error, error.to_string()),
         }
@@ -454,18 +454,29 @@ fn commit_activation(
     app: &mut App,
     store: &MetadataStore,
     target: &Name,
-    confirmation: &BillingConfirmation,
+    confirmation: &SelectionConfirmation,
 ) -> Option<Error> {
-    match activation::activate(store, target, confirmation) {
-        Ok(()) => match app.reload(store) {
+    match activation::activate_with_receipt(store, target, confirmation, &app.cwd) {
+        Ok(receipt) => match app.reload(store) {
             Ok(()) => {
-                let message = match &app.resolution {
-                    Ok(resolved) if &resolved.name != target => format!(
-                        "Global active context is {target}; this directory still resolves to {} via {}.",
-                        resolved.name,
-                        resolved.source.label()
-                    ),
-                    _ => format!("Active context: {target}"),
+                let message = if receipt.is_shadowed() {
+                    format!(
+                        "Global active context: {} [{}]; effective here at commit: {} [{}] ({}). Directory binding takes precedence.",
+                        receipt.global_context(),
+                        profile_route_summary(receipt.global_profiles()),
+                        receipt.effective_context(),
+                        profile_route_summary(receipt.effective_profiles()),
+                        receipt.source().label()
+                    )
+                } else {
+                    format!(
+                        "Global active context: {} [{}]; effective here at commit: {} [{}] ({}).",
+                        receipt.global_context(),
+                        profile_route_summary(receipt.global_profiles()),
+                        receipt.effective_context(),
+                        profile_route_summary(receipt.effective_profiles()),
+                        receipt.source().label()
+                    )
                 };
                 app.set_message(MessageLevel::Info, message);
                 None
@@ -877,27 +888,40 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn draw_confirmation(frame: &mut Frame<'_>, area: Rect, pending: &PendingActivation) {
-    let popup = centered_rect(70, 12, area);
+    let popup = centered_rect(76, 15, area);
     frame.render_widget(Clear, popup);
-    let previous_billing = billing_summary(pending.change.previous_domains());
-    let target_billing = billing_summary(pending.change.target_domains());
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
-            "Billing domain change",
+            "Account profile change",
             Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(format!(
-            "Current billing context: {}",
+            "Current global context: {}",
             pending.change.previous()
         )),
-        Line::from(format!("Current billing: {previous_billing}")),
         Line::from(format!("New global context: {}", pending.change.target())),
-        Line::from(format!("New billing: {target_billing}")),
-        Line::from(""),
-        Line::from("This may charge a different account or organization."),
-        Line::from("Press y to activate, or n/Esc to cancel."),
     ];
+    for (provider, (previous, target)) in [Provider::Claude, Provider::Codex].into_iter().zip(
+        pending
+            .change
+            .previous_profiles()
+            .iter()
+            .zip(pending.change.target_profiles()),
+    ) {
+        if previous != target {
+            lines.push(Line::from(format!(
+                "{provider}: {} -> {}",
+                profile_selection_summary(previous.as_ref()),
+                profile_selection_summary(target.as_ref())
+            )));
+        }
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from("The selected account or organization may be different."),
+        Line::from("Press y to activate, or n/Esc to cancel."),
+    ]);
     frame.render_widget(
         Paragraph::new(lines)
             .block(
@@ -911,18 +935,31 @@ fn draw_confirmation(frame: &mut Frame<'_>, area: Rect, pending: &PendingActivat
     );
 }
 
-fn billing_summary(domains: [Option<crate::model::BillingDomain>; 2]) -> String {
-    let summary = [Provider::Claude, Provider::Codex]
+fn profile_selection_summary(selection: Option<&activation::ProfileSelection>) -> String {
+    selection.map_or_else(
+        || "none".to_owned(),
+        |selection| {
+            format!(
+                "{} ({}, {})",
+                selection.id(),
+                selection.auth_label(),
+                selection.billing_domain()
+            )
+        },
+    )
+}
+
+fn profile_route_summary(profiles: &[Option<activation::ProfileSelection>; 2]) -> String {
+    [Provider::Claude, Provider::Codex]
         .into_iter()
-        .zip(domains)
-        .filter_map(|(provider, domain)| domain.map(|domain| format!("{provider}: {domain}")))
+        .zip(profiles)
+        .filter_map(|(provider, profile)| {
+            profile
+                .as_ref()
+                .map(|profile| format!("{provider}={}", profile_selection_summary(Some(profile))))
+        })
         .collect::<Vec<_>>()
-        .join(", ");
-    if summary.is_empty() {
-        "none".to_owned()
-    } else {
-        summary
-    }
+        .join(", ")
 }
 
 fn detail_heading(value: impl Into<String>) -> Line<'static> {
@@ -1319,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn billing_modal_cancel_and_confirm_use_the_shared_activation_service() {
+    fn account_profile_modal_cancel_and_confirm_use_the_shared_activation_service() {
         let (_temporary, store, mut app, personal, work) = activation_app();
         handle_key(
             &mut app,
@@ -1333,7 +1370,10 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         assert!(app.pending_activation.is_some());
-        assert!(render_text(&app, 100, 28).contains("Billing domain change"));
+        let rendered = render_text(&app, 100, 28);
+        assert!(rendered.contains("Account profile change"));
+        assert!(rendered.contains("claude:personal"));
+        assert!(rendered.contains("claude:work"));
 
         handle_key(
             &mut app,
@@ -1366,12 +1406,12 @@ mod tests {
         assert!(
             app.message
                 .as_ref()
-                .is_some_and(|message| message.text.contains("Active context: work"))
+                .is_some_and(|message| message.text.contains("Global active context: work"))
         );
     }
 
     #[test]
-    fn stale_billing_modal_requires_reviewing_the_updated_change() {
+    fn stale_account_profile_modal_requires_reviewing_the_updated_change() {
         let (_temporary, store, mut app, _personal, work) = activation_app();
         handle_key(
             &mut app,
@@ -1413,7 +1453,7 @@ mod tests {
                     .codex = Some(codex_id);
                 Ok(())
             })
-            .unwrap_or_else(|error| panic!("change billing fingerprint: {error}"));
+            .unwrap_or_else(|error| panic!("change profile fingerprint: {error}"));
 
         handle_key(
             &mut app,
@@ -1422,7 +1462,8 @@ mod tests {
         );
         assert!(app.pending_activation.is_some());
         assert!(app.message.as_ref().is_some_and(|message| {
-            message.text.contains("Context state changed") && message.level == MessageLevel::Warning
+            message.text.contains("Context or profile state changed")
+                && message.level == MessageLevel::Warning
         }));
         let (_, state) = store
             .load_metadata()

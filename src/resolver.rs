@@ -109,6 +109,18 @@ pub fn resolve_context(
         path: cwd.to_path_buf(),
         source,
     })?;
+    resolve_context_at_canonical_directory(config, state, &canonical_cwd)
+}
+
+/// Resolve an implicit context for a directory path that the caller already canonicalized.
+///
+/// Keeping filesystem work outside metadata write locks lets activation create a receipt
+/// from one consistent metadata snapshot without holding a lock across I/O.
+pub(crate) fn resolve_context_at_canonical_directory(
+    config: &Config,
+    state: &MutableState,
+    canonical_cwd: &Path,
+) -> Result<ResolvedContext> {
     if let Some(binding) = config
         .bindings
         .iter()

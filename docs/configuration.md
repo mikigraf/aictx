@@ -69,7 +69,7 @@ Do not paste this example wholesale: provider/auth/billing combinations, state p
 
 ## Settings
 
-- `require_billing_confirmation_on_change`: when `true`, changing to a context with a different provider billing domain requires terminal confirmation or `aictx use --yes`.
+- `require_billing_confirmation_on_change`: when `true`, changing any exact provider-profile selection requires terminal confirmation or `aictx use --yes`, including two profiles with the same billing domain. The legacy setting name is kept so version 1 configuration files remain compatible.
 - `show_run_banner`: prints the selected context/profile/auth/billing/source before a run unless global `--quiet` is used.
 - `telemetry`: must remain `false`. Telemetry is not implemented and validation rejects `true`.
 

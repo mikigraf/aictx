@@ -167,6 +167,19 @@ fn use_updates_only_mutable_state_and_bindings_take_precedence() {
             "personal",
         ]),
     );
+    let receipt = run_ok(
+        aictx(&root)
+            .current_dir(&company)
+            .args(["use", "work", "--yes"]),
+    );
+    let receipt = String::from_utf8_lossy(&receipt.stdout);
+    assert!(receipt.contains("Global active context: work"));
+    assert!(receipt.contains("Global profiles: claude=claude:work (api-key, Anthropic API)"));
+    assert!(receipt.contains("Effective here at commit: personal (directory binding)"));
+    assert!(receipt.contains(
+        "Effective profiles: claude=claude:personal (subscription-token, Claude subscription)"
+    ));
+    assert!(receipt.contains("directory binding takes precedence"));
     let output = run_ok(aictx(&root).current_dir(&company).arg("current"));
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "personal");
 
@@ -376,7 +389,7 @@ fn case_folded_profile_add_is_rejected_without_disturbing_existing_state() {
 }
 
 #[test]
-fn billing_domain_changes_require_explicit_non_interactive_confirmation() {
+fn account_profile_changes_require_explicit_non_interactive_confirmation() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("aictx");
     run_ok(aictx(&root).arg("init"));
@@ -396,7 +409,7 @@ fn billing_domain_changes_require_explicit_non_interactive_confirmation() {
         "claude",
         "work",
         "--auth",
-        "api-key",
+        "subscription-token",
         "--secret-ref",
         "keyring://aictx/claude-work",
     ]));
@@ -408,7 +421,7 @@ fn billing_domain_changes_require_explicit_non_interactive_confirmation() {
         .output()
         .unwrap_or_else(|error| panic!("run unconfirmed use: {error}"));
     assert_eq!(output.status.code(), Some(14));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("billing-domain change"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("account profile change"));
     let output = run_ok(aictx(&root).arg("current"));
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "personal");
 

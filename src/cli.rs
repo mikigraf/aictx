@@ -204,7 +204,7 @@ pub enum ContextCommand {
 #[derive(Debug, Args)]
 pub struct UseArgs {
     pub context: Name,
-    /// Confirm a billing-domain change without an interactive prompt.
+    /// Confirm an account-profile change without an interactive prompt.
     #[arg(long, short = 'y')]
     pub yes: bool,
 }

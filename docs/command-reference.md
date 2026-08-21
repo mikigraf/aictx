@@ -73,7 +73,7 @@ aictx use <name> [--yes]
 aictx current
 ```
 
-At least one provider is required when adding a context. An active or directory-bound context cannot be removed. `use` asks for confirmation if the configured billing domain changes; `--yes` is required for that change in non-interactive use. `current` prints the resolved context for the current directory.
+At least one provider is required when adding a context. An active or directory-bound context cannot be removed. `use` asks for confirmation whenever an exact provider-profile selection changes, even when the old and new profiles use the same billing domain; `--yes` is required for that change in non-interactive use. Its receipt separates the global selection from any directory binding effective in the current directory. `current` prints the resolved context for the current directory.
 
 ## Authentication
 

@@ -122,7 +122,7 @@ aictx
 
 The dashboard shows contexts, active and default selection, directory resolution, profile IDs, authentication modes, and billing domains. It never reads secret values or starts a vendor login. Profile creation, login, logout, and vendor runs stay in the explicit CLI commands.
 
-Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. A billing-domain change opens a confirmation dialog before state is written.
+Use the arrow keys or `j` and `k` to move. Press `Enter` to activate a context, `r` to reload, `?` for help, and `q` or `Esc` to leave. Changing any selected provider profile opens a confirmation dialog before state is written, even when both profiles use the same billing type.
 
 The dashboard opens only when standard input and output are terminals. Bare `aictx --non-interactive` and redirected use fail instead of entering raw terminal mode. Non-interactive commands remain available for scripts, while browser login, terminal prompts, and native-keyring access fail closed when interaction is disabled.
 
@@ -143,7 +143,7 @@ For each run, `aictx` uses the first available choice in this order:
 4. the active context
 5. the default context
 
-`aictx use work` updates only the small mutable state file. It does not copy credentials or rewrite vendor homes.
+`aictx use work` updates only the small mutable state file. It does not copy credentials or rewrite vendor homes. The result shows the selected global context and, when a directory binding takes precedence, the different context and provider profiles effective in the current directory.
 
 Bind a directory tree when one checkout should always use the same context:
 
