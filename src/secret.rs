@@ -102,10 +102,10 @@ impl SecretManager {
         enforce_secret_size(secret.expose_secret().len())?;
         let SecretRef::Keyring { service, account } = reference;
         let entry = keyring::Entry::new(service, account)
-            .map_err(|error| Error::CredentialStore(error.to_string()))?;
+            .map_err(|error| credential_store_error(error, account))?;
         entry
             .set_password(secret.expose_secret())
-            .map_err(|error| Error::CredentialStore(error.to_string()))
+            .map_err(|error| credential_store_error(error, account))
     }
 
     pub fn delete(&self, reference: &SecretRef, non_interactive: bool) -> Result<bool> {
@@ -117,11 +117,11 @@ impl SecretManager {
         }
         let SecretRef::Keyring { service, account } = reference;
         let entry = keyring::Entry::new(service, account)
-            .map_err(|error| Error::CredentialStore(error.to_string()))?;
+            .map_err(|error| credential_store_error(error, account))?;
         match entry.delete_credential() {
             Ok(()) => Ok(true),
             Err(keyring::Error::NoEntry) => Ok(false),
-            Err(error) => Err(Error::CredentialStore(error.to_string())),
+            Err(error) => Err(credential_store_error(error, account)),
         }
     }
 
@@ -147,10 +147,10 @@ impl SecretProvider for SecretManager {
         }
         let SecretRef::Keyring { service, account } = reference;
         let entry = keyring::Entry::new(service, account)
-            .map_err(|error| Error::CredentialStore(error.to_string()))?;
+            .map_err(|error| credential_store_error(error, account))?;
         match entry.get_password() {
             Ok(secret) if secret.is_empty() => Err(Error::CredentialUnavailable {
-                profile: format!("keyring account {account}"),
+                profile: "OS keyring".to_owned(),
                 reason: "stored credential is empty".to_owned(),
             }),
             Ok(secret) => {
@@ -158,12 +158,17 @@ impl SecretProvider for SecretManager {
                 Ok(secret.into())
             }
             Err(keyring::Error::NoEntry) => Err(Error::CredentialUnavailable {
-                profile: format!("keyring account {account}"),
+                profile: "OS keyring".to_owned(),
                 reason: "no credential is stored".to_owned(),
             }),
-            Err(error) => Err(Error::CredentialStore(error.to_string())),
+            Err(error) => Err(credential_store_error(error, account)),
         }
     }
+}
+
+fn credential_store_error(error: impl fmt::Display, account: &str) -> Error {
+    let detail = error.to_string().replace(account, "<redacted>");
+    Error::CredentialStore(detail)
 }
 
 pub fn parse_profile_secret_ref(profile_id: &ProfileId, value: Option<&str>) -> Result<SecretRef> {
@@ -897,6 +902,19 @@ mod tests {
     fn debug_never_exposes_secret() {
         let secret: SecretString = "canary-secret".into();
         assert!(!format!("{secret:?}").contains("canary-secret"));
+    }
+
+    #[test]
+    fn keyring_backend_errors_redact_the_opaque_account_handle() {
+        let account = "private-keyring-account-canary";
+        let error = credential_store_error(
+            format!("ambiguous keyring entries for service=ctxlane account={account}"),
+            account,
+        );
+        let rendered = error.render_for_terminal();
+
+        assert!(!rendered.contains(account));
+        assert!(rendered.contains("account=<redacted>"));
     }
 
     #[test]

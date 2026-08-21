@@ -134,6 +134,9 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
                     trusted_runner: args.trusted_runner,
                 },
             )
+            .map_err(|error| {
+                contextualize_run_credential_error(error, &resolved.id, &resolved.profile)
+            })
         }
         Some(Command::Status(args)) => execute_status(
             &store,
@@ -245,6 +248,29 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
         }
         Some(Command::Migrate(args)) => execute_migration(cli.root.as_deref(), args.command),
     }
+}
+
+fn contextualize_run_credential_error(
+    error: Error,
+    profile_id: &ProfileId,
+    profile: &Profile,
+) -> Error {
+    let recovery = match profile {
+        Profile::Claude {
+            auth: ClaudeAuth::SubscriptionToken,
+            ..
+        } => crate::error::CredentialRecovery::ClaudeSetupToken,
+        Profile::Claude {
+            auth: ClaudeAuth::Wif,
+            ..
+        } => crate::error::CredentialRecovery::ClaudeWif,
+        Profile::Claude {
+            auth: ClaudeAuth::ApiKey,
+            ..
+        }
+        | Profile::Codex { .. } => crate::error::CredentialRecovery::Login,
+    };
+    error.for_selected_credential(profile_id, recovery)
 }
 
 /// Hold the migration startup lock and apply rename policy before metadata access.
@@ -1920,6 +1946,130 @@ const fn title(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "Claude",
         Provider::Codex => "Codex",
+    }
+}
+
+#[cfg(test)]
+mod credential_error_tests {
+    use super::*;
+
+    fn claude_profile(auth: ClaudeAuth) -> Profile {
+        Profile::Claude {
+            billing_domain: match auth {
+                ClaudeAuth::SubscriptionToken => BillingDomain::ClaudeSubscription,
+                ClaudeAuth::ApiKey | ClaudeAuth::Wif => BillingDomain::AnthropicApi,
+            },
+            auth,
+            state_dir: PathBuf::from("/synthetic/claude-state"),
+            secret_ref: Some("keyring://ctxlane/private-handle".to_owned()),
+            account_hint: None,
+            expected_organization: None,
+            wif: None,
+        }
+    }
+
+    fn codex_profile(auth: CodexAuth) -> Profile {
+        Profile::Codex {
+            billing_domain: match auth {
+                CodexAuth::ChatgptOauth | CodexAuth::AccessToken => {
+                    BillingDomain::ChatgptSubscription
+                }
+                CodexAuth::ApiKey => BillingDomain::OpenaiApi,
+            },
+            auth,
+            state_dir: PathBuf::from("/synthetic/codex-state"),
+            secret_ref: (auth != CodexAuth::ChatgptOauth)
+                .then(|| "keyring://ctxlane/private-handle".to_owned()),
+            account_hint: None,
+            expected_workspace_id: None,
+            credential_store: CodexCredentialStore::File,
+            trusted_runners_only: false,
+        }
+    }
+
+    #[test]
+    fn run_errors_add_auth_specific_recovery_without_keyring_handles() {
+        let opaque_handle = "private-keyring-account-canary";
+        let missing = || Error::CredentialUnavailable {
+            profile: format!("keyring account {opaque_handle}"),
+            reason: "no credential is stored".to_owned(),
+        };
+        let cases = [
+            (
+                "claude:team",
+                claude_profile(ClaudeAuth::SubscriptionToken),
+                "`ctxlane login claude:team --generate`",
+            ),
+            (
+                "claude:api",
+                claude_profile(ClaudeAuth::ApiKey),
+                "`ctxlane login claude:api`",
+            ),
+            (
+                "codex:api",
+                codex_profile(CodexAuth::ApiKey),
+                "`ctxlane login codex:api`",
+            ),
+            (
+                "codex:oauth",
+                codex_profile(CodexAuth::ChatgptOauth),
+                "`ctxlane login codex:oauth`",
+            ),
+            (
+                "codex:managed",
+                codex_profile(CodexAuth::AccessToken),
+                "`ctxlane login codex:managed`",
+            ),
+        ];
+
+        for (profile_id, profile, expected_hint) in cases {
+            let profile_id: ProfileId = profile_id
+                .parse()
+                .unwrap_or_else(|error| panic!("parse test profile: {error}"));
+            let error = contextualize_run_credential_error(missing(), &profile_id, &profile);
+            let rendered = error.render_for_terminal();
+
+            assert_eq!(error.exit_code(), 11);
+            assert!(rendered.contains(&format!("credential unavailable for {profile_id}")));
+            assert!(rendered.contains(expected_hint));
+            assert!(!rendered.contains(opaque_handle));
+        }
+    }
+
+    #[test]
+    fn run_errors_use_wif_file_recovery_instead_of_login() {
+        let profile_id: ProfileId = "claude:ci"
+            .parse()
+            .unwrap_or_else(|error| panic!("parse test profile: {error}"));
+        let error = contextualize_run_credential_error(
+            Error::CredentialUnavailable {
+                profile: "external identity source".to_owned(),
+                reason: "identity token is unavailable".to_owned(),
+            },
+            &profile_id,
+            &claude_profile(ClaudeAuth::Wif),
+        );
+        let rendered = error.render_for_terminal();
+
+        assert_eq!(error.exit_code(), 11);
+        assert!(rendered.contains("`ctxlane profile show claude:ci`"));
+        assert!(rendered.contains("WIF identity-token file"));
+        assert!(!rendered.contains("ctxlane login"));
+    }
+
+    #[test]
+    fn run_error_context_does_not_change_non_credential_categories() {
+        let profile_id: ProfileId = "claude:work"
+            .parse()
+            .unwrap_or_else(|error| panic!("parse test profile: {error}"));
+        let error = contextualize_run_credential_error(
+            Error::PolicyRefused("synthetic refusal".to_owned()),
+            &profile_id,
+            &claude_profile(ClaudeAuth::SubscriptionToken),
+        );
+
+        assert!(matches!(error, Error::PolicyRefused(_)));
+        assert_eq!(error.exit_code(), 15);
     }
 }
 

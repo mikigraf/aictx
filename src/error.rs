@@ -2,9 +2,16 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::model::ProfileId;
+use crate::model::{ProfileId, Provider};
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRecovery {
+    Login,
+    ClaudeSetupToken,
+    ClaudeWif,
+}
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -19,6 +26,13 @@ pub enum Error {
 
     #[error("credential unavailable for {profile}: {reason}")]
     CredentialUnavailable { profile: String, reason: String },
+
+    #[error("credential unavailable for {profile}: {reason}")]
+    SelectedCredentialUnavailable {
+        profile: ProfileId,
+        reason: String,
+        recovery: CredentialRecovery,
+    },
 
     #[error("credential expired for {0}")]
     CredentialExpired(String),
@@ -103,7 +117,9 @@ impl Error {
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::ProfileNotFound(_) | Self::ContextNotFound(_) => 10,
-            Self::CredentialUnavailable { .. } | Self::CredentialStore(_) => 11,
+            Self::CredentialUnavailable { .. }
+            | Self::SelectedCredentialUnavailable { .. }
+            | Self::CredentialStore(_) => 11,
             Self::CredentialExpired(_) => 12,
             Self::IdentityMismatch(_) => 13,
             Self::InteractionRequired(_) => 14,
@@ -141,6 +157,9 @@ impl Error {
             Self::CredentialUnavailable { profile, .. } | Self::CredentialExpired(profile) => {
                 login_hint(profile)
             }
+            Self::SelectedCredentialUnavailable {
+                profile, recovery, ..
+            } => selected_credential_hint(profile, *recovery),
             Self::IdentityMismatch(_) => {
                 "Run `ctxlane profile show <provider:name>`, verify the expected organization or workspace, then log in again."
                     .to_owned()
@@ -199,6 +218,45 @@ impl Error {
             _ => self.to_string(),
         }
     }
+
+    pub(crate) fn for_selected_credential(
+        self,
+        profile: &ProfileId,
+        recovery: CredentialRecovery,
+    ) -> Self {
+        match self {
+            Self::CredentialUnavailable { reason, .. } => Self::SelectedCredentialUnavailable {
+                profile: profile.clone(),
+                reason,
+                recovery,
+            },
+            error => error,
+        }
+    }
+}
+
+fn selected_credential_hint(profile: &ProfileId, recovery: CredentialRecovery) -> String {
+    match recovery {
+        CredentialRecovery::Login => {
+            format!("Run `ctxlane login {profile}` to store or refresh this credential.")
+        }
+        CredentialRecovery::ClaudeSetupToken
+            if profile.provider() == Provider::Claude && profile.name().as_str() == "personal" =>
+        {
+            "Run `ctxlane login claude:personal --generate` to create and store a new Claude setup token. You can also repair the default personal setup with `ctxlane init --guided`."
+                .to_owned()
+        }
+        CredentialRecovery::ClaudeSetupToken => {
+            format!(
+                "Run `ctxlane login {profile} --generate` to create and store a new Claude setup token."
+            )
+        }
+        CredentialRecovery::ClaudeWif => {
+            format!(
+                "Run `ctxlane profile show {profile}`, verify its configured WIF identity-token file, then try again."
+            )
+        }
+    }
 }
 
 fn login_hint(profile: &str) -> String {
@@ -219,4 +277,67 @@ fn terminal_safe(value: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(value: &str) -> ProfileId {
+        value
+            .parse()
+            .unwrap_or_else(|error| panic!("parse test profile: {error}"))
+    }
+
+    #[test]
+    fn selected_claude_subscription_hints_use_the_safe_profile_id() {
+        let opaque_handle = "private-keyring-account-canary";
+        let missing = Error::CredentialUnavailable {
+            profile: format!("keyring account {opaque_handle}"),
+            reason: "no credential is stored".to_owned(),
+        };
+        let rendered = missing
+            .for_selected_credential(
+                &profile("claude:work"),
+                CredentialRecovery::ClaudeSetupToken,
+            )
+            .render_for_terminal();
+
+        assert!(rendered.contains("credential unavailable for claude:work"));
+        assert!(rendered.contains("`ctxlane login claude:work --generate`"));
+        assert!(!rendered.contains(opaque_handle));
+    }
+
+    #[test]
+    fn personal_claude_subscription_uses_the_guided_recovery_flow() {
+        let rendered = Error::CredentialUnavailable {
+            profile: "OS keyring".to_owned(),
+            reason: "stored credential is empty".to_owned(),
+        }
+        .for_selected_credential(
+            &profile("claude:personal"),
+            CredentialRecovery::ClaudeSetupToken,
+        )
+        .render_for_terminal();
+
+        assert!(rendered.contains("credential unavailable for claude:personal"));
+        assert!(rendered.contains("`ctxlane login claude:personal --generate`"));
+        assert!(rendered.contains("`ctxlane init --guided`"));
+        assert!(!rendered.contains("OS keyring"));
+    }
+
+    #[test]
+    fn selected_api_credentials_use_exact_login_without_generation() {
+        let error = Error::CredentialUnavailable {
+            profile: "OS keyring".to_owned(),
+            reason: "no credential is stored".to_owned(),
+        }
+        .for_selected_credential(&profile("codex:work"), CredentialRecovery::Login);
+        let rendered = error.render_for_terminal();
+
+        assert_eq!(error.exit_code(), 11);
+        assert!(rendered.contains("credential unavailable for codex:work"));
+        assert!(rendered.contains("`ctxlane login codex:work`"));
+        assert!(!rendered.contains("--generate"));
+    }
 }

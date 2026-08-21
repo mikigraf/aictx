@@ -8,7 +8,7 @@ use crate::model::{AuthArg, CodexCredentialStore, Name, ProfileId, Provider};
 #[command(
     name = "ctxlane",
     version,
-    about = "Switch between Claude Code and Codex accounts with isolated local state",
+    about = "Switch and isolate personal, work, and CI accounts for Claude Code and Codex",
     long_about = None,
     propagate_version = true,
     after_help = "Run `ctxlane` with no subcommand to open the interactive terminal dashboard.",
@@ -159,9 +159,13 @@ pub enum ProfileCommand {
     /// List profiles without resolving or exposing credentials.
     List,
     /// Show one profile's non-secret metadata.
-    Show { profile: ProfileId },
+    Show {
+        /// Provider profile ID, for example `claude:personal` or `codex:work`.
+        profile: ProfileId,
+    },
     /// Remove metadata and detach managed vendor state. Does not revoke remotely.
     Remove {
+        /// Provider profile ID, for example `claude:personal` or `codex:work`.
         profile: ProfileId,
         /// Also delete the wrapper-held OS-keyring credential.
         #[arg(long)]
@@ -230,23 +234,37 @@ pub struct ContextArgs {
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
     /// Add a context mapping to one or both provider profiles.
+    #[command(
+        after_long_help = "Examples:\n  ctxlane context add personal --claude claude:personal\n  ctxlane context add work --claude claude:work --codex codex:work"
+    )]
     Add {
+        /// Short local context name, for example `personal` or `work`.
         name: Name,
-        #[arg(long)]
+        /// Claude profile selected by this context.
+        #[arg(long, value_name = "PROFILE")]
         claude: Option<ProfileId>,
-        #[arg(long)]
+        /// Codex profile selected by this context.
+        #[arg(long, value_name = "PROFILE")]
         codex: Option<ProfileId>,
     },
     /// List contexts.
     List,
     /// Show one context.
-    Show { name: Name },
+    Show {
+        /// Context name to inspect.
+        name: Name,
+    },
     /// Remove a context that is not active or referenced by bindings.
-    Remove { name: Name },
+    Remove {
+        /// Context name to remove.
+        name: Name,
+    },
 }
 
 #[derive(Debug, Args)]
+#[command(after_long_help = "Examples:\n  ctxlane use work\n  ctxlane use work --yes")]
 pub struct UseArgs {
+    /// Configured context to make globally active.
     pub context: Name,
     /// Confirm an account-profile change without an interactive prompt.
     #[arg(long, short = 'y')]
@@ -273,6 +291,7 @@ pub struct LoginArgs {
 
 #[derive(Debug, Args)]
 pub struct LogoutArgs {
+    /// Provider profile ID, for example `claude:personal` or `codex:work`.
     pub profile: ProfileId,
 }
 
@@ -290,6 +309,7 @@ pub struct RunArgs {
     /// Explicitly assert that the current CI/automation runner is private and trusted.
     #[arg(long)]
     pub trusted_runner: bool,
+    /// Official vendor CLI to run with the selected profile.
     #[arg(value_enum)]
     pub provider: Provider,
     /// Accepted arguments forwarded unchanged to the official vendor executable.
@@ -308,18 +328,27 @@ pub struct StatusArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_long_help = "Examples:\n  ctxlane bind . personal\n  ctxlane bindings")]
 pub struct BindArgs {
+    /// Existing directory whose tree should use this context.
     pub path: PathBuf,
+    /// Configured context selected inside the directory tree.
     pub context: Name,
 }
 
 #[derive(Debug, Args)]
+#[command(after_long_help = "Example:\n  ctxlane unbind .")]
 pub struct UnbindArgs {
+    /// Directory path whose binding should be removed; it may no longer exist.
     pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  ctxlane doctor --provider claude\n  ctxlane doctor --provider codex --json"
+)]
 pub struct DoctorArgs {
+    /// Limit vendor binary, settings, and profile checks to one provider.
     #[arg(long, value_enum)]
     pub provider: Option<Provider>,
     /// Emit a stable JSON report for support bundles and automation.
@@ -336,8 +365,13 @@ pub struct CredentialArgs {
 #[derive(Debug, Subcommand)]
 pub enum CredentialCommand {
     /// Check one profile or every profile without printing secret values.
+    #[command(
+        after_long_help = "Examples:\n  ctxlane credential check claude:personal\n  ctxlane credential check --all"
+    )]
     Check {
+        /// Provider profile ID to check, for example `claude:personal`.
         profile: Option<ProfileId>,
+        /// Check every configured profile.
         #[arg(long, conflicts_with = "profile")]
         all: bool,
     },
@@ -354,20 +388,24 @@ pub enum Shell {
 
 #[derive(Debug, Args)]
 pub struct EnvArgs {
+    /// Resolve this context instead of the current directory selection.
     #[arg(long)]
     pub context: Option<Name>,
+    /// Shell syntax to emit.
     #[arg(long, value_enum)]
     pub shell: Shell,
 }
 
 #[derive(Debug, Args)]
 pub struct ShellInitArgs {
+    /// Shell whose forwarding functions should be generated.
     #[arg(value_enum)]
     pub shell: Shell,
 }
 
 #[derive(Debug, Args)]
 pub struct CompletionsArgs {
+    /// Shell whose static completion definitions should be generated.
     #[arg(value_enum)]
     pub shell: clap_complete::Shell,
 }

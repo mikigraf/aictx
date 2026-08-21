@@ -225,6 +225,9 @@ fn every_public_help_surface_is_parseable_and_actionable() {
         &["env", "--help"],
         &["shell-init", "--help"],
         &["completions", "--help"],
+        &["migrate", "--help"],
+        &["migrate", "aictx", "--help"],
+        &["migrate", "recover", "--help"],
     ];
 
     for arguments in surfaces {
@@ -269,4 +272,40 @@ fn every_public_help_surface_is_parseable_and_actionable() {
     let profile_add = String::from_utf8_lossy(&profile_add.stdout);
     assert!(profile_add.contains("Short local name"));
     assert!(profile_add.contains("Examples:"));
+
+    let context_add = ctxlane(&root)
+        .args(["context", "add", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("run context-add help: {error}"));
+    let context_add = String::from_utf8_lossy(&context_add.stdout);
+    assert!(context_add.contains("Short local context name"));
+    assert!(context_add.contains("Claude profile selected"));
+    assert!(context_add.contains("Codex profile selected"));
+    assert!(context_add.contains("ctxlane context add personal"));
+
+    let bind = ctxlane(&root)
+        .args(["bind", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("run bind help: {error}"));
+    let bind = String::from_utf8_lossy(&bind.stdout);
+    assert!(bind.contains("Existing directory"));
+    assert!(bind.contains("Configured context selected"));
+    assert!(bind.contains("ctxlane bind . personal"));
+
+    let doctor = ctxlane(&root)
+        .args(["doctor", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("run doctor help: {error}"));
+    let doctor = String::from_utf8_lossy(&doctor.stdout);
+    assert!(doctor.contains("Limit vendor binary"));
+    assert!(doctor.contains("ctxlane doctor --provider claude"));
+    assert!(doctor.contains("ctxlane doctor --provider codex --json"));
+
+    let credential_check = ctxlane(&root)
+        .args(["credential", "check", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("run credential-check help: {error}"));
+    let credential_check = String::from_utf8_lossy(&credential_check.stdout);
+    assert!(credential_check.contains("ctxlane credential check claude:personal"));
+    assert!(credential_check.contains("ctxlane credential check --all"));
 }

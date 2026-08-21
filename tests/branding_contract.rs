@@ -22,6 +22,7 @@ const LEGACY_OCCURRENCE_ALLOWLIST: &[(&str, usize)] = &[
     ("src/runner.rs", 10),
     ("src/secret.rs", 1),
     ("tests/cli_workflow.rs", 3),
+    ("tests/error_contract.rs", 1),
     ("tests/fixtures/v0_1_0/README.md", 2),
     ("tests/fixtures/v0_1_0/malformed/config/config.toml.in", 1),
     (

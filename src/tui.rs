@@ -569,7 +569,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .bg(ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  Claude Code and Codex account switcher"),
+        Span::raw("  Local account boundary for Claude Code and Codex"),
     ]);
     let status = Line::from(format!(
         " Global: {active}   Default: {default}   Here: {resolved}"
