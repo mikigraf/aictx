@@ -36,11 +36,29 @@ jobs:
           toolchain: 1.97.1
           components: clippy,rustfmt
 
+      - name: Install pinned Python for schema validation
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.11
+
       - name: Cache Cargo build data
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Verify locked dependency graph
         run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Validate published automation contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          schema_venv="${RUNNER_TEMP}/ctxlane-schema-validation"
+          python3 -m venv "$schema_venv"
+          "$schema_venv/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement schemas/tests/requirements.txt
+          "$schema_venv/bin/python" schemas/tests/validate_contracts.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod activation;
+pub mod automation;
 pub mod binary;
 mod brand;
 pub mod cli;

@@ -73,6 +73,7 @@ jobs:
 
           cp README.md LICENSE SECURITY.md THREAT_MODEL.md CONTRIBUTING.md CHANGELOG.md "$package/"
           cp -R docs "$package/docs"
+          cp -R schemas "$package/schemas"
           "$binary" completions bash > "$package/completions/ctxlane.bash"
           "$binary" completions zsh > "$package/completions/_ctxlane"
           "$binary" completions fish > "$package/completions/ctxlane.fish"
