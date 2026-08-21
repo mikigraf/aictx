@@ -86,7 +86,7 @@ CI=true GITHUB_EVENT_NAME=push cargo +1.97.1 llvm-cov \
   --fail-under-regions 75
 ```
 
-For commit `1fa04f9` on macOS arm64 on 2026-08-21, the exact command above used Rust 1.97.1 and `cargo-llvm-cov` 0.9.0, ran 152 tests, and recorded 79.19% region coverage, 63.48% function coverage, and 76.16% line coverage. The enforced floors are 75%, 60%, and 70%, respectively. Platform gating changes the test count and compiled lines on Windows and Linux. Use the hosted CI and coverage reports for the exact published revision as final release evidence.
+For commit `d28a8a7` on macOS arm64 on 2026-08-21, the exact command above used Rust 1.97.1 and `cargo-llvm-cov` 0.9.0, ran 159 tests, and recorded 79.47% region coverage, 63.81% function coverage, and 76.59% line coverage. The enforced floors are 75%, 60%, and 70%, respectively. Platform gating changes the test count and compiled lines on Windows and Linux. Use the hosted CI and coverage reports for the exact published revision as final release evidence.
 
 Coverage is a map of exercised Rust code, not a security score or a provider compatibility claim. Host-only reports do not include code compiled only for another operating system. Record the revision, OS, architecture, Rust version, command, and tool version with every final published measurement. Stable Rust region instrumentation does not provide a reliable branch percentage, so do not present an empty branch column as complete branch coverage.
 
