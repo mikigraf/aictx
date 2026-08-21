@@ -2,6 +2,7 @@
 
 pub mod activation;
 pub mod binary;
+mod brand;
 pub mod cli;
 pub mod commands;
 pub mod config;

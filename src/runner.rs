@@ -17,6 +17,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use crate::{
     Error, Result,
     binary::{ExternalProgram, resolve_external_binary, sanitize_search_path},
+    brand::is_wrapper_environment_key,
     config::{
         AppPaths, MetadataStore, ProfileLockGuard, acquire_profile_lock, ensure_secure_directory,
         validate_sensitive_file, write_secure_text,
@@ -26,14 +27,6 @@ use crate::{
 };
 
 pub const BLOCKED_ENVIRONMENT: &[&str] = &[
-    "AICTX_ROOT",
-    "AICTX_CONFIG_DIR",
-    "AICTX_DATA_DIR",
-    "AICTX_STATE_DIR",
-    "AICTX_CONTEXT",
-    "AICTX_CLAUDE_BIN",
-    "AICTX_CODEX_BIN",
-    "AICTX_TRUSTED_RUNNER",
     "CLAUDECODE",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -1924,6 +1917,7 @@ pub(crate) fn is_blocked_key(key: &OsStr) -> bool {
             key.get(..prefix.len())
                 .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
         })
+        || is_wrapper_environment_key(&key)
         || is_vendor_environment_key(&key)
 }
 
@@ -2210,6 +2204,40 @@ mod tests {
             environment.get(OsStr::new("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")),
             Some(&OsString::from("1"))
         );
+    }
+
+    #[test]
+    fn inherited_application_environment_prefixes_are_scrubbed() {
+        let environment = sanitized_inherited_environment([
+            ("LANG", "C"),
+            ("AICTX_PROFILE", "legacy-profile"),
+            ("AICTX_FUTURE_SELECTOR", "legacy-future"),
+            ("aictx_lowercase_future", "legacy-lowercase"),
+            ("CTXLANE_CONTEXT", "target-context"),
+            ("CTXLANE_FUTURE_SELECTOR", "target-future"),
+            ("ctxlane_lowercase_future", "target-lowercase"),
+            ("NOT_AICTX_PROFILE", "keep-me"),
+        ])
+        .unwrap_or_else(|error| panic!("environment should sanitize: {error}"));
+
+        assert_eq!(
+            environment.get(OsStr::new("LANG")),
+            Some(&OsString::from("C"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("NOT_AICTX_PROFILE")),
+            Some(&OsString::from("keep-me"))
+        );
+        for key in [
+            "AICTX_PROFILE",
+            "AICTX_FUTURE_SELECTOR",
+            "aictx_lowercase_future",
+            "CTXLANE_CONTEXT",
+            "CTXLANE_FUTURE_SELECTOR",
+            "ctxlane_lowercase_future",
+        ] {
+            assert!(!environment.contains_key(OsStr::new(key)), "key={key}");
+        }
     }
 
     #[test]
