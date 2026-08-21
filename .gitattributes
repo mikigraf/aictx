@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Frozen v0.1 migration snapshots must retain their exact committed bytes.
+tests/fixtures/v0_1_0/** -text
