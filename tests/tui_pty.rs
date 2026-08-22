@@ -26,6 +26,8 @@ const SECRET_REF_CANARY: &str = "keyring://pty-canary/never-render-this-secret-r
 const EDITED_ACCOUNT_LABEL: &str = "visible-smoke-account";
 const AUTOMATION_STORE_SENTINEL: &[u8] =
     b"not-a-sqlite-database\nstandalone-dashboard-boundary-canary\n";
+const AUTOMATION_AUTHORITY_SENTINEL: &[u8] =
+    b"not-valid-toml\nstandalone-dashboard-authority-canary\n";
 
 type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -543,12 +545,29 @@ fn add_invalid_automation_store_sentinel(root: &Path) -> std::path::PathBuf {
     database
 }
 
+fn add_invalid_automation_authority_sentinel(root: &Path) -> std::path::PathBuf {
+    let authority = root.join("config/automation-authority.toml");
+    std::fs::write(&authority, AUTOMATION_AUTHORITY_SENTINEL)
+        .unwrap_or_else(|error| panic!("write automation authority sentinel: {error}"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("secure automation authority sentinel: {error}"));
+    }
+
+    authority
+}
+
 #[test]
 fn dashboard_quits_after_resize_and_restores_terminal_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("ctxlane");
     initialize(&root);
     let database = add_invalid_automation_store_sentinel(&root);
+    let authority = add_invalid_automation_authority_sentinel(&root);
 
     let (code, output) = run_in_pty(&root, &[], b"q", true);
     assert_eq!(code, 0, "PTY output:\n{output}");
@@ -567,10 +586,16 @@ fn dashboard_quits_after_resize_and_restores_terminal_state() {
     );
     assert!(output.contains("\u{1b}[?25h"), "cursor was not restored");
     assert!(!output.contains("standalone-dashboard-boundary-canary"));
+    assert!(!output.contains("standalone-dashboard-authority-canary"));
     assert_eq!(
         std::fs::read(&database)
             .unwrap_or_else(|error| panic!("read automation store sentinel: {error}")),
         AUTOMATION_STORE_SENTINEL
+    );
+    assert_eq!(
+        std::fs::read(&authority)
+            .unwrap_or_else(|error| panic!("read automation authority sentinel: {error}")),
+        AUTOMATION_AUTHORITY_SENTINEL
     );
     for suffix in [
         "service.lock",

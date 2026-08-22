@@ -99,6 +99,15 @@ jobs:
       - name: Test all targets and features
         run: cargo test --all-targets --all-features --locked
 
+      - name: Qualify Linux connection pidfd attestation
+        if: runner.os == 'Linux'
+        env:
+          CTXLANE_REQUIRE_SO_PEERPIDFD: "1"
+        run: >-
+          cargo test --lib --all-features --locked
+          automation::attestation::linux::tests::native_socket_peer_credentials_are_kernel_derived
+          -- --exact
+
   msrv:
     name: Minimum supported Rust 1.89
     runs-on: ubuntu-latest

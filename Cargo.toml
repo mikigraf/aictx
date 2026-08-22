@@ -28,6 +28,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
 crossterm = "0.29.0"
 directories = "6.0.0"
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
@@ -43,14 +44,17 @@ toml_edit = "0.25.13"
 which = "8.0.5"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.4", features = ["process"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 signal-hook = "0.4.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["socket"] }
+rustix = { version = "1.1.4", features = ["event", "net", "process"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "functions", "hooks"] }
 
 [dev-dependencies]
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 portable-pty = "0.9.0"
 tempfile = "3.27.0"
 

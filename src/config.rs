@@ -13,6 +13,7 @@ use crate::{
     model::{Config, MutableState, Name, ProfileUid, Provider},
 };
 
+mod automation_paths;
 mod storage;
 mod upgrade;
 

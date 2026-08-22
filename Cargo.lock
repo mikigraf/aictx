@@ -579,6 +579,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "keyring",
+ "nix 0.31.3",
  "portable-pty",
  "ratatui",
  "rpassword",
@@ -1273,6 +1274,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.2",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
