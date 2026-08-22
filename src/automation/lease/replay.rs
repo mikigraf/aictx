@@ -6,7 +6,7 @@ use crate::automation::contracts::{
 
 use super::{EnvironmentName, clock::later};
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeaseBinding {
     pub(super) lease_id: LeaseId,
     pub(super) client_request_id: ClientRequestId,
@@ -24,6 +24,8 @@ pub struct LeaseBinding {
     pub(super) workspace_id: WorkspaceId,
     pub(super) environment: EnvironmentName,
     pub(super) initial_requested_ttl_seconds: u64,
+    pub(super) signed_maximum_ttl_seconds: u64,
+    pub(super) signed_maximum_session_seconds: u64,
     pub(super) caller_subject: CallerSubject,
     pub(super) host_identity: HostIdentity,
     pub(super) signed_authorization_expires_at: UtcTimestamp,
@@ -53,6 +55,11 @@ impl LeaseBinding {
             workspace_id: request.workspace_id.clone(),
             environment: request.environment.clone(),
             initial_requested_ttl_seconds: request.requested_ttl_seconds.get(),
+            signed_maximum_ttl_seconds: request.work_order_authorization.maximum_ttl_seconds.get(),
+            signed_maximum_session_seconds: request
+                .work_order_authorization
+                .maximum_session_seconds
+                .get(),
             caller_subject,
             host_identity,
             signed_authorization_expires_at: request.work_order_authorization.expires_at.clone(),

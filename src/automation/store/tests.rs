@@ -16,6 +16,8 @@ use crate::{
     model::InstallationUid,
 };
 
+use super::load_tests::{resolved_status, transition_to_revoked};
+
 struct Fixture {
     _temporary: TempDir,
     paths: AppPaths,
@@ -64,10 +66,13 @@ fn stamp(value: &str) -> UtcTimestamp {
 }
 
 fn request() -> IdentityLeaseRequest {
-    serde_json::from_str(include_str!(
+    let mut request: IdentityLeaseRequest = serde_json::from_str(include_str!(
         "../../../schemas/examples/identity-lease-request.v1.json"
     ))
-    .unwrap_or_else(|error| panic!("request fixture: {error}"))
+    .unwrap_or_else(|error| panic!("request fixture: {error}"));
+    request.work_order_authorization.not_before = stamp("2026-08-22T09:00:00Z");
+    request.work_order_authorization.expires_at = stamp("2026-08-23T14:00:00Z");
+    request
 }
 
 fn caller(value: &str) -> CallerSubject {
@@ -110,7 +115,7 @@ fn schema_settings_integrity_and_extension_boundary_are_enforced() {
         scalar::<i64>(connection, "PRAGMA application_id"),
         0x4354_584c
     );
-    assert_eq!(scalar::<i64>(connection, "PRAGMA user_version"), 1);
+    assert_eq!(scalar::<i64>(connection, "PRAGMA user_version"), 2);
     assert_eq!(scalar::<i64>(connection, "PRAGMA foreign_keys"), 1);
     assert_eq!(scalar::<String>(connection, "PRAGMA journal_mode"), "wal");
     assert_eq!(scalar::<i64>(connection, "PRAGMA synchronous"), 2);
@@ -128,9 +133,10 @@ fn schema_settings_integrity_and_extension_boundary_are_enforced() {
             connection,
             "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN (
                 'store_metadata', 'schema_migrations', 'service_generations', 'lease_requests',
-                'leases', 'capacity_reservations', 'lease_processes', 'audit_events')"
+                'leases', 'lease_runtime_clocks', 'capacity_reservations',
+                'lease_processes', 'audit_events')"
         ),
-        8
+        9
     );
     assert!(
         connection
@@ -513,27 +519,10 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
         )
         .unwrap_or_else(|error| panic!("begin: {error:?}"));
     let connection = ready.test_connection();
+    resolved_status(connection, crate::automation::contracts::LeaseStatus::Error);
     connection
         .execute_batch(
-            "UPDATE leases SET
-                status = 'ACTIVE',
-                effective_policy_digest = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                fencing_generation = 1,
-                clock_generation = service_generation,
-                execution_handle = 'exec_00000000000000000000000000',
-                principal_ref = 'principal:resolved',
-                workspace_ref = 'chatgpt-workspace:tenant',
-                auth_mode = 'wif', isolation = 'credential-isolated',
-                activated_at_utc = '2026-08-22T10:00:03Z',
-                activated_at_seconds = issued_at_seconds + 1, activated_at_nanos = 0,
-                expires_at_utc = '2026-08-22T11:00:02Z',
-                expires_at_seconds = issued_at_seconds + 3600, expires_at_nanos = 0,
-                expires_monotonic_nanos = zeroblob(16),
-                maximum_expires_at_utc = '2026-08-22T12:00:02Z',
-                maximum_expires_at_seconds = issued_at_seconds + 7200,
-                maximum_expires_at_nanos = 0,
-                maximum_expires_monotonic_nanos = zeroblob(16);
-             INSERT INTO lease_processes (
+            "INSERT INTO lease_processes (
                 process_id, lease_id, service_generation, state, execution_handle,
                 observed_fencing_generation, launch_intent_at_utc,
                 launch_intent_at_seconds, launch_intent_at_nanos
@@ -541,8 +530,7 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
                 'process_00000000000000000000000000', lease_id, service_generation,
                 'LAUNCH_INTENT', execution_handle, 1,
                 '2026-08-22T10:00:03Z', issued_at_seconds + 1, 0
-             FROM leases;
-             UPDATE leases SET status = 'ERROR', reason_code = 'internal-error';",
+             FROM leases;",
         )
         .unwrap_or_else(|error| panic!("resolved error setup: {error}"));
     assert_eq!(
@@ -569,12 +557,10 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
             )
             .is_err()
     );
+    transition_to_revoked(connection);
     connection
         .execute_batch(
-            "UPDATE leases SET status = 'REVOKED', reason_code = 'service-recovery',
-                terminal_at_utc = '2026-08-22T10:00:05Z',
-                terminal_at_seconds = issued_at_seconds + 3, terminal_at_nanos = 0;
-             UPDATE lease_processes SET state = 'EXITED',
+            "UPDATE lease_processes SET state = 'EXITED',
                 started_at_utc = '2026-08-22T10:00:03Z',
                 started_at_seconds = launch_intent_at_seconds, started_at_nanos = 0,
                 ended_at_utc = '2026-08-22T10:00:05Z',
@@ -650,7 +636,7 @@ fn installation_schema_and_migration_identity_fail_closed() {
         Connection::open(&database).unwrap_or_else(|error| panic!("raw open: {error}"));
     connection
         .execute(
-            "UPDATE schema_migrations SET checksum = ?1",
+            "UPDATE schema_migrations SET checksum = ?1 WHERE version = 1",
             [format!("sha256:{}", "0".repeat(64))],
         )
         .unwrap_or_else(|error| panic!("tamper checksum: {error}"));
@@ -669,7 +655,7 @@ fn installation_schema_and_migration_identity_fail_closed() {
     let connection = Connection::open(future.paths.automation_lease_store())
         .unwrap_or_else(|error| panic!("future open: {error}"));
     connection
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", 3)
         .unwrap_or_else(|error| panic!("future version: {error}"));
     drop(connection);
     assert!(matches!(

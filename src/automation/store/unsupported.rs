@@ -11,7 +11,7 @@ use crate::{
     model::InstallationUid,
 };
 
-use super::{BeginAcquireResult, StoreError};
+use super::{BeginAcquireResult, RecoveryPage, RecoveryPageRequest, StoreError};
 
 pub(crate) struct RecoveringStore {
     _private: (),
@@ -35,6 +35,13 @@ impl RecoveringStore {
     }
 
     pub(crate) fn into_ready(self, _now: &UtcTimestamp) -> Result<ReadyStore, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn recovery_candidates(
+        &self,
+        _page: &RecoveryPageRequest,
+    ) -> Result<RecoveryPage, StoreError> {
         Err(StoreError::UnsupportedPlatform)
     }
 }

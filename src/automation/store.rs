@@ -6,8 +6,15 @@
 
 mod ids;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod load;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod load_parse;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod migrations;
 mod records;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod recovery;
+mod recovery_types;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod security;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -19,6 +26,8 @@ pub(crate) use records::BeginAcquireResult;
 // Kept available on unsupported targets so the sealed service seam is source-compatible.
 #[allow(unused_imports)]
 pub(crate) use records::PersistedAcquireOutcome;
+#[allow(unused_imports)]
+pub(crate) use recovery_types::{RecoveryCursor, RecoveryPage, RecoveryPageRequest};
 use thiserror::Error;
 
 /// Redacted, stable failure categories for the automation store boundary.
@@ -64,8 +73,16 @@ pub(crate) use sqlite::{ReadyStore, RecoveringStore};
 pub(crate) use unsupported::{ReadyStore, RecoveringStore};
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod audit_recovery_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod load_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod migration_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod recovery_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod security_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod semantic_refusal_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;

@@ -10,10 +10,10 @@ use rusqlite::{
 use crate::{
     automation::{
         contracts::{
-            CallerSubject, HostIdentity, IdentityLeaseRequest, LeaseId, RefusalCode, Sha256Digest,
-            UtcTimestamp,
+            CallerSubject, HostIdentity, IdentityLeaseRequest, LeaseId, LeaseStatus, RefusalCode,
+            Sha256Digest, UtcTimestamp,
         },
-        lease::{ClockSample, MonotonicMoment, ServiceClockGeneration},
+        lease::{ClockSample, Lease, LeaseBinding, ServiceClockGeneration},
     },
     config::{AppPaths, ensure_secure_directory},
     model::InstallationUid,
@@ -22,14 +22,11 @@ use crate::{
 use super::{
     BeginAcquireResult, PersistedAcquireOutcome, StoreError,
     ids::{AUDIT_PREFIX, COLLISION_RETRIES, LEASE_PREFIX, REQUEST_PREFIX, random_id},
-    migrations,
-    records::{
-        PersistedIssuance, StoredTimestamp, parse_refusal, refusal_label, replay_retain_until,
-        role_label,
-    },
+    load, migrations,
+    records::{PersistedIssuance, StoredTimestamp, refusal_label, replay_retain_until, role_label},
     security::{
-        MAX_SERVICE_GENERATION, configure_connection, enable_wal, insert_service_generation,
-        open_private_file, sync_directory, validate_existing_sidecars, validate_store_file,
+        configure_connection, enable_wal, insert_service_generation, open_private_file,
+        sync_directory, validate_existing_sidecars, validate_store_file,
         verify_connection_settings, verify_integrity,
     },
 };
@@ -127,6 +124,7 @@ impl RecoveringStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreError::DatabaseUnavailable)?;
+        load::validate_all_leases(&transaction)?;
         let recovery_required: bool = transaction
             .query_row(
                 "SELECT
@@ -165,6 +163,27 @@ impl RecoveringStore {
             .map_err(|_| StoreError::DatabaseUnavailable)?;
         Ok(ReadyStore { core })
     }
+
+    pub(crate) fn recovery_candidates(
+        &self,
+        page: &super::RecoveryPageRequest,
+    ) -> Result<super::RecoveryPage, StoreError> {
+        let transaction = self
+            .core
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| StoreError::DatabaseUnavailable)?;
+        let result = super::recovery::enumerate(&transaction, self.core.service_generation, page)?;
+        transaction
+            .commit()
+            .map_err(|_| StoreError::DatabaseUnavailable)?;
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    pub(super) const fn test_connection(&self) -> &Connection {
+        &self.core.connection
+    }
 }
 
 impl ReadyStore {
@@ -193,7 +212,8 @@ impl ReadyStore {
             .map_err(|_| StoreError::DatabaseUnavailable)?;
 
         // This global replay lookup is deliberately the first statement after BEGIN IMMEDIATE.
-        let replay = load_replay(&transaction, request.client_request_id.as_str())?;
+        let replay =
+            load::replay_by_client_request(&transaction, request.client_request_id.as_str())?;
         let canonical = request
             .canonical_authority_json()
             .map_err(|_| StoreError::InvalidRequest)?;
@@ -202,19 +222,20 @@ impl ReadyStore {
         }
         let digest = Sha256Digest::hash(&canonical).to_string();
         if let Some(replay) = replay {
-            if replay.digest != digest
+            if replay.digest.to_string() != digest
                 || replay.canonical != canonical
-                || replay.caller != caller.as_str()
-                || replay.host != host.as_str()
+                || &replay.caller != caller
+                || &replay.host != host
             {
                 return Err(StoreError::IdempotencyConflict);
             }
-            let outcome = replay.into_outcome()?;
+            let outcome = outcome_from_loaded(replay.loaded)?;
             transaction
                 .commit()
                 .map_err(|_| StoreError::DatabaseUnavailable)?;
             return Ok(BeginAcquireResult::new(outcome, true));
         }
+        load::validate_all_leases(&transaction)?;
 
         let authorization_expiry =
             StoredTimestamp::from_utc(&request.work_order_authorization.expires_at)?;
@@ -278,9 +299,14 @@ impl ReadyStore {
             .commit()
             .map_err(|_| StoreError::DatabaseUnavailable)?;
 
+        let binding = LeaseBinding::from_request(lease_id, request, caller.clone(), host.clone())
+            .map_err(|_| StoreError::InvalidRequest)?;
+        let response = Lease::requested(binding, issuance_clock.clone())
+            .identity_response()
+            .map_err(|_| StoreError::IntegrityCheckFailed)?;
         Ok(BeginAcquireResult::new(
             PersistedAcquireOutcome::Requested {
-                lease_id,
+                response,
                 issuance: PersistedIssuance::new(
                     issuance_clock.wall().clone(),
                     issuance_clock.monotonic(),
@@ -303,6 +329,13 @@ impl ReadyStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreError::DatabaseUnavailable)?;
+        let loaded = load::lease_by_id(&transaction, lease_id.as_str())?
+            .ok_or(StoreError::InvalidTransition)?;
+        if loaded.lease.status() != LeaseStatus::Requested
+            || loaded.origin_generation != self.core.service_generation
+        {
+            return Err(StoreError::InvalidTransition);
+        }
         let attribution = load_attribution(&transaction, lease_id.as_str())?
             .ok_or(StoreError::InvalidTransition)?;
         if attribution.status != "REQUESTED" {
@@ -374,104 +407,34 @@ fn allocate_id(
     Err(StoreError::IdentifierCollision)
 }
 
-struct ReplayRow {
-    digest: String,
-    canonical: Vec<u8>,
-    caller: String,
-    host: String,
-    lease_id: String,
-    status: String,
-    refusal_code: Option<String>,
-    issued_at: String,
-    issued_seconds: i64,
-    issued_nanos: i64,
-    issued_monotonic: Vec<u8>,
-    service_generation: i64,
-}
-
-impl ReplayRow {
-    fn into_outcome(self) -> Result<PersistedAcquireOutcome, StoreError> {
-        let lease_id =
-            LeaseId::parse(self.lease_id).map_err(|_| StoreError::IntegrityCheckFailed)?;
-        let issuance = persisted_issuance(
-            self.issued_at,
-            self.issued_seconds,
-            self.issued_nanos,
-            self.issued_monotonic,
-            self.service_generation,
-        )?;
-        match (self.status.as_str(), self.refusal_code) {
-            ("REQUESTED", None) => Ok(PersistedAcquireOutcome::Requested { lease_id, issuance }),
-            ("REFUSED", Some(code)) => Ok(PersistedAcquireOutcome::Refused {
-                lease_id,
-                issuance,
-                refusal_code: parse_refusal(&code).ok_or(StoreError::IntegrityCheckFailed)?,
-            }),
-            _ => Err(StoreError::IntegrityCheckFailed),
-        }
-    }
-}
-
-fn load_replay(
-    transaction: &Transaction<'_>,
-    client_request_id: &str,
-) -> Result<Option<ReplayRow>, StoreError> {
-    transaction
-        .query_row(
-            "SELECT r.canonical_authority_digest, r.canonical_request,
-                    r.authenticated_caller, r.host_identity,
-                    l.lease_id, l.status, l.refusal_code,
-                    l.issued_at_utc, l.issued_at_seconds, l.issued_at_nanos,
-                    l.issued_monotonic_nanos, l.service_generation
-             FROM lease_requests r
-             JOIN leases l ON l.request_record_id = r.request_record_id
-             WHERE r.client_request_id = ?1",
-            [client_request_id],
-            |row| {
-                Ok(ReplayRow {
-                    digest: row.get(0)?,
-                    canonical: row.get(1)?,
-                    caller: row.get(2)?,
-                    host: row.get(3)?,
-                    lease_id: row.get(4)?,
-                    status: row.get(5)?,
-                    refusal_code: row.get(6)?,
-                    issued_at: row.get(7)?,
-                    issued_seconds: row.get(8)?,
-                    issued_nanos: row.get(9)?,
-                    issued_monotonic: row.get(10)?,
-                    service_generation: row.get(11)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|_| StoreError::IntegrityCheckFailed)
-}
-
-fn persisted_issuance(
-    wire: String,
-    seconds: i64,
-    nanos: i64,
-    monotonic: Vec<u8>,
-    generation: i64,
-) -> Result<PersistedIssuance, StoreError> {
-    let issued_at = UtcTimestamp::parse(wire).map_err(|_| StoreError::IntegrityCheckFailed)?;
-    let checked = StoredTimestamp::from_utc(&issued_at)?;
-    if checked.seconds != seconds || checked.nanos != nanos {
-        return Err(StoreError::IntegrityCheckFailed);
-    }
-    let monotonic: [u8; 16] = monotonic
-        .try_into()
+fn outcome_from_loaded(loaded: load::LoadedLease) -> Result<PersistedAcquireOutcome, StoreError> {
+    let status = loaded.lease.status();
+    let response = loaded
+        .lease
+        .identity_response()
         .map_err(|_| StoreError::IntegrityCheckFailed)?;
-    let generation = u64::try_from(generation)
-        .ok()
-        .filter(|value| (1..=MAX_SERVICE_GENERATION).contains(value))
-        .ok_or(StoreError::IntegrityCheckFailed)?;
-    Ok(PersistedIssuance::new(
-        issued_at,
-        MonotonicMoment::from_nanoseconds(u128::from_be_bytes(monotonic)),
-        ServiceClockGeneration::from_value(generation),
-    ))
+    Ok(match status {
+        LeaseStatus::Requested => PersistedAcquireOutcome::Requested {
+            response,
+            issuance: loaded.issuance,
+        },
+        LeaseStatus::Refused => PersistedAcquireOutcome::Refused {
+            refusal_code: response
+                .refusal_code
+                .ok_or(StoreError::IntegrityCheckFailed)?,
+            response,
+            issuance: loaded.issuance,
+        },
+        LeaseStatus::Active
+        | LeaseStatus::Renewing
+        | LeaseStatus::Closed
+        | LeaseStatus::Revoked
+        | LeaseStatus::Expired
+        | LeaseStatus::Error => PersistedAcquireOutcome::Resolved {
+            response,
+            issuance: loaded.issuance,
+        },
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

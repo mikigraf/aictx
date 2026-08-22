@@ -1,38 +1,76 @@
+use std::fmt;
+
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::automation::{
-    contracts::{LeaseId, RefusalCode, UtcTimestamp},
+    contracts::{IdentityLeaseResponse, LeaseId, RefusalCode, UtcTimestamp},
     lease::{ClockSample, MonotonicMoment, ServiceClockGeneration},
 };
 
 use super::StoreError;
 
 /// The durable result of the first request carrying a global client request ID.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum PersistedAcquireOutcome {
     Requested {
-        lease_id: LeaseId,
+        response: IdentityLeaseResponse,
         issuance: PersistedIssuance,
     },
     Refused {
-        lease_id: LeaseId,
+        response: IdentityLeaseResponse,
         issuance: PersistedIssuance,
         refusal_code: RefusalCode,
     },
+    Resolved {
+        response: IdentityLeaseResponse,
+        issuance: PersistedIssuance,
+    },
+}
+
+impl fmt::Debug for PersistedAcquireOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, response, issuance) = match self {
+            Self::Requested { response, issuance } => ("requested", response, issuance),
+            Self::Refused {
+                response, issuance, ..
+            } => ("refused", response, issuance),
+            Self::Resolved { response, issuance } => ("resolved", response, issuance),
+        };
+        formatter
+            .debug_struct("PersistedAcquireOutcome")
+            .field("kind", &kind)
+            .field("lease_id", &response.lease_id)
+            .field("status", &response.status)
+            .field("issuance", issuance)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PersistedAcquireOutcome {
     #[must_use]
     pub const fn lease_id(&self) -> &LeaseId {
         match self {
-            Self::Requested { lease_id, .. } | Self::Refused { lease_id, .. } => lease_id,
+            Self::Requested { response, .. }
+            | Self::Refused { response, .. }
+            | Self::Resolved { response, .. } => &response.lease_id,
         }
     }
 
     #[must_use]
     pub(crate) const fn issuance(&self) -> &PersistedIssuance {
         match self {
-            Self::Requested { issuance, .. } | Self::Refused { issuance, .. } => issuance,
+            Self::Requested { issuance, .. }
+            | Self::Refused { issuance, .. }
+            | Self::Resolved { issuance, .. } => issuance,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn response(&self) -> &IdentityLeaseResponse {
+        match self {
+            Self::Requested { response, .. }
+            | Self::Refused { response, .. }
+            | Self::Resolved { response, .. } => response,
         }
     }
 }

@@ -29,6 +29,7 @@ pub enum LeaseDomainError {
     ClockGenerationMismatch,
     MonotonicRegression,
     ClockOverflow,
+    InvalidSnapshot,
 }
 
 impl LeaseDomainError {
@@ -59,7 +60,8 @@ impl LeaseDomainError {
             | Self::ClockBeforeIssuance
             | Self::ClockGenerationMismatch
             | Self::MonotonicRegression
-            | Self::ClockOverflow => AutomationErrorCode::InternalError,
+            | Self::ClockOverflow
+            | Self::InvalidSnapshot => AutomationErrorCode::InternalError,
         }
     }
 }

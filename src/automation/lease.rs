@@ -17,10 +17,17 @@ use super::{
 mod clock;
 mod error;
 mod replay;
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+mod snapshot;
 pub use clock::{ClockSample, MonotonicMoment, ServiceClockGeneration};
 use clock::{add_seconds, deadline_reached, earlier, wall_nanoseconds_between};
 pub use error::LeaseDomainError;
 pub use replay::{LeaseBinding, ReplayBinding, ReplayDisposition};
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(unused_imports)
+)]
+pub(crate) use snapshot::{LeaseSnapshot, PersistedLeaseState, PersistedResolvedAuthority};
 
 pub const RENEWAL_ACK_TIMEOUT_SECONDS: u64 = 30;
 
@@ -46,18 +53,20 @@ pub struct LeaseControl<'a> {
     pub fencing_generation: FencingGeneration,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct ResolvedAuthority {
     resolution: LeaseResolution,
     effective_policy_digest: Sha256Digest,
     fencing_generation: FencingGeneration,
     expires_at: UtcTimestamp,
     maximum_expires_at: UtcTimestamp,
+    interval_anchor_wall: UtcTimestamp,
+    interval_anchor_monotonic: MonotonicMoment,
     monotonic_deadline: MonotonicMoment,
     monotonic_maximum_deadline: MonotonicMoment,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 enum LeaseState {
     Requested,
     Active(ResolvedAuthority),
@@ -112,14 +121,38 @@ impl LeaseState {
     }
 }
 
+impl core::fmt::Debug for LeaseState {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("LeaseState")
+            .field("status", &self.status())
+            .finish_non_exhaustive()
+    }
+}
+
 /// One pure lease aggregate. All fields are non-secret and mutations enforce
 /// the complete v1 transition graph.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Lease {
     binding: LeaseBinding,
     issuance_clock: ClockSample,
     last_monotonic: MonotonicMoment,
     state: LeaseState,
+}
+
+impl core::fmt::Debug for Lease {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Lease")
+            .field("lease_id", &self.binding.lease_id)
+            .field("status", &self.status())
+            .field(
+                "service_generation",
+                &self.issuance_clock.service_generation,
+            )
+            .field("has_runtime_deadline", &self.state.authority().is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Lease {
@@ -282,6 +315,8 @@ impl Lease {
                 .map_err(|_| LeaseDomainError::GenerationExhausted)?,
             expires_at,
             maximum_expires_at,
+            interval_anchor_wall: self.issuance_clock.wall.clone(),
+            interval_anchor_monotonic: self.issuance_clock.monotonic,
             monotonic_deadline,
             monotonic_maximum_deadline,
         });
@@ -360,6 +395,8 @@ impl Lease {
         renewed.fencing_generation = next_generation;
         renewed.expires_at = expires_at;
         renewed.maximum_expires_at = effective_maximum.clone();
+        renewed.interval_anchor_wall = now.wall.clone();
+        renewed.interval_anchor_monotonic = now.monotonic;
         renewed.monotonic_deadline = monotonic_deadline;
         renewed.monotonic_maximum_deadline = monotonic_maximum_deadline;
         renewed.effective_policy_digest = current_policy.digest();

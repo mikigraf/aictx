@@ -52,6 +52,8 @@ fn binding() -> LeaseBinding {
         workspace_id: parsed::<WorkspaceId>("workspace-one"),
         environment: parsed::<EnvironmentName>("production"),
         initial_requested_ttl_seconds: 60,
+        signed_maximum_ttl_seconds: 600,
+        signed_maximum_session_seconds: 600,
         caller_subject: parsed::<CallerSubject>("caller:controller"),
         host_identity: parsed::<HostIdentity>("host:one"),
         signed_authorization_expires_at: stamp("2026-08-21T10:10:00Z"),
@@ -74,6 +76,8 @@ fn authority() -> ResolvedAuthority {
         fencing_generation: generation(2),
         expires_at: stamp("2026-08-21T10:02:00Z"),
         maximum_expires_at: stamp("2026-08-21T10:10:00Z"),
+        interval_anchor_wall: stamp("2026-08-21T10:00:00Z"),
+        interval_anchor_monotonic: moment(1_000),
         monotonic_deadline: moment(1_120),
         monotonic_maximum_deadline: moment(1_600),
     }
@@ -232,4 +236,75 @@ fn invalid_reason_codes_fail_without_mutating_state() {
     assert_eq!(active.state, before);
     assert!(active.mark_error(LeaseReasonCode::Completed).is_err());
     assert_eq!(active.state, before);
+}
+
+#[test]
+fn error_results_that_fence_authority_are_losslessly_snapshotted() {
+    let mut expired = lease(LeaseState::Active(authority()));
+    let before_expiry = expired.snapshot();
+    let (caller, tenant, run, host) = control_values(&expired);
+    assert_eq!(
+        expired.close(
+            &LeaseControl {
+                caller_subject: &caller,
+                tenant_id: &tenant,
+                run_id: &run,
+                role: AgentRole::Implementer,
+                host_identity: &host,
+                fencing_generation: generation(2),
+            },
+            LeaseReasonCode::Completed,
+            &ClockSample::new(
+                stamp("2026-08-21T10:02:00Z"),
+                moment(1_120),
+                service_generation(),
+            ),
+        ),
+        Err(LeaseDomainError::LeaseExpired)
+    );
+    let expired_snapshot = expired.snapshot();
+    assert_ne!(expired_snapshot, before_expiry);
+    let restored_expired =
+        Lease::restore(expired_snapshot).unwrap_or_else(|error| panic!("restore: {error:?}"));
+    assert_eq!(restored_expired.status(), LeaseStatus::Expired);
+    assert_eq!(
+        restored_expired.reason_code(),
+        Some(LeaseReasonCode::LeaseExpired)
+    );
+
+    let renewing = LeaseState::Renewing {
+        authority: authority(),
+        acknowledgement_deadline: stamp("2026-08-21T10:00:30Z"),
+        monotonic_acknowledgement_deadline: moment(1_030),
+    };
+    let mut mismatched = lease(renewing);
+    let before_mismatch = mismatched.snapshot();
+    let (caller, tenant, run, host) = control_values(&mismatched);
+    assert_eq!(
+        mismatched.acknowledge_renewal(
+            &LeaseControl {
+                caller_subject: &caller,
+                tenant_id: &tenant,
+                run_id: &run,
+                role: AgentRole::Implementer,
+                host_identity: &host,
+                fencing_generation: generation(1),
+            },
+            &ClockSample::new(
+                stamp("2026-08-21T10:00:01Z"),
+                moment(1_001),
+                service_generation(),
+            ),
+        ),
+        Err(LeaseDomainError::GenerationMismatch)
+    );
+    let revoked_snapshot = mismatched.snapshot();
+    assert_ne!(revoked_snapshot, before_mismatch);
+    let restored_revoked =
+        Lease::restore(revoked_snapshot).unwrap_or_else(|error| panic!("restore: {error:?}"));
+    assert_eq!(restored_revoked.status(), LeaseStatus::Revoked);
+    assert_eq!(
+        restored_revoked.reason_code(),
+        Some(LeaseReasonCode::RenewalAcknowledgementFailed)
+    );
 }
