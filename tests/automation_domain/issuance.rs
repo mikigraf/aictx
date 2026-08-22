@@ -1,5 +1,13 @@
 use super::*;
 
+fn sample_in_generation(wall: &str, seconds: u64, generation: u64) -> ClockSample {
+    ClockSample::new(
+        timestamp(wall),
+        MonotonicMoment::from_nanoseconds(u128::from(seconds) * 1_000_000_000),
+        ServiceClockGeneration::from_value(generation),
+    )
+}
+
 #[test]
 fn delayed_activation_consumes_the_issuance_clock_authority() {
     let fixture = Fixture::new();
@@ -28,6 +36,16 @@ fn delayed_activation_consumes_the_issuance_clock_authority() {
         ),
         Err(LeaseDomainError::SessionLimitReached)
     );
+    assert_eq!(expired.status(), LeaseStatus::Requested);
+    assert_eq!(
+        expired.activate(
+            &policy,
+            resolution(),
+            &sample("2026-08-21T10:00:30Z", 1_030),
+        ),
+        Err(LeaseDomainError::MonotonicRegression)
+    );
+    assert_eq!(expired.status(), LeaseStatus::Requested);
 }
 
 #[test]
@@ -189,4 +207,158 @@ fn pending_acknowledgement_wins_when_its_deadline_equals_lease_expiry() {
         lease.reason_code(),
         Some(LeaseReasonCode::RenewalAcknowledgementFailed)
     );
+}
+
+#[test]
+fn every_control_operation_is_bound_to_the_authenticated_caller() {
+    let fixture = Fixture::new();
+    let policy = fixture.policy();
+    let other_caller = parsed("caller:other-controller");
+    let mut wrong_caller = control(&fixture, 1);
+    wrong_caller.caller_subject = &other_caller;
+    let mut lease = active_lease(&fixture, &policy);
+    let renewed = valid(policy.for_renewal_ttl(valid(RequestedTtlSeconds::from_seconds(90))));
+    assert_eq!(
+        lease.begin_renewal(
+            &wrong_caller,
+            &renewed,
+            &sample("2026-08-22T10:00:00Z", 10_000),
+        ),
+        Err(LeaseDomainError::CallerUnauthorized)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Active);
+    assert_eq!(lease.fencing_generation(), Some(generation(1)));
+    assert_eq!(
+        lease.close(
+            &wrong_caller,
+            LeaseReasonCode::Completed,
+            &sample("2026-08-22T10:00:00Z", 10_000),
+        ),
+        Err(LeaseDomainError::CallerUnauthorized)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Active);
+    assert_eq!(
+        lease.close(
+            &wrong_caller,
+            LeaseReasonCode::InternalError,
+            &sample("2026-08-22T10:00:00Z", 10_000),
+        ),
+        Err(LeaseDomainError::CallerUnauthorized)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Active);
+    assert_eq!(
+        lease.authorize_launch(
+            &wrong_caller,
+            &policy,
+            &sample("2026-08-22T10:00:00Z", 10_000),
+        ),
+        Err(LeaseDomainError::CallerUnauthorized)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Active);
+    assert!(lease.execution_handle().is_some());
+    for operation in [
+        AutomationOperation::LeaseRenew,
+        AutomationOperation::LeaseClose,
+        AutomationOperation::ExecutionStart,
+    ] {
+        assert_eq!(
+            LeaseDomainError::CallerUnauthorized.automation_code(operation),
+            AutomationErrorCode::CallerUnauthorized
+        );
+    }
+
+    valid(lease.begin_renewal(
+        &control(&fixture, 1),
+        &renewed,
+        &sample("2026-08-21T10:00:30Z", 1_030),
+    ));
+    wrong_caller.fencing_generation = generation(2);
+    assert_eq!(
+        lease.acknowledge_renewal(&wrong_caller, &sample("2026-08-21T10:00:31Z", 1_031),),
+        Err(LeaseDomainError::CallerUnauthorized)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Revoked);
+    assert_eq!(
+        lease.reason_code(),
+        Some(LeaseReasonCode::RenewalAcknowledgementFailed)
+    );
+}
+
+#[test]
+fn runtime_wall_rollback_still_expires_on_monotonic_time() {
+    let fixture = Fixture::new();
+    let policy = fixture.policy();
+    let mut lease = active_lease(&fixture, &policy);
+    assert!(!valid(
+        lease.enforce_deadlines(&sample("2026-08-21T09:59:00Z", 1_059,))
+    ));
+    assert_eq!(lease.status(), LeaseStatus::Active);
+    assert!(valid(
+        lease.enforce_deadlines(&sample("2026-08-21T09:59:00Z", 1_060,))
+    ));
+    assert_eq!(lease.status(), LeaseStatus::Expired);
+    assert_eq!(lease.reason_code(), Some(LeaseReasonCode::LeaseExpired));
+}
+
+#[test]
+fn runtime_rejects_clock_generation_change_and_monotonic_regression() {
+    let fixture = Fixture::new();
+    let policy = fixture.policy();
+    let mut lease = active_lease(&fixture, &policy);
+    assert!(!valid(
+        lease.enforce_deadlines(&sample("2026-08-21T10:00:05Z", 1_005,))
+    ));
+    assert_eq!(
+        lease.enforce_deadlines(&sample("2026-08-21T10:00:06Z", 1_004)),
+        Err(LeaseDomainError::MonotonicRegression)
+    );
+    assert_eq!(
+        lease.enforce_deadlines(&sample_in_generation("2026-08-21T10:00:06Z", 1_006, 2,)),
+        Err(LeaseDomainError::ClockGenerationMismatch)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Active);
+}
+
+#[test]
+fn activation_is_clock_strict_and_rolled_back_renewal_cannot_extend() {
+    let fixture = Fixture::new();
+    let policy = fixture.policy();
+    let mut before_wall = requested_lease(&fixture);
+    assert_eq!(
+        before_wall.activate(
+            &policy,
+            resolution(),
+            &sample("2026-08-21T09:59:59Z", 1_001),
+        ),
+        Err(LeaseDomainError::ClockBeforeIssuance)
+    );
+    let mut before_monotonic = requested_lease(&fixture);
+    assert_eq!(
+        before_monotonic.activate(&policy, resolution(), &sample("2026-08-21T10:00:00Z", 999),),
+        Err(LeaseDomainError::MonotonicRegression)
+    );
+    let mut other_generation = requested_lease(&fixture);
+    assert_eq!(
+        other_generation.activate(
+            &policy,
+            resolution(),
+            &sample_in_generation("2026-08-21T10:00:00Z", 1_000, 2),
+        ),
+        Err(LeaseDomainError::ClockGenerationMismatch)
+    );
+
+    let mut lease = active_lease(&fixture, &policy);
+    let original_expiry = lease.expires_at().cloned();
+    let renewed = valid(policy.for_renewal_ttl(valid(RequestedTtlSeconds::from_seconds(90))));
+    assert_eq!(
+        lease.begin_renewal(
+            &control(&fixture, 1),
+            &renewed,
+            &sample("2026-08-21T09:59:00Z", 1_030),
+        ),
+        Err(LeaseDomainError::SessionLimitReached)
+    );
+    assert_eq!(lease.status(), LeaseStatus::Active);
+    assert_eq!(lease.expires_at().cloned(), original_expiry);
+    assert_eq!(lease.fencing_generation(), Some(generation(1)));
 }

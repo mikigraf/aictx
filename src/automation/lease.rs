@@ -2,22 +2,24 @@
 //!
 //! The types here perform no persistence, locking, process management, or
 //! ambient profile resolution. Wall time is retained for audit attribution;
-//! caller-supplied monotonic moments are the rollback-resistant runtime gate.
+//! service-sampled monotonic moments are the rollback-resistant runtime gate.
 
 use super::{
     contracts::{
-        AgentRole, AutomationAuthMode, AutomationErrorCode, AutomationOperation, EnvironmentName,
-        ExecutionHandle, FencingGeneration, HostIdentity, IsolationClassification, LeaseReasonCode,
-        LeaseStatus, PrincipalRef, Provider, RefusalCode, RunId, Sha256Digest, TenantId,
-        UtcTimestamp, WorkerIdentity, WorkspaceRef,
+        AgentRole, AutomationAuthMode, CallerSubject, EnvironmentName, ExecutionHandle,
+        FencingGeneration, HostIdentity, IsolationClassification, LeaseReasonCode, LeaseStatus,
+        PrincipalRef, Provider, RefusalCode, RunId, Sha256Digest, TenantId, UtcTimestamp,
+        WorkerIdentity, WorkspaceRef,
     },
     policy::EffectivePolicy,
 };
 
 mod clock;
+mod error;
 mod replay;
-pub use clock::{ClockSample, MonotonicMoment};
+pub use clock::{ClockSample, MonotonicMoment, ServiceClockGeneration};
 use clock::{add_seconds, deadline_reached, earlier, wall_nanoseconds_between};
+pub use error::LeaseDomainError;
 pub use replay::{LeaseBinding, ReplayBinding, ReplayDisposition};
 
 pub const RENEWAL_ACK_TIMEOUT_SECONDS: u64 = 30;
@@ -36,6 +38,7 @@ pub struct LeaseResolution {
 
 /// Control-plane binding checked by renewal, closure, and execution gates.
 pub struct LeaseControl<'a> {
+    pub caller_subject: &'a CallerSubject,
     pub tenant_id: &'a TenantId,
     pub run_id: &'a RunId,
     pub role: AgentRole,
@@ -115,15 +118,18 @@ impl LeaseState {
 pub struct Lease {
     binding: LeaseBinding,
     issuance_clock: ClockSample,
+    last_monotonic: MonotonicMoment,
     state: LeaseState,
 }
 
 impl Lease {
     #[must_use]
     pub const fn requested(binding: LeaseBinding, issuance_clock: ClockSample) -> Self {
+        let last_monotonic = issuance_clock.monotonic;
         Self {
             binding,
             issuance_clock,
+            last_monotonic,
             state: LeaseState::Requested,
         }
     }
@@ -240,7 +246,7 @@ impl Lease {
         now: &ClockSample,
     ) -> Result<(), LeaseDomainError> {
         self.require_status(LeaseStatus::Requested)?;
-        self.validate_clock(now)?;
+        self.observe_activation_clock(now)?;
         self.validate_policy_binding(policy)?;
         if policy.requested_ttl_seconds != self.binding.initial_requested_ttl_seconds {
             return Err(LeaseDomainError::PolicyBindingMismatch);
@@ -289,7 +295,7 @@ impl Lease {
         current_policy: &EffectivePolicy,
         now: &ClockSample,
     ) -> Result<FencingGeneration, LeaseDomainError> {
-        self.validate_clock(now)?;
+        self.validate_caller(control)?;
         if self.enforce_deadlines(now)? {
             return Err(self.state_error(LeaseStatus::Renewing));
         }
@@ -380,7 +386,15 @@ impl Lease {
         control: &LeaseControl<'_>,
         now: &ClockSample,
     ) -> Result<(), LeaseDomainError> {
-        self.validate_clock(now)?;
+        if let Err(error) = self.validate_caller(control) {
+            if let LeaseState::Renewing { authority, .. } = &self.state {
+                self.state = LeaseState::Revoked {
+                    authority: authority.clone(),
+                    reason: LeaseReasonCode::RenewalAcknowledgementFailed,
+                };
+            }
+            return Err(error);
+        }
         if self.enforce_deadlines(now)? {
             return Err(self.state_error(LeaseStatus::Active));
         }
@@ -406,6 +420,7 @@ impl Lease {
         reason: LeaseReasonCode,
         now: &ClockSample,
     ) -> Result<(), LeaseDomainError> {
+        self.validate_caller(control)?;
         if !matches!(
             reason,
             LeaseReasonCode::Completed | LeaseReasonCode::WorkerFailed
@@ -415,7 +430,6 @@ impl Lease {
                 reason,
             });
         }
-        self.validate_clock(now)?;
         if self.enforce_deadlines(now)? {
             return Err(self.state_error(LeaseStatus::Closed));
         }
@@ -476,7 +490,7 @@ impl Lease {
 
     /// Enforce lease, maximum-lifetime, and pending-renewal deadlines.
     pub fn enforce_deadlines(&mut self, now: &ClockSample) -> Result<bool, LeaseDomainError> {
-        self.validate_clock(now)?;
+        self.observe_runtime_clock(now)?;
         if !matches!(
             self.status(),
             LeaseStatus::Active | LeaseStatus::Renewing | LeaseStatus::Error
@@ -534,7 +548,7 @@ impl Lease {
         current_policy: &EffectivePolicy,
         now: &ClockSample,
     ) -> Result<ExecutionHandle, LeaseDomainError> {
-        self.validate_clock(now)?;
+        self.validate_caller(control)?;
         if self.enforce_deadlines(now)? {
             return Err(self.state_error(LeaseStatus::Active));
         }
@@ -557,6 +571,7 @@ impl Lease {
     }
 
     fn validate_control(&self, control: &LeaseControl<'_>) -> Result<(), LeaseDomainError> {
+        self.validate_caller(control)?;
         if control.tenant_id != &self.binding.tenant_id {
             return Err(LeaseDomainError::TenantMismatch);
         }
@@ -575,14 +590,37 @@ impl Lease {
         require_generation(current, control.fencing_generation)
     }
 
-    fn validate_clock(&self, now: &ClockSample) -> Result<(), LeaseDomainError> {
-        if now.wall.is_before(&self.issuance_clock.wall)
-            || now.monotonic < self.issuance_clock.monotonic
-        {
-            Err(LeaseDomainError::ClockOverflow)
-        } else {
+    fn validate_caller(&self, control: &LeaseControl<'_>) -> Result<(), LeaseDomainError> {
+        if control.caller_subject == &self.binding.caller_subject {
             Ok(())
+        } else {
+            Err(LeaseDomainError::CallerUnauthorized)
         }
+    }
+
+    fn observe_activation_clock(&mut self, now: &ClockSample) -> Result<(), LeaseDomainError> {
+        if now.service_generation != self.issuance_clock.service_generation {
+            return Err(LeaseDomainError::ClockGenerationMismatch);
+        }
+        if now.wall.is_before(&self.issuance_clock.wall) {
+            return Err(LeaseDomainError::ClockBeforeIssuance);
+        }
+        if now.monotonic < self.last_monotonic {
+            return Err(LeaseDomainError::MonotonicRegression);
+        }
+        self.last_monotonic = now.monotonic;
+        Ok(())
+    }
+
+    fn observe_runtime_clock(&mut self, now: &ClockSample) -> Result<(), LeaseDomainError> {
+        if now.service_generation != self.issuance_clock.service_generation {
+            return Err(LeaseDomainError::ClockGenerationMismatch);
+        }
+        if now.monotonic < self.last_monotonic {
+            return Err(LeaseDomainError::MonotonicRegression);
+        }
+        self.last_monotonic = now.monotonic;
+        Ok(())
     }
 
     fn validate_policy_binding(&self, policy: &EffectivePolicy) -> Result<(), LeaseDomainError> {
@@ -644,95 +682,6 @@ impl Lease {
                 to: target,
             },
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LeaseDomainError {
-    InvalidTransition {
-        from: LeaseStatus,
-        to: LeaseStatus,
-    },
-    TerminalImmutable(LeaseStatus),
-    LeaseNotActive,
-    LeaseExpired,
-    LeaseRevoked,
-    GenerationMismatch,
-    GenerationExhausted,
-    SessionLimitReached,
-    TenantMismatch,
-    RunMismatch,
-    RoleMismatch,
-    HostMismatch,
-    PolicyBindingMismatch,
-    InvalidReason {
-        status: LeaseStatus,
-        reason: LeaseReasonCode,
-    },
-    ClockOverflow,
-}
-
-impl LeaseDomainError {
-    #[must_use]
-    pub const fn automation_code(&self, operation: AutomationOperation) -> AutomationErrorCode {
-        match self {
-            Self::InvalidReason { .. } => AutomationErrorCode::InvalidRequest,
-            Self::LeaseExpired => state_code(operation, AutomationErrorCode::LeaseExpired),
-            Self::LeaseRevoked => state_code(operation, AutomationErrorCode::LeaseRevoked),
-            Self::GenerationMismatch => {
-                control_code(operation, AutomationErrorCode::GenerationMismatch, true)
-            }
-            Self::SessionLimitReached => {
-                control_code(operation, AutomationErrorCode::SessionLimitReached, false)
-            }
-            Self::TenantMismatch => {
-                control_code(operation, AutomationErrorCode::TenantMismatch, true)
-            }
-            Self::RunMismatch => control_code(operation, AutomationErrorCode::RunMismatch, true),
-            Self::RoleMismatch => control_code(operation, AutomationErrorCode::RoleMismatch, true),
-            Self::HostMismatch => control_code(operation, AutomationErrorCode::HostMismatch, true),
-            Self::InvalidTransition { .. } | Self::TerminalImmutable(_) | Self::LeaseNotActive => {
-                lease_not_active_code(operation)
-            }
-            Self::GenerationExhausted | Self::PolicyBindingMismatch | Self::ClockOverflow => {
-                AutomationErrorCode::InternalError
-            }
-        }
-    }
-}
-
-const fn state_code(
-    operation: AutomationOperation,
-    code: AutomationErrorCode,
-) -> AutomationErrorCode {
-    match operation {
-        AutomationOperation::LeaseRenew
-        | AutomationOperation::LeaseClose
-        | AutomationOperation::ExecutionStart => code,
-        AutomationOperation::LeaseRevoke => AutomationErrorCode::LeaseNotActive,
-        _ => AutomationErrorCode::InternalError,
-    }
-}
-
-const fn control_code(
-    operation: AutomationOperation,
-    code: AutomationErrorCode,
-    close_allows: bool,
-) -> AutomationErrorCode {
-    match operation {
-        AutomationOperation::LeaseRenew | AutomationOperation::ExecutionStart => code,
-        AutomationOperation::LeaseClose if close_allows => code,
-        _ => AutomationErrorCode::InternalError,
-    }
-}
-
-const fn lease_not_active_code(operation: AutomationOperation) -> AutomationErrorCode {
-    match operation {
-        AutomationOperation::LeaseRenew
-        | AutomationOperation::LeaseRevoke
-        | AutomationOperation::LeaseClose
-        | AutomationOperation::ExecutionStart => AutomationErrorCode::LeaseNotActive,
-        _ => AutomationErrorCode::InternalError,
     }
 }
 

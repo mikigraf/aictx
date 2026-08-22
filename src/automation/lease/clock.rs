@@ -36,17 +36,43 @@ impl MonotonicMoment {
     }
 }
 
-/// One wall/monotonic observation from the same service clock sample.
+/// Identifies one service incarnation and its monotonic clock epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceClockGeneration(u64);
+
+impl ServiceClockGeneration {
+    #[must_use]
+    pub const fn from_value(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// One wall/monotonic observation from the same service clock sample and
+/// service generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClockSample {
     pub(super) wall: UtcTimestamp,
     pub(super) monotonic: MonotonicMoment,
+    pub(super) service_generation: ServiceClockGeneration,
 }
 
 impl ClockSample {
     #[must_use]
-    pub const fn new(wall: UtcTimestamp, monotonic: MonotonicMoment) -> Self {
-        Self { wall, monotonic }
+    pub const fn new(
+        wall: UtcTimestamp,
+        monotonic: MonotonicMoment,
+        service_generation: ServiceClockGeneration,
+    ) -> Self {
+        Self {
+            wall,
+            monotonic,
+            service_generation,
+        }
     }
 
     #[must_use]
@@ -57,6 +83,11 @@ impl ClockSample {
     #[must_use]
     pub const fn monotonic(&self) -> MonotonicMoment {
         self.monotonic
+    }
+
+    #[must_use]
+    pub const fn service_generation(&self) -> ServiceClockGeneration {
+        self.service_generation
     }
 }
 

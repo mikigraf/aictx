@@ -15,7 +15,7 @@ use ctxlane::{
         },
         lease::{
             ClockSample, Lease, LeaseBinding, LeaseControl, LeaseDomainError, LeaseResolution,
-            MonotonicMoment, ReplayDisposition,
+            MonotonicMoment, ReplayDisposition, ServiceClockGeneration,
         },
         policy::{
             AllowScope, AuthorizationProof, CapacityLimits, CapacityUsage, ControllerPolicy,
@@ -238,6 +238,7 @@ fn sample(wall: &str, seconds: u64) -> ClockSample {
     ClockSample::new(
         timestamp(wall),
         MonotonicMoment::from_nanoseconds(u128::from(seconds) * 1_000_000_000),
+        ServiceClockGeneration::from_value(1),
     )
 }
 
@@ -269,6 +270,7 @@ fn active_lease(fixture: &Fixture, policy: &EffectivePolicy) -> Lease {
 
 fn control(fixture: &Fixture, value: u64) -> LeaseControl<'_> {
     LeaseControl {
+        caller_subject: &fixture.caller,
         tenant_id: &fixture.request.tenant_id,
         run_id: &fixture.request.run_id,
         role: fixture.request.role,
@@ -696,7 +698,7 @@ fn lifecycle_reasons_terminal_immutability_and_clock_boundaries_are_exact() {
             resolution(),
             &sample("2026-08-21T09:59:59Z", 1_001),
         ),
-        Err(LeaseDomainError::ClockOverflow)
+        Err(LeaseDomainError::ClockBeforeIssuance)
     );
 }
 
@@ -749,6 +751,7 @@ fn operation_aware_error_mapping_always_builds_a_valid_wire_error() {
         LeaseDomainError::LeaseNotActive,
         LeaseDomainError::LeaseExpired,
         LeaseDomainError::LeaseRevoked,
+        LeaseDomainError::CallerUnauthorized,
         LeaseDomainError::GenerationMismatch,
         LeaseDomainError::SessionLimitReached,
         LeaseDomainError::TenantMismatch,
@@ -756,6 +759,9 @@ fn operation_aware_error_mapping_always_builds_a_valid_wire_error() {
         LeaseDomainError::RoleMismatch,
         LeaseDomainError::HostMismatch,
         LeaseDomainError::PolicyBindingMismatch,
+        LeaseDomainError::ClockBeforeIssuance,
+        LeaseDomainError::ClockGenerationMismatch,
+        LeaseDomainError::MonotonicRegression,
         LeaseDomainError::ClockOverflow,
         LeaseDomainError::InvalidReason {
             status: LeaseStatus::Closed,
@@ -771,7 +777,9 @@ fn operation_aware_error_mapping_always_builds_a_valid_wire_error() {
                 client_request_id: None,
                 lease_id: if matches!(
                     error.automation_code(operation),
-                    AutomationErrorCode::InvalidRequest | AutomationErrorCode::InternalError
+                    AutomationErrorCode::InvalidRequest
+                        | AutomationErrorCode::CallerUnauthorized
+                        | AutomationErrorCode::InternalError
                 ) {
                     None
                 } else {

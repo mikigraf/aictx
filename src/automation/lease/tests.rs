@@ -26,6 +26,10 @@ fn generation(value: u64) -> FencingGeneration {
     FencingGeneration::from_value(value).unwrap_or_else(|error| panic!("{error:?}"))
 }
 
+const fn service_generation() -> ServiceClockGeneration {
+    ServiceClockGeneration::from_value(1)
+}
+
 fn binding() -> LeaseBinding {
     LeaseBinding {
         lease_id: parsed::<LeaseId>("lease_01ARZ3NDEKTSV4RRFFQ69G5FB0"),
@@ -78,13 +82,19 @@ fn authority() -> ResolvedAuthority {
 fn lease(state: LeaseState) -> Lease {
     Lease {
         binding: binding(),
-        issuance_clock: ClockSample::new(stamp("2026-08-21T10:00:00Z"), moment(1_000)),
+        issuance_clock: ClockSample::new(
+            stamp("2026-08-21T10:00:00Z"),
+            moment(1_000),
+            service_generation(),
+        ),
+        last_monotonic: moment(1_000),
         state,
     }
 }
 
-fn control_values(lease: &Lease) -> (TenantId, RunId, HostIdentity) {
+fn control_values(lease: &Lease) -> (CallerSubject, TenantId, RunId, HostIdentity) {
     (
+        lease.binding.caller_subject.clone(),
         lease.binding.tenant_id.clone(),
         lease.binding.run_id.clone(),
         lease.binding.host_identity.clone(),
@@ -98,13 +108,18 @@ fn renewing_supports_only_the_documented_outbound_transitions() {
         acknowledgement_deadline: stamp("2026-08-21T10:00:30Z"),
         monotonic_acknowledgement_deadline: moment(1_030),
     };
-    let now = ClockSample::new(stamp("2026-08-21T10:00:01Z"), moment(1_001));
+    let now = ClockSample::new(
+        stamp("2026-08-21T10:00:01Z"),
+        moment(1_001),
+        service_generation(),
+    );
 
     let mut closed = lease(renewing());
-    let (tenant, run, host) = control_values(&closed);
+    let (caller, tenant, run, host) = control_values(&closed);
     closed
         .close(
             &LeaseControl {
+                caller_subject: &caller,
                 tenant_id: &tenant,
                 run_id: &run,
                 role: AgentRole::Implementer,
@@ -135,6 +150,7 @@ fn renewing_supports_only_the_documented_outbound_transitions() {
             .enforce_deadlines(&ClockSample::new(
                 stamp("2026-08-21T10:02:00Z"),
                 moment(1_120),
+                service_generation(),
             ))
             .unwrap_or_else(|error| panic!("{error:?}"))
     );
@@ -156,6 +172,7 @@ fn error_expires_and_every_terminal_state_is_immutable() {
             .enforce_deadlines(&ClockSample::new(
                 stamp("2026-08-21T10:00:05Z"),
                 moment(1_120),
+                service_generation(),
             ))
             .unwrap_or_else(|error| panic!("{error:?}"))
     );
@@ -189,11 +206,12 @@ fn error_expires_and_every_terminal_state_is_immutable() {
 fn invalid_reason_codes_fail_without_mutating_state() {
     let mut active = lease(LeaseState::Active(authority()));
     let before = active.state.clone();
-    let (tenant, run, host) = control_values(&active);
+    let (caller, tenant, run, host) = control_values(&active);
     assert!(
         active
             .close(
                 &LeaseControl {
+                    caller_subject: &caller,
                     tenant_id: &tenant,
                     run_id: &run,
                     role: AgentRole::Implementer,
@@ -201,7 +219,11 @@ fn invalid_reason_codes_fail_without_mutating_state() {
                     fencing_generation: generation(2),
                 },
                 LeaseReasonCode::InternalError,
-                &ClockSample::new(stamp("2026-08-21T10:00:01Z"), moment(1_001)),
+                &ClockSample::new(
+                    stamp("2026-08-21T10:00:01Z"),
+                    moment(1_001),
+                    service_generation(),
+                ),
             )
             .is_err()
     );
