@@ -8,7 +8,7 @@ In `ctxlane`, a profile represents one Claude or Codex account or authentication
 
 At launch, `ctxlane` removes known competing selectors and refuses inspected repository settings that could change the selected route. Wrapper-managed static secrets stay in the native OS credential store, outside repository files and shell configuration. The official vendor CLIs still handle login and model traffic; `ctxlane` adds no API proxy or remote credential service.
 
-The ordinary CLI, terminal dashboard, and local account switching are standalone. They do not start or require an automation service, controller, or MCP server, and they have no ASF or Runmill dependency.
+The ordinary CLI, terminal dashboard, and local account switching are standalone. They do not start or require an automation service, controller, MCP server, lease store, or automation-authority file, and they have no ASF or Runmill dependency.
 
 ## Quick start
 
@@ -300,11 +300,17 @@ For supported runnable profiles, `ctxlane env` emits non-secret selectors only. 
 
 Every config-v2 profile carries a validated automation policy, but it is disabled by default with `eligible = false`. This release has no supported lease service, automation MCP server, controller runtime, or policy-editing command, and changing metadata by hand does not create those capabilities. The Phase-0 schemas and architecture documents define a possible controller-neutral future boundary; ASF and Runmill appear only as optional integration examples.
 
-The Rust library also exposes pure, controller-neutral policy-evaluation and lease-lifecycle domains. They are inert building blocks for a future trusted service: they do not persist leases, authenticate callers, access credentials, start processes, or connect the CLI or dashboard to a controller.
+The Rust library exposes pure, controller-neutral policy-evaluation and lease-lifecycle domains. Those domains remain inert building blocks for a future trusted service: they do not persist leases, access credentials, start processes, or connect the CLI or dashboard to a controller.
 
-An internal, sealed lease-store foundation is available only to future service code on Linux and macOS. It uses an owner-private SQLite journal for atomic request, replay, refusal, and audit records, and it refuses readiness when unresolved state requires recovery. It does not yet activate or renew leases, reconcile processes, prune history, authenticate a controller, or expose a public service API. Windows rejects this store boundary before filesystem access. The journal is qualified only for a local owner-controlled filesystem; network filesystems such as NFS are not supported or claimed safe.
+A separate sealed checkpoint now provides crate-internal authority loading, strict Ed25519 work-order verification primitives, and platform-specific caller evidence. Its read-only loader recognizes only a closed version-1, owner-private regular `config/automation-authority.toml` of at most 1 MiB, binds it to the installation and configured host identity, and prepares exact service limits plus controller key, tenant, profile, provider, environment, role, repository, workspace, lifetime, exception, rate, and capacity limits. Keys and signatures use strict canonical encodings, weak Ed25519 public keys are refused, and all proof failures are redacted. This is an internal contract only: no supported command creates, edits, displays, or consumes the file, and the verifier is not a public library or CLI API.
 
-Ordinary commands and the terminal dashboard never discover, create, or open that journal. Their standalone tests deliberately place invalid bytes at the would-be database path and prove normal CLI and TUI behavior succeeds without reading, changing, locking, or repairing it.
+On macOS, the internal adapter is explicitly opt-in, restricted to the exact `local-development` environment, and always classified as unqualified development evidence. On Linux, the adapter requires kernel `SO_PEERPIDFD` support (upstream Linux 6.5 or a qualified backport), retains the live pidfd, and checks peer credentials, process identity, the allowlisted native executable and digest, and protected unified-cgroup/systemd placement. That result is deliberately only connection-origin evidence. It is verifier-ineligible because a Unix stream can be written through a delegated file descriptor; a future listener must enable `SO_PASSCRED` and require matching per-frame `SCM_CREDENTIALS` before any Linux request can become authority. Windows and other unsupported targets refuse this authority boundary before deriving or reading its filesystem path.
+
+An internal, sealed lease-store foundation is available only to future service code on Linux and macOS. It uses an owner-private SQLite journal for atomic request, replay, refusal, and audit records, and it refuses readiness when unresolved state requires recovery. It does not yet activate or renew leases, reconcile processes, prune history, authenticate a controller, or expose a public service API. Windows and other unsupported targets reject this store boundary before filesystem access. The journal is qualified only for a local owner-controlled filesystem; network filesystems such as NFS are not supported or claimed safe.
+
+Ordinary commands and the terminal dashboard never discover, create, or open either sealed boundary. Their standalone tests deliberately place invalid bytes at both the would-be authority path and database path and prove normal CLI and TUI behavior succeeds without changing, locking, repairing, or depending on either file.
+
+No listener, authenticated request-framing gate, lease-authority integration, or provider harness is connected to these foundations. Linux deployment also still depends on a protected local filesystem and kernel/procfs/cgroup/systemd environment, a trusted operator configuration and signing-key system, and a qualified controller executable. The current process evidence does not attest dynamic loaders or libraries, environment or arguments, in-memory mutation or ptrace, unusual filesystem semantics, or writers using a delegated connected descriptor. These assumptions must be narrowed and qualified before any production claim.
 
 The direct CLI controls below predate that future identity plane. Neither `--non-interactive` nor `--trusted-runner` changes `eligible`, creates a lease, or grants production automation authority.
 
@@ -359,6 +365,7 @@ These checks still need real deployment evidence:
 - Billing and workspace identity for managed accounts
 - Native keyring behavior, including locked stores and consent prompts
 - Native Windows ACL and `.exe` launcher behavior
+- Linux 6.5-or-newer (or qualified-backport) `SO_PEERPIDFD`, protected procfs/cgroup v2/systemd placement, and the future per-frame credential gate before automation authority is enabled
 - Authenticode, Apple code signing, and macOS notarization where required
 
 Read [Testing](docs/testing.md) for the exact automated layers, commands, coverage method, and evidence boundary. The deployment checklist is in [Compatibility and validation status](docs/compatibility.md).
@@ -366,8 +373,9 @@ Read [Testing](docs/testing.md) for the exact automated layers, commands, covera
 `ctxlane` remains fully standalone. Normal CLI, TUI, login, profile, context,
 and supported run workflows neither start nor require ASF, Runmill, MCP, an
 automation service, or any controller. The automation identity-plane material
-describes an optional controller-neutral future capability. ASF and Runmill are
-examples only; no integration with either ships in the current binary.
+describes a controller-neutral capability that is not yet supported. ASF and
+Runmill are examples only; no integration with either ships in the current
+binary.
 
 ## Project documentation
 

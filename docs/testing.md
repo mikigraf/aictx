@@ -18,17 +18,18 @@ In this project, “automated end to end” means that the compiled `ctxlane` bi
 | --- | --- | --- |
 | Unit | `src/**` test modules | parsing, config-v2 installation/profile UID and automation-policy invariants, Codex WIF enrollment validation, resolution, activation, environment construction, policy scanners, shell quoting, error rendering, and deterministic TUI state, rendering, and form-input checks |
 | Automation wire contracts | `src/automation/contracts/**`, `schemas/**` | strict Rust serialization and validation, Draft 2020-12 schemas, schema/Rust parity, authority-field sensitivity, stable status/reason matrices, secret-surface exclusions, canonical request hashing, and the public Ed25519 signing vector |
+| Sealed automation authority | `src/automation/authority/**`, `src/automation/attestation/**` | bounded owner-private authority-file loading, installation/configuration binding, exact trust roots/controller scopes/rates/capacities, strict canonical Ed25519 verification and redaction, unforgeable proof binding, macOS explicit local-development/unqualified evidence, Linux connection-origin parser/matcher/snapshot negatives plus native `SO_PEERPIDFD` availability, verifier ineligibility without future per-frame credentials, and unsupported-platform zero-filesystem refusal; no listener, service, lease authority, or CLI surface |
 | Automation policy/lease domain | `src/automation/policy/**`, `src/automation/lease/**`, `tests/automation_domain.rs`, `tests/automation_domain/**` | profile/request/controller intersection and no-widening, effective-policy digest and capacity binding, replay handling, issuance and monotonic deadlines, fencing, renewal acknowledgement, and terminal-state invariants; no service, persistence, credential access, or process execution |
-| Automation store foundation | `src/automation/store/**` | owner-private SQLite creation, defensive connection settings, schema and installation binding, service locking, recovery typestate, atomic request/replay/refusal/audit records, replay-retention bounds, corruption and crash-retry handling, extension denial, and unsupported-platform refusal; no public service, activation, renewal, process reconciliation, or pruning |
+| Automation store foundation | `src/automation/store/**` | owner-private SQLite creation, defensive connection settings, schema and installation binding, service locking, recovery typestate, atomic request/replay/refusal/audit records, replay-retention bounds, corruption and crash-retry handling, extension denial, and unsupported-platform zero-filesystem refusal; no public service, activation, renewal, process reconciliation, or pruning |
 | Config v2 foundation | `tests/config_v2_foundation.rs`, `tests/fixtures/v0_2_0_schema_v1/**` | frozen config-v1 upgrade, diagnostic-only projection, stable installation/profile UIDs, default-disabled policy, active/retired UID disjointness, required v2 automation blocks, and redacted malformed-config errors |
 | Metadata management | `tests/management_service.rs` | temporary-root profile, context, and binding Add/Edit/Rename/Remove lifecycles, immutable profile-UID preservation and retirement, default-disabled policy, reference rewrites, active-context rename refusal, stale snapshots, collision guards, immutable private state, secret-reference preservation, detached-state retention without reuse, and missing-path binding removal |
-| CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs`, `tests/standalone_automation_boundary.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, strict Codex WIF enrollment and unqualified-runtime refusal, bindings, status, doctor readiness/JSON and count-only automation-policy visibility, shell output, completions, stable exit categories, recovery hints, locking, local filesystem policy, and ordinary-command independence from an invalid would-be automation database |
+| CLI lifecycle | `tests/cli_workflow.rs`, `tests/error_contract.rs`, `tests/standalone_automation_boundary.rs` | the public binary, plain initialization, non-interactive guided refusal, profile/context lifecycle, strict Codex WIF enrollment and unqualified-runtime refusal, bindings, status, doctor readiness/JSON and count-only automation-policy visibility, shell output, completions, stable exit categories, recovery hints, locking, local filesystem policy, and ordinary-command independence from invalid would-be authority and automation-store files |
 | v0.1 migration | `tests/migration_core.rs`, `tests/migration_cli.rs`, `tests/migration_locking.rs`, `tests/migration_recovery.rs`, `tests/migration_windows.rs`, `tests/v01_migration_compat.rs` | frozen v0.1 input, explicit dry run/copy/recovery, path rewriting, keyring-reference preservation, source-data preservation with advisory lock coordination, simultaneous startup, collisions, symlinks/reparse points, journals, and every interrupted recovery transition |
 | Branding contract | `tests/branding_contract.rs` | current product naming across tracked files and an exact allowlist for required v0.1 migration literals |
 | Unix runner contracts | `tests/runner_contract.rs` | argument and exit propagation, environment cleaning, lifecycle locks, process signals, repository-policy refusals, and injected-secret routing through temporary shell fixtures |
 | Native fake-vendor E2E | `tests/native_vendor_contract.rs`, `tests/setup_token_pty.rs`, `tests/fixtures/native_vendor.rs` | a compiled fake vendor executable on the host OS, including guided Claude setup-token invocation/failure, Claude WIF selectors, Codex OAuth preflight, static Claude route checks, isolated state, secret absence, and vendor exit status |
-| Terminal/PTY | `tests/tui_pty.rs`, `tests/setup_token_pty.rs` | dashboard startup beside an invalid would-be automation database, resize, scripted profile Add/Edit/Rename/Remove with persisted-state checks and secret-reference non-disclosure, `Ctrl-C`/normal exit, output synchronization, and terminal restoration; plus guided setup-token preflight preservation, protected wrapped-paste handling, queued-input draining into a next-shell check, cancellation, signals, and bracketed-paste cleanup |
-| Toolchain and OS matrix | `.github/workflows/ci.yml` | Rust 1.89 check/tests on Linux and pinned Rust tests on native Linux, macOS, and Windows runners |
+| Terminal/PTY | `tests/tui_pty.rs`, `tests/setup_token_pty.rs` | dashboard startup beside invalid would-be authority and automation-store files, resize, scripted profile Add/Edit/Rename/Remove with persisted-state checks and secret-reference non-disclosure, `Ctrl-C`/normal exit, output synchronization, and terminal restoration; plus guided setup-token preflight preservation, protected wrapped-paste handling, queued-input draining into a next-shell check, cancellation, signals, and bracketed-paste cleanup |
+| Toolchain and OS matrix | `.github/workflows/ci.yml` | Rust 1.89 check/tests on Linux and pinned Rust tests on native Linux, macOS, and Windows runners; the Linux job separately requires working `SO_PEERPIDFD` rather than accepting the old-kernel skip |
 | Security and release gates | `.github/workflows/ci.yml`, `.github/workflows/release.yml` | formatting, Clippy, rustdoc tests, package creation, dependency policy, full-history secret scanning, checksums, SBOM generation, Sigstore bundles, and GitHub provenance |
 
 The Unix runner suite uses shell fixtures and is disabled on Windows. The native fake-vendor and CLI suites provide process coverage without a shell fixture. Platform-gated code still needs a native job on the matching operating system.
@@ -39,9 +40,11 @@ The Claude static-auth contracts prove that the selected credential reaches the 
 
 The Codex WIF contracts prove only strict metadata enrollment and validation, immutable persistence, fail-closed `login`, `logout`, `run`, and `env` boundaries, and doctor runtime refusal without a Codex token probe. They distinguish pure config-shape validation from the enrollment-time Git-worktree-ancestry check and the explicit credential-check file probe. The login/logout/run paths refuse before token-path-derived filesystem inspection or vendor launch; `env` refuses before exporting an unsupported `CODEX_HOME`. These contracts do not prove a native Codex WIF environment contract, token exchange, principal/workspace verification, or workload qualification; that runtime does not exist in this release.
 
-The automation wire/schema and pure policy/lease-domain tests prove data shape, authority intersection, replay, deadline, fencing, renewal, and state-machine invariants. The separate sealed-store tests prove only the initial durable request/refusal/replay/audit transaction boundary and a conservative recovery gate on supported local filesystems. Together they still do not provide a lease service, caller authentication, signature verifier, lease activation/renewal persistence, process reconciler, provider harness, pruning implementation, controller, or automation MCP server.
+The automation wire/schema and pure policy/lease-domain tests prove data shape, authority intersection, replay, deadline, fencing, renewal, and state-machine invariants. The sealed authority tests additionally prove the strict file/configuration boundary, canonical Ed25519 proof primitive, exact controller scoping, and platform-specific evidence classifications. On macOS, the end-to-end internal proof path requires both configuration acknowledgement and runtime opt-in and signs an exact `local-development` authorization; it is always development-unqualified. On Linux, native CI exercises kernel peer credentials and requires atomic `SO_PEERPIDFD`; pure parser and matcher negatives cover duplicate process IDs, exact live states, credential changes, executable path/digest/device/inode changes, unified-cgroup syntax and exact configured path, while a one-field-at-a-time test covers every retained executable metadata field. Linux evidence is intentionally connection-origin only and is rejected by the work-order verifier until a future listener supplies matching per-frame `SCM_CREDENTIALS` through `SO_PASSCRED`. The native Windows job tests the shared unsupported-target zero-filesystem refusal path; other unsupported targets are not qualified.
 
-Store tests use temporary local roots. They do not qualify SQLite WAL operation on NFS or another network filesystem. Linux deployment code must eventually verify a supported local-filesystem environment before opening the production service; macOS remains development-only, and the Windows store stub must fail before creating any file.
+The separate sealed-store tests prove only the initial durable request/refusal/replay/audit transaction boundary and a conservative recovery gate on supported local filesystems. Together these foundations still do not provide a listener, per-frame request authentication, lease service or authority, lease activation/renewal persistence, process reconciler, provider harness, pruning implementation, controller, or automation MCP server.
+
+Store tests use temporary local roots. They do not qualify SQLite WAL operation on NFS or another network filesystem. Linux deployment code must eventually verify a supported local-filesystem environment before opening the production service; macOS remains development-only, and Windows and other unsupported store stubs must fail before filesystem access.
 
 Doctor policy-view tests may assert disabled/eligible levels, warnings for either explicit exception acknowledgement, and environment/role/caller counts. They must not render the underlying scope values, and those checks do not claim lease readiness.
 
@@ -88,6 +91,28 @@ cargo test --locked --test tui_pty
 cargo test --locked --features test-fixtures --test setup_token_pty
 ```
 
+Run the sealed authority suites directly with:
+
+```bash
+cargo test --locked --lib automation::authority
+cargo test --locked --lib automation::attestation
+```
+
+On a native Linux host whose kernel must qualify for the future deployment
+floor, require `SO_PEERPIDFD` instead of allowing the old-kernel test skip:
+
+```bash
+CTXLANE_REQUIRE_SO_PEERPIDFD=1 cargo test --locked --lib \
+  automation::attestation::linux::tests::native_socket_peer_credentials_are_kernel_derived \
+  -- --exact
+```
+
+Upstream `SO_PEERPIDFD` requires Linux 6.5 or newer; a deployment using a
+vendor backport must qualify that exact kernel. This test proves socket-option
+availability and retained pidfd identity on that host. It does not prove the
+future `SO_PASSCRED`/per-frame `SCM_CREDENTIALS` listener gate or confer
+production authority.
+
 On Windows, also run `cargo test --locked --test migration_windows` for the native junction/reparse-point contract. `runner_contract` and `setup_token_pty` contain no tests on Windows because those files are Unix-only. Do not treat those empty results as Windows runner or setup-token terminal coverage; the native fake-vendor, migration, and CLI suites still run there.
 
 Check the minimum supported Rust version separately:
@@ -128,6 +153,7 @@ The public automated suite must stay offline and credential-free. The following 
 | Native OS keyring | store, read, delete, missing item, locked store, consent prompt, and access control on each supported OS |
 | Claude WIF | real identity-provider issuance, official Claude exchange and refresh, expiry, rotation, denied exchange, and upstream revocation |
 | Codex WIF | first implement the native runtime boundary; then qualify token-file race resistance, official version, identity and workspace verification, exchange/refresh, expiry, rotation, denial, and revocation |
+| Linux automation authority | first implement the listener and exact per-frame credential gate; then qualify Linux 6.5+ or the approved backport, private socket placement, protected procfs/cgroup v2/systemd deployment, root/operator-managed authority and executable paths, executable and filesystem semantics, descriptor-delegation refusal, loader/environment/ptrace assumptions, and controller sandbox exclusion |
 | Billing and workspace | confirm the selected account, organization/workspace, and billing destination through vendor-supported account controls |
 | Windows runtime | native `.exe` discovery, ACL behavior, console/PTY restoration, argument handling, process exit/signal behavior, and installed vendor launchers |
 | Release signing | Authenticode, Apple Developer ID signing, and macOS notarization when required; the public workflow currently supplies checksums, Sigstore bundles, SBOMs, and GitHub provenance |

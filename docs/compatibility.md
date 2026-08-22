@@ -8,16 +8,17 @@ This document distinguishes implemented behavior from evidence still required in
 | --- | --- | --- |
 | Rust | MSRV 1.89; edition 2024 | CI compiles/tests 1.89 on Linux and pinned Rust 1.97.1 on Linux, macOS, and Windows |
 | Metadata | config schema v2; mutable-state schema v1 | strict locked config-v1-to-v2 upgrade; unknown versions/fields and invalid relationships are rejected |
-| Linux | current GitHub-hosted Ubuntu image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
+| Linux | current GitHub-hosted Ubuntu image; upstream Linux 6.5+ for `SO_PEERPIDFD` authority evidence | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI; the Linux job separately requires the native peer-pidfd test to pass |
 | macOS | current GitHub-hosted macOS image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
 | Windows | current GitHub-hosted Windows image | unit, CLI, native fake-vendor, and PTY tests in CI; Unix shell-fixture contracts are disabled |
-| Automation store | SQLite WAL on an owner-private local filesystem; Linux service target and macOS development only | sealed internal schema/replay/recovery-gate tests on Linux/macOS; Windows rejects before filesystem access; NFS and other network filesystems are unqualified |
+| Automation store | SQLite WAL on an owner-private local filesystem; Linux service target and macOS development only | sealed internal schema/replay/recovery-gate tests on Linux/macOS; Windows and other unsupported targets reject before filesystem access; NFS and other network filesystems are unqualified |
+| Automation authority checkpoint | crate-internal, unwired, closed version-1 owner-private `config/automation-authority.toml` of at most 1 MiB; Linux connection-origin evidence, macOS local development, unsupported elsewhere | strict loader/Ed25519/scope/redaction negatives, native macOS development proof, Linux compile and native peer-pidfd CI coverage, and a native Windows test of the shared unsupported zero-filesystem stub; other unsupported targets remain unqualified; no listener, per-frame authentication, lease authority, or operator-facing syntax |
 | Terminal UI | Ratatui with Crossterm | renderer/state tests plus native PTY resize, exit, refusal, and restoration checks; deployment terminals still need qualification |
 | Coverage | regions/functions/lines | CI floors are 75%/60%/70%; see [Testing](testing.md) for the measured baseline and interpretation |
 
 CI configuration is an intended validation matrix, not proof that a given commit has passed until its workflow run is green. The OS matrix uses native GitHub-hosted runners. It does not qualify every architecture, distribution, terminal host, or vendor release. See [Testing](testing.md) for exact commands and test-layer limits.
 
-The config-v2 automation policy is operator-owned foundation and defaults to `eligible = false`. This release has no supported lease service, automation MCP server, or controller runtime. It contains a crate-internal Linux/macOS SQLite store foundation for initial request, refusal, replay, audit, and recovery-gate work only; it is not opened by ordinary commands and is not a production-recovery claim. Ordinary CLI/TUI account switching and supported local vendor workflows remain standalone, with no ASF, Runmill, service, controller, MCP, or lease-store dependency.
+The config-v2 automation policy is operator-owned foundation and defaults to `eligible = false`. This release has no supported lease service, automation MCP server, listener, or controller runtime. It contains a crate-internal Linux/macOS SQLite store foundation for initial request, refusal, replay, audit, and recovery-gate work, plus a separate sealed authority/configuration, canonical Ed25519 proof, and caller-evidence checkpoint. Neither is opened by ordinary commands or a production-recovery/authority claim. Ordinary CLI/TUI account switching and supported local vendor workflows remain standalone, with no ASF, Runmill, service, controller, MCP, lease-store, or authority-file dependency. ASF and Runmill remain optional examples of the controller-neutral future interfaces.
 
 ## Evidence classes
 
@@ -56,6 +57,47 @@ The implementation does not parse token claims or undocumented credential-cache 
 
 ## Known boundaries
 
+### Sealed automation authority checkpoint
+
+The read-only authority loader is internal future-service infrastructure, not
+a supported configuration feature. It validates a closed version-1 bounded
+owner-private regular file and trusted path, the expected installation UID and
+configured host identity, exact lowercase non-weak Ed25519 public keys, exact
+service limits, and exact controller
+tenant/key/profile/provider/environment/role/repository/workspace scopes plus
+TTL/session, authentication/isolation exception permissions, rate, and
+four-dimensional capacity ceilings. The verifier uses the published canonical signature message,
+canonical 64-byte unpadded base64url signatures, and strict Ed25519
+verification; its result is configuration-, caller-evidence-, assurance-, key-,
+message-, and authorization-bound and cannot be constructed outside the sealed
+module. Errors and views omit public-key material, signatures, executable
+paths, and tenant/profile/repository/workspace scope values; the redacted view
+exposes the non-secret installation/host identities and counts, while each
+controller entry exposes only its subject, assurance, and scope counts.
+
+On macOS, this path requires an acknowledged configuration and an independent
+runtime opt-in, accepts only exact `local-development` scope, and is always
+classified as development-unqualified. On Linux, it requires atomic
+`SO_PEERPIDFD` (upstream Linux 6.5 or a qualified backport) and attests only the
+connection opener using peer credentials, a retained live pidfd, stable
+process identity, an allowlisted non-writable single-link native executable and
+digest, and protected unified-cgroup/systemd placement. It cannot authenticate
+each later stream writer, so Linux evidence is verifier-ineligible. A future
+listener must add `SO_PASSCRED` and exact per-frame `SCM_CREDENTIALS` matching
+before any request can carry authority. Windows and other targets refuse
+authority loading before deriving or reading the path.
+
+There is no listener, service integration, lease authority, or harness in this
+checkpoint. The code observes procfs, cgroup v2/systemd placement, executable
+ownership and metadata, and pidfd state, but those observations still require
+native protected-deployment qualification. The trusted kernel, local filesystem
+semantics, authority owner, signing system, and controller executable remain in
+the trusted computing base. Loader/libraries, environment/arguments,
+memory/ptrace, and descriptor delegation are not attested. The new cryptography
+and Linux socket dependencies compile at the Rust 1.89 MSRV and remain
+target-gated where applicable; native behavior still requires the matching OS
+job.
+
 ### Claude on macOS
 
 `CLAUDE_CONFIG_DIR` is set for every Claude profile, but full switching of native Claude subscription logins stored by Claude in the macOS Keychain is not implemented or claimed. Use setup-token/API/WIF profiles, or separate OS identities when complete native-login separation is required.
@@ -83,6 +125,11 @@ The current configuration schema is version `2`; `state.toml` remains version `1
 This is a one-way format transition: there is no config-v2-to-v1 downgrade, and an older binary that only understands config schema v1 must not be used after the upgrade. The explicit copy-only `ctxlane migrate aictx` application-store flow is separate; see [Migration from v0.1](migration-from-v0.1.md). Legacy metadata and vendor state remain in the source store for rollback, and migration coordination may create or normalize advisory profile lock files there.
 
 ## Qualification checklist
+
+This checklist qualifies the supported interactive wrapper only. It does not
+enable or qualify the sealed automation checkpoint; that requires a future
+listener, lifecycle integration, execution boundary, and the protected Linux
+evidence listed above.
 
 Before enabling a new OS/vendor version combination:
 
