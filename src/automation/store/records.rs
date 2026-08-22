@@ -126,11 +126,22 @@ impl PersistedIssuance {
 pub(crate) struct BeginAcquireResult {
     outcome: PersistedAcquireOutcome,
     replayed: bool,
+    row_version: u64,
+    cleanup_deferred: bool,
 }
 
 impl BeginAcquireResult {
-    pub(super) const fn new(outcome: PersistedAcquireOutcome, replayed: bool) -> Self {
-        Self { outcome, replayed }
+    pub(super) const fn new(
+        outcome: PersistedAcquireOutcome,
+        replayed: bool,
+        row_version: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            replayed,
+            row_version,
+            cleanup_deferred: false,
+        }
     }
 
     #[must_use]
@@ -141,6 +152,20 @@ impl BeginAcquireResult {
     #[must_use]
     pub(crate) const fn replayed(&self) -> bool {
         self.replayed
+    }
+
+    #[must_use]
+    pub(crate) const fn row_version(&self) -> u64 {
+        self.row_version
+    }
+
+    #[must_use]
+    pub(crate) const fn cleanup_deferred(&self) -> bool {
+        self.cleanup_deferred
+    }
+
+    pub(super) fn mark_cleanup_deferred(&mut self) {
+        self.cleanup_deferred = true;
     }
 }
 
@@ -232,16 +257,22 @@ pub(super) fn replay_retain_until(
 ) -> Result<UtcTimestamp, StoreError> {
     let issued = OffsetDateTime::parse(issued_at.as_str(), &Rfc3339)
         .map_err(|_| StoreError::InvalidRequest)?;
-    let horizon = issued
+    let local_horizon = issued
         .checked_add(time::Duration::days(7))
         .ok_or(StoreError::InvalidRequest)?;
-    let horizon =
-        UtcTimestamp::parse(canonical_utc(horizon)).map_err(|_| StoreError::InvalidRequest)?;
-    if horizon.is_before(authorization_expires_at) {
-        Ok(authorization_expires_at.clone())
-    } else {
-        Ok(horizon)
-    }
+    let authorization_expiry = OffsetDateTime::parse(authorization_expires_at.as_str(), &Rfc3339)
+        .map_err(|_| StoreError::InvalidRequest)?;
+    let horizon = local_horizon.max(authorization_expiry);
+    UtcTimestamp::parse(canonical_utc(horizon)).map_err(|_| StoreError::InvalidRequest)
+}
+
+pub(super) fn audit_retention_cutoff(now: &UtcTimestamp) -> Result<UtcTimestamp, StoreError> {
+    let instant =
+        OffsetDateTime::parse(now.as_str(), &Rfc3339).map_err(|_| StoreError::InvalidRequest)?;
+    let cutoff = instant
+        .checked_sub(time::Duration::days(7))
+        .ok_or(StoreError::InvalidRequest)?;
+    UtcTimestamp::parse(canonical_utc(cutoff)).map_err(|_| StoreError::InvalidRequest)
 }
 
 fn canonical_utc(value: OffsetDateTime) -> String {

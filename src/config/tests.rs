@@ -170,6 +170,51 @@ fn metadata_store_rejects_non_managed_profile_state_directory() {
     assert!(error.contains("state_dir must be the managed directory"));
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn unsupported_platform_fence_checks_are_zero_filesystem_noops() {
+    let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let root = temporary.path().join("missing-ctxlane");
+    let paths = AppPaths::for_root(&root);
+    let installation_uid = crate::model::InstallationUid::generate()
+        .unwrap_or_else(|error| panic!("installation uid: {error}"));
+    let profile_uid = ProfileUid::for_state_dir(
+        &installation_uid,
+        Provider::Claude,
+        &paths
+            .profile_state_root(Provider::Claude)
+            .join("windows-noop"),
+    )
+    .unwrap_or_else(|error| panic!("profile uid: {error}"));
+    let profile_ref: ProfileId = "claude:windows-noop"
+        .parse()
+        .unwrap_or_else(|error| panic!("profile ref: {error}"));
+
+    ensure_profile_automation_unfenced(&paths, &profile_uid)
+        .unwrap_or_else(|error| panic!("unsupported marker check: {error}"));
+    assert!(
+        !profile_automation_fence_presence(&paths, &profile_uid)
+            .unwrap_or_else(|error| panic!("unsupported marker presence: {error}"))
+    );
+    assert!(
+        prepare_profile_automation_fence(
+            &MetadataStore::new(paths.clone()),
+            &installation_uid,
+            &profile_ref,
+            profile_ref.provider(),
+            &profile_uid,
+        )
+        .is_err(),
+        "the sealed preparation seam must reject unsupported targets"
+    );
+    assert_ne!(
+        ProfileAutomationResourceMode::Exclusive,
+        ProfileAutomationResourceMode::Shared,
+        "resource-mode selection must remain explicit on every target"
+    );
+    assert!(!root.exists());
+}
+
 #[test]
 fn derived_application_directories_inside_a_repository_are_rejected() {
     let cwd = std::env::current_dir().unwrap_or_else(|error| panic!("current dir: {error}"));

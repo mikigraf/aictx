@@ -4,7 +4,7 @@
 
 This document is the Phase-0 security and architecture contract for evolving `ctxlane` into a local automation identity plane. Phase 0 defines authority, isolation, lifecycle, and integration ownership. The repository contains sealed implementation checkpoints for some contracts, but it does not yet connect or qualify a production authority path.
 
-The current `ctxlane` code remains a local account-isolation CLI and TUI. It does not yet provide a supported production MCP server, authenticated lease service or listener, complete durable lease recovery, or lease-enforced structured provider harness. A sealed crate-internal authority checkpoint validates an operator-owned file, implements strict canonical Ed25519 work-order proof verification, and produces platform-specific caller evidence. A separate sealed SQLite foundation records initial request, replay, refusal, and audit state and enforces a conservative recovery gate on Linux/macOS local filesystems. The two foundations are unwired: neither is a service, neither is reachable from an ordinary command, and neither grants lease, session, execution, or production authority. `--trusted-runner` remains a backwards-compatible assertion for existing CLI flows and never grants production automation authority. Production automation identity-plane use is blocked until the later implementation phases and their Linux-native, controller-integration, failure-injection, recovery, credential-search, and negative-security tests pass.
+The current `ctxlane` code remains a local account-isolation CLI and TUI. It does not yet provide a supported production MCP server, authenticated lease service or listener, complete durable lease recovery, or lease-enforced structured provider harness. A sealed crate-internal authority checkpoint validates an operator-owned file, implements strict canonical Ed25519 work-order proof verification, and produces platform-specific caller evidence. A separate sealed schema-v3 SQLite foundation implements store-private request/replay, lease-lifecycle, four-dimensional capacity, audit, retention-pruning, and terminal-only recovery mechanics on Linux/macOS local filesystems. The two foundations are unwired: neither is a service, neither is reachable from an ordinary command, and neither grants lease, session, execution, or production authority. The store does not prove current policy or controller-configuration freshness and has no process writer or reconciler. `--trusted-runner` remains a backwards-compatible assertion for existing CLI flows and never grants production automation authority. Production automation identity-plane use is blocked until the later implementation phases and their Linux-native, controller-integration, failure-injection, recovery, credential-search, and negative-security tests pass.
 
 The production contract is:
 
@@ -31,8 +31,13 @@ not runtime, build, configuration, or authentication dependencies.
   the current binary.
 
 Ordinary standalone commands never discover, auto-start, or depend on the
-automation service. Automation state and failures cannot change the selected
-account or availability of a normal interactive command.
+automation service, authority file, or lease database. The one intentional
+cross-boundary signal is a deterministic per-profile fence in the existing
+profile-lock directory: while unresolved automation state owns that fence,
+commands that would use, export, migrate, edit, rename, or remove that profile
+fail closed. Metadata-only listing, status, and context selection remain
+standalone and available, and no ordinary command opens or repairs automation
+service or lease-database state.
 
 The authority checkpoint has a separate read-only path,
 `config/automation-authority.toml`. Its crate-internal loader is intended solely
@@ -227,12 +232,99 @@ The target design permits automation-policy and signing-key edits only through a
 
 Every profile receives an immutable internal profile UID. The human-readable `claude:name` or `codex:name` reference is a renameable alias. Renaming preserves the UID; removal never permits UID reuse. Leases, policy, audit events, provider-state ownership, principal verification, and concurrency accounting bind to the UID and record the display reference only for diagnosis.
 
-After lease support is enabled, profile rename and removal are refused while
-that UID has any active, renewing, unresolved, quarantined, or recovery-required
-lease state. This future interlock does not add an automation dependency to the
-current standalone profile manager.
+The sealed lifecycle checkpoint implements the profile interlock before any
+`REQUESTED` row is published. A new request first performs its global replay
+lookup; exact replay or an idempotency conflict returns before profile lookup or
+fence access. Only an unseen key resolves the current profile under its legacy
+alias-exclusive and immutable UID-lifecycle-exclusive locks, creates and
+synchronizes the marker, retains the alias lock, converts the lifecycle lock to
+shared, and then starts a second replay-first transaction that may insert
+`REQUESTED`. A syntactically valid missing profile or provider mismatch is
+instead inserted as `REQUESTED` plus terminal `REFUSED` in one transaction, so
+it leaves neither an unfenced unresolved row nor an arbitrary marker.
 
-Mutable vendor homes are exclusive. Only one active lease may use a mutable home unless the execution backend provisions a distinct writable home for every concurrent lease and proves that vendor-owned state outside that home cannot cross leases. A policy value requesting concurrency does not waive this invariant: when per-lease isolation is unavailable or unproven, acquisition is refused.
+The marker path is
+`state/profile-locks/<profile_uid>-automation.fence`. Its closed version-1 text
+binds the installation UID, immutable profile UID, a random fence ID, and one
+exact provider/profile alias captured as the representative at publication.
+The bytes do not enumerate every alias retained later for recovery. On Linux
+and macOS the marker is created with exclusive
+no-follow semantics and `0600` mode, must remain a current-user-owned regular
+single-link file, and is bound to its opened inode, exact canonical bytes, and
+full metadata snapshot. The file and parent directory are synchronized before
+`REQUESTED`; deletion rechecks that complete binding and synchronizes the parent
+again. All service-held marker and lock descriptors are close-on-exec.
+New profile lock files are likewise created owner-private and close-on-exec.
+Pre-existing group/other-accessible, symlinked, or multiply linked lock files
+are refused without chmod normalization or target mutation; operators must
+repair or remove an obsolete unsafe lock explicitly after verifying that it is
+not in use.
+
+Any object or ambiguity at that deterministic marker path makes ordinary
+profile use fail closed under the already-held UID lifecycle lock. This covers
+vendor runs, login/logout, credential/readiness inspection, doctor vendor-state
+inspection, `ctxlane env`, and vendor-state migration, as well as profile edit,
+rename, and removal. The check is local and never opens the service, authority
+file, or lease database. An unrelated profile and metadata-only commands remain
+independent. Windows and other targets do not implement the sealed automation
+fence and keep ordinary behavior unchanged.
+
+`REQUESTED` and `ERROR` are unresolved, as are active, renewing, quarantined,
+recovery-required, and nonterminal reservation/process records. A crash after
+marker publication therefore leaves a deliberate false-positive fence.
+Readiness recovery scans and validates every marker, rejects an alias claimed
+by multiple UIDs, and acquires the complete canonical lock set before reopening
+any marker. For each UID that set includes the marker's representative legacy
+alias, the current same-provider config alias when one exists, and the UID
+lifecycle lock. Recovery of eligible prior-generation `REQUESTED`/`REFUSED`
+rows may nonblockingly extend the live guard with another exact same-provider
+historical alias; the marker remains representative and is not rewritten.
+Every retained alias stays exclusive until the UID's complete blocker set is
+empty. A provider mismatch within one combined UID fence is unsafe rather than
+an extensible alias history. Recovery exposes no vendor-use authority and never
+silently adopts or clears an orphan.
+
+Removal is permitted only after a fresh database transaction proves the
+complete same-profile blocker set empty while the lifecycle lock is exclusive.
+Ordinary lifecycle-lock contention produces an opaque retryable holder; after
+the contender exits, the surviving store may retry the zero-blocker clear.
+A transient database-read failure is likewise retryable only when a validated
+downgrade restores the ordinary shared guard. Marker, identity, lock, I/O,
+transaction, unlink, or synchronization ambiguity that cannot be safely
+revalidated instead produces an opaque hard-deferred holder. It retains every
+acquired legacy alias and the best available lifecycle/marker state until fresh
+process recovery. In particular, a parent-directory synchronization failure
+after a successful unlink can leave no marker pathname, so the live holder
+retains the lifecycle lock exclusively as well as every alias lock. If initial
+startup recovery itself fails before a StoreCore exists, only the durable
+marker and process-down fail-closed boundary remain; there is no surviving
+process in which to retain those descriptors. Current binaries still refuse
+any object or ambiguity at the marker path. A legacy binary that does not
+understand the marker is not excluded after that failed process exits,
+especially when marker corruption prevents recovery from deriving a
+trustworthy representative alias; that cross-version failure case remains
+unqualified.
+
+The retained legacy alias-exclusive lock drains and excludes v0.2 runners that
+know only the renameable alias lock while the service process lives. This is not
+yet a crash-continuity claim for old binaries: after service `SIGKILL`, an old
+binary does not understand the durable marker and can reuse the profile. That
+mixed-version case remains unqualified until the future supervisor receives an
+authenticated duplicate of the legacy alias and per-lease resource lock open
+descriptions and retains them for the child lifetime. Ordinary child processes
+do not inherit these close-on-exec descriptors.
+
+The opaque per-lease resource guard is bound to the validated effective policy's
+resource mode. Exclusive policy takes the UID resource lock exclusively. Shared
+policy may take it shared only for exactly credential-isolated plus stateless
+state, or per-lease-isolated credentials plus per-lease-isolated state; every
+lease retains its own guard. Copied-credential-development profiles always stay
+exclusive, including local-development and PR-review exception paths. Shared
+guards may coexist, but they exclude every ordinary profile consumer, which
+continues to take the UID resource lock exclusively. The lock mode is a
+compatibility interlock, not isolation proof: mutable concurrent leases still
+require distinct qualified writable homes and proof that vendor-owned state
+outside them cannot cross leases.
 
 Per-lease state paths remain internal. MCP and controller responses expose neither a vendor-home path nor a credential path. A terminal lease cannot make its mutable state available to a later lease until cleanup and identity checks complete; detached or quarantined state is never selected by name or silently reused.
 
@@ -247,7 +339,9 @@ Renewal is a fenced state transition:
 3. An attached harness must acknowledge that exact generation over its authenticated execution channel within the bounded acknowledgement window.
 4. Until acknowledgement, the renewal is not reported as usable. A missing, late, or mismatched acknowledgement revokes the lease, fences new access immediately, records the reason, and terminates the harness after the bounded grace period.
 
-Once rotation is persisted, the old generation cannot launch, reconnect, or perform another privileged provider operation. Revocation, expiration, service restart, and recovery apply the same fail-closed generation checks. The current sealed store schema v2 preserves the monotonic high-water and interval anchor needed for lossless snapshots, validates the complete per-lease audit chain, reconstructs every status on exact replay, exposes only redacted non-resumable recovery evidence, and refuses readiness while unresolved prior-generation state exists. It still has no activation/renewal writer or process reconciler. The later service implementation must persist domain mutations even when a fail-closed operation also returns an error, journal intent before returning success, and reconcile every lease and harness before reporting service readiness.
+Once rotation is persisted, the old generation cannot launch, reconnect, or perform another privileged provider operation. Revocation, expiration, service restart, and recovery apply the same fail-closed generation checks. The current sealed store schema v3 preserves the monotonic high-water and interval anchor needed for lossless snapshots, validates the complete per-lease audit chain, reconstructs every status on exact replay, exposes only redacted non-resumable recovery evidence, and refuses readiness while unresolved prior-generation state exists. Store-private transactional writers cover activation, renewal intent and acknowledgement, close, revoke, error, deadline enforcement, four-dimensional capacity, terminal-only prior-generation recovery, and audited pruning. They commit a changed fail-closed snapshot even when the domain operation returns an error.
+
+Those writers do not form an authority boundary. They are not callable by a sibling service module, and a row version or policy digest does not prove that operator profile policy, readiness evidence, authority configuration, or a controller epoch is current. A later facade must authenticate each message, bind its verified work order to the prepared authority configuration and controller epoch, acquire and retain the profile fence, then evaluate current profile policy and readiness before calling the store. Pure policy evaluation must not durably decide capacity from stale caller-supplied usage: only the activation transaction's fresh recount may produce `capacity-exceeded`. The current checkpoint still has no process lifecycle writer or reconciler, launch gate, authenticated listener, cross-generation resume, or complete CTX-LEASE-007 recovery.
 
 ## Fixed structured harness
 
@@ -260,11 +354,10 @@ The harness alone may receive the selected model-provider credential. It speaks 
 Lease and authority events are append-only during their retention window and exclude credentials, credential paths, prompts, source content, raw model output, and unrestricted command arguments. Events use a monotonic per-lease sequence and include the immutable profile UID, display reference, authenticated caller, work-order digest reference, run, attempt, role, server-computed policy digest, fencing generation, timestamps, outcome, and stable reason code where applicable.
 
 Phase 0 fixes local audit retention at seven days. Replay records have an
-independent minimum lifetime: a service must retain idempotency material until
-the signed authorization expires, or longer when local policy defines a longer
-replay horizon. The audit cutoff never permits earlier deletion of replay
-material. Pruning is a service transaction, not filesystem deletion by age or
-name. It must:
+independent minimum lifetime: the current store retains idempotency material
+until the later of issuance plus seven days and signed authorization expiry.
+The audit cutoff never permits earlier deletion of replay material. The sealed
+pruner is a store transaction, not filesystem deletion by age or name. It must:
 
 - use a recorded UTC cutoff;
 - preserve active, renewing, unresolved, quarantined, and recovery-required lease/process records regardless of age;
@@ -290,7 +383,7 @@ This matrix does not remove or downgrade supported interactive CLI and TUI behav
 This Phase-0 document is complete when the contracts and threat boundaries are reviewable. It does not make the current binary production-ready. The immutable IDs, pure policy/digest contracts, strict canonical verifier primitive, and sealed authority/attestation checkpoint implement part of the first and third items below without wiring them into authority. Later phases must complete and prove, in dependency order:
 
 1. A supported operator surface for automation policy and trust roots, plus service integration of the existing immutable profile UIDs, canonical signed-work-order verifier, stable refusal codes, and server-computed policy digests.
-2. The existing-binary Linux service, complete durable transactional lease/audit transitions, fencing, TTL, renewal acknowledgement, revocation, process recovery, retention, and audited pruning. The current sealed store covers only the initial request/refusal/replay/audit and conservative recovery-gate foundation of this item.
+2. The existing-binary Linux service, complete durable transactional lease/audit transitions, fencing, TTL, renewal acknowledgement, revocation, process recovery, retention, and audited pruning. The current sealed schema-v3 store covers the unwired transactional lease/capacity/retention mechanics and a conservative terminal-only recovery gate, but not authenticated authority composition, process reconciliation, launch, or service readiness.
 3. An authenticated controller listener with the mandatory Linux per-frame credential gate, execution channels, multiple-controller isolation, inherited-channel STDIO MCP, the bounded tool schema, and the fixed structured fake-provider harness. The current platform adapters provide only sealed connection/development evidence.
 4. Controller-neutral end-to-end integration proving that coding-agent and tool sandboxes cannot reach service channels, credentials, vendor homes, or unsupported execution surfaces, plus optional Runmill compatibility coverage.
 5. Native Claude and Codex provider identity qualification on protected Linux, including principal/workspace verification and per-lease state isolation.

@@ -14,11 +14,13 @@ use crate::{
 };
 
 use super::load_tests::resolved_status;
+use super::test_support::TestAutomationProfile;
 
 struct Fixture {
     _temporary: TempDir,
     paths: AppPaths,
     installation: InstallationUid,
+    profile: TestAutomationProfile,
 }
 
 impl Fixture {
@@ -28,10 +30,12 @@ impl Fixture {
             .path()
             .canonicalize()
             .unwrap_or_else(|error| panic!("canonical tempdir: {error}"));
+        let paths = AppPaths::for_root(root.join("ctxlane"));
+        let profile = TestAutomationProfile::install(&paths);
         Self {
-            paths: AppPaths::for_root(root.join("ctxlane")),
-            installation: InstallationUid::generate()
-                .unwrap_or_else(|error| panic!("installation: {error}")),
+            paths,
+            installation: profile.installation.clone(),
+            profile,
             _temporary: temporary,
         }
     }
@@ -45,6 +49,12 @@ impl Fixture {
         .unwrap_or_else(|error| panic!("open: {error:?}"))
         .into_ready(&stamp("2026-08-22T10:00:01Z"))
         .unwrap_or_else(|error| panic!("ready: {error:?}"))
+    }
+
+    fn request(&self) -> IdentityLeaseRequest {
+        let mut request = request();
+        self.profile.bind_request(&mut request);
+        request
     }
 }
 
@@ -72,7 +82,7 @@ fn request() -> IdentityLeaseRequest {
     request
 }
 
-fn seed_requested(ready: &mut ReadyStore, monotonic: u128) {
+fn seed_requested(ready: &mut ReadyStore, request: &IdentityLeaseRequest, monotonic: u128) {
     let clock = ClockSample::new(
         stamp("2026-08-22T10:00:02Z"),
         MonotonicMoment::from_nanoseconds(monotonic),
@@ -80,7 +90,7 @@ fn seed_requested(ready: &mut ReadyStore, monotonic: u128) {
     );
     ready
         .begin_acquire(
-            &request(),
+            request,
             &parsed::<CallerSubject>("caller:local-controller"),
             &parsed::<HostIdentity>("host:runner-01"),
             &clock,
@@ -91,7 +101,13 @@ fn seed_requested(ready: &mut ReadyStore, monotonic: u128) {
 fn downgrade_to_frozen_v1(connection: &Connection) {
     connection
         .execute_batch(
-            "DROP TRIGGER lease_runtime_clocks_advance_only;
+            "DROP TRIGGER capacity_reservations_insert_held;
+             DROP TRIGGER capacity_reservations_transition_only;
+             DROP TRIGGER capacity_reservations_delete_released;
+             DROP INDEX capacity_reservations_lease_state;
+             DROP INDEX lease_processes_lease_state;
+             DELETE FROM schema_migrations WHERE version = 3;
+             DROP TRIGGER lease_runtime_clocks_advance_only;
              DROP TRIGGER leases_runtime_clock_identity_immutable;
              DROP TRIGGER leases_runtime_clock_insert;
              DROP INDEX lease_runtime_clocks_generation;
@@ -116,6 +132,20 @@ fn downgrade_to_frozen_v1(connection: &Connection) {
     );
 }
 
+pub(super) fn downgrade_to_frozen_v2(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER capacity_reservations_insert_held;
+             DROP TRIGGER capacity_reservations_transition_only;
+             DROP TRIGGER capacity_reservations_delete_released;
+             DROP INDEX capacity_reservations_lease_state;
+             DROP INDEX lease_processes_lease_state;
+             DELETE FROM schema_migrations WHERE version = 3;
+             PRAGMA user_version = 2;",
+        )
+        .unwrap_or_else(|error| panic!("downgrade v2 fixture: {error}"));
+}
+
 fn scalar<T: rusqlite::types::FromSql>(connection: &Connection, sql: &str) -> T {
     connection
         .query_row(sql, [], |row| row.get(0))
@@ -133,7 +163,7 @@ fn populated_frozen_v1_migrates_atomically_and_runtime_clock_guards_hold() {
     let fixture = Fixture::new();
     let mut ready = fixture.ready();
     let issued = u128::from(u64::MAX) + 41;
-    seed_requested(&mut ready, issued);
+    seed_requested(&mut ready, &fixture.request(), issued);
     downgrade_to_frozen_v1(ready.test_connection());
     drop(ready);
 
@@ -146,14 +176,14 @@ fn populated_frozen_v1_migrates_atomically_and_runtime_clock_guards_hold() {
     drop(recovering);
 
     let connection = Connection::open(fixture.paths.automation_lease_store())
-        .unwrap_or_else(|error| panic!("inspect v2: {error}"));
+        .unwrap_or_else(|error| panic!("inspect current schema: {error}"));
     connection
         .pragma_update(None, "foreign_keys", true)
         .unwrap_or_else(|error| panic!("foreign keys: {error}"));
-    assert_eq!(scalar::<i64>(&connection, "PRAGMA user_version"), 2);
+    assert_eq!(scalar::<i64>(&connection, "PRAGMA user_version"), 3);
     assert_eq!(
         scalar::<i64>(&connection, "SELECT count(*) FROM schema_migrations"),
-        2
+        3
     );
     assert_eq!(
         scalar::<i64>(&connection, "SELECT count(*) FROM lease_runtime_clocks"),
@@ -244,10 +274,77 @@ fn populated_frozen_v1_migrates_atomically_and_runtime_clock_guards_hold() {
 }
 
 #[test]
+fn failure_after_v3_ddl_rolls_the_entire_migration_back() {
+    let fixture = Fixture::new();
+    let mut ready = fixture.ready();
+    seed_requested(&mut ready, &fixture.request(), 10);
+    downgrade_to_frozen_v2(ready.test_connection());
+    ready
+        .test_connection()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap_or_else(|error| panic!("checkpoint before failure: {error}"));
+    let database = fixture.paths.automation_lease_store();
+    let before = fs::read(&database).unwrap_or_else(|error| panic!("read before: {error}"));
+
+    ready
+        .test_connection()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_v3_migration
+             BEFORE INSERT ON main.schema_migrations WHEN NEW.version = 3
+             BEGIN SELECT RAISE(ABORT, 'injected v3 migration failure'); END;",
+        )
+        .unwrap_or_else(|error| panic!("install migration-row failure: {error}"));
+    let installation = fixture.installation.clone();
+    assert_eq!(
+        super::migrations::test_apply_v3(
+            ready.test_connection_mut(),
+            &installation,
+            &stamp("2026-08-22T10:01:00Z"),
+        ),
+        Err(StoreError::DatabaseUnavailable)
+    );
+    ready
+        .test_connection()
+        .execute_batch("DROP TRIGGER temp.fail_v3_migration;")
+        .unwrap_or_else(|error| panic!("drop migration failure: {error}"));
+    assert_eq!(
+        scalar::<i64>(ready.test_connection(), "PRAGMA user_version"),
+        2
+    );
+    assert_eq!(
+        scalar::<i64>(
+            ready.test_connection(),
+            "SELECT count(*) FROM sqlite_schema
+             WHERE name IN (
+                'capacity_reservations_lease_state',
+                'lease_processes_lease_state',
+                'capacity_reservations_insert_held',
+                'capacity_reservations_transition_only',
+                'capacity_reservations_delete_released'
+             )"
+        ),
+        0
+    );
+    assert_eq!(
+        scalar::<i64>(
+            ready.test_connection(),
+            "SELECT count(*) FROM schema_migrations"
+        ),
+        2
+    );
+    drop(ready);
+    let after = fs::read(&database).unwrap_or_else(|error| panic!("read after: {error}"));
+    assert_eq!(after, before);
+    assert!(!sidecar(database.clone(), "-journal").exists());
+    assert!(!sidecar(database.clone(), "-wal").exists());
+    assert!(!sidecar(database, "-shm").exists());
+}
+
+#[test]
 fn resolved_v1_without_a_trustworthy_high_water_rolls_back_byte_identically() {
     let fixture = Fixture::new();
     let mut ready = fixture.ready();
-    seed_requested(&mut ready, 10);
+    seed_requested(&mut ready, &fixture.request(), 10);
     resolved_status(ready.test_connection(), LeaseStatus::Active);
     downgrade_to_frozen_v1(ready.test_connection());
     drop(ready);
@@ -297,7 +394,7 @@ fn invalid_frozen_v1_is_qualified_before_the_first_v2_write() {
     for corruption in ["installation", "checksum", "schema"] {
         let fixture = Fixture::new();
         let mut ready = fixture.ready();
-        seed_requested(&mut ready, 10);
+        seed_requested(&mut ready, &fixture.request(), 10);
         downgrade_to_frozen_v1(ready.test_connection());
         match corruption {
             "checksum" => {
@@ -332,7 +429,7 @@ fn invalid_frozen_v1_is_qualified_before_the_first_v2_write() {
         assert!(
             matches!(
                 (corruption, result),
-                ("installation", Err(StoreError::InstallationMismatch))
+                ("installation", Err(StoreError::UnsafeStorage))
                     | ("checksum", Err(StoreError::MigrationChecksumMismatch))
                     | ("schema", Err(StoreError::IntegrityCheckFailed))
             ),

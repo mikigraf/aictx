@@ -18,6 +18,10 @@ use super::contracts::{
     RepositoryId, RunId, Sha256Digest, TenantId, UtcTimestamp, WorkOrderId, WorkspaceId,
 };
 
+#[path = "policy/isolation.rs"]
+mod isolation;
+use isolation::valid_shared_resource_isolation;
+
 const EFFECTIVE_POLICY_DOMAIN: &[u8] = b"ctxlane.effective-policy/v1\0";
 
 /// An explicit controller allow-scope. `Any` adds no authority; it merely
@@ -410,6 +414,23 @@ impl EffectivePolicy {
         self.maximum_session_seconds
     }
 
+    #[must_use]
+    // Only the supported store maps evaluated policy to an OS resource-lock mode.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    pub(crate) const fn concurrency_mode(&self) -> AutomationConcurrencyMode {
+        self.concurrency_mode
+    }
+
+    #[must_use]
+    pub(crate) const fn resource_isolation_is_consistent(&self) -> bool {
+        match self.concurrency_mode {
+            AutomationConcurrencyMode::Exclusive => self.shared_state_isolation.is_none(),
+            AutomationConcurrencyMode::Shared => {
+                valid_shared_resource_isolation(self.isolation, self.shared_state_isolation)
+            }
+        }
+    }
+
     /// Derive a renewal policy from already evaluated authority. The renewal
     /// interval may use, but never exceed, the effective TTL/session ceilings.
     /// Callers must start from a fresh evaluation; this method does not establish
@@ -611,9 +632,7 @@ pub fn evaluate_policy(input: &PolicyEvaluation<'_>) -> PolicyDecision {
         }
         AutomationConcurrencyMode::Shared => {
             if shared_state_isolation != profile.shared_state_isolation_requirement
-                || (shared_state_isolation
-                    == Some(SharedStateIsolationRequirement::PerLeaseIsolated)
-                    && isolation != IsolationClassification::PerLeaseIsolated)
+                || !valid_shared_resource_isolation(isolation, shared_state_isolation)
             {
                 return refuse(RefusalCode::IsolationUnproven);
             }
@@ -766,6 +785,10 @@ const fn concurrency_label(value: AutomationConcurrencyMode) -> &'static str {
         AutomationConcurrencyMode::Shared => "shared",
     }
 }
+
+#[cfg(test)]
+#[path = "policy/test_support.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "policy/tests.rs"]

@@ -1,11 +1,10 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::ErrorKind,
 };
 
-use rusqlite::{
-    Connection, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, MAIN_DB, OpenFlags, TransactionBehavior, params};
 
 use crate::{
     automation::{
@@ -13,17 +12,24 @@ use crate::{
             CallerSubject, HostIdentity, IdentityLeaseRequest, LeaseId, LeaseStatus, RefusalCode,
             Sha256Digest, UtcTimestamp,
         },
-        lease::{ClockSample, Lease, LeaseBinding, ServiceClockGeneration},
+        lease::{ClockSample, ServiceClockGeneration},
     },
-    config::{AppPaths, ensure_secure_directory},
-    model::InstallationUid,
+    config::{
+        AppPaths, MetadataStore, ProfileAutomationDeferredFenceGuard,
+        ProfileAutomationFenceBusyGuard, ProfileAutomationFenceGuard,
+        ProfileAutomationFencePreparation, ProfileFenceRefusal, ensure_secure_directory,
+        prepare_profile_automation_fence, recover_profile_automation_fences,
+        validate_profile_automation_fence_profile,
+    },
+    model::{InstallationUid, ProfileId},
 };
 
 use super::{
     BeginAcquireResult, PersistedAcquireOutcome, StoreError,
-    ids::{AUDIT_PREFIX, COLLISION_RETRIES, LEASE_PREFIX, REQUEST_PREFIX, random_id},
+    fence::fence_store_error,
+    ids::{AUDIT_PREFIX, LEASE_PREFIX, REQUEST_PREFIX, allocate_id},
     load, migrations,
-    records::{PersistedIssuance, StoredTimestamp, refusal_label, replay_retain_until, role_label},
+    records::{PersistedIssuance, StoredTimestamp, replay_retain_until},
     security::{
         configure_connection, enable_wal, insert_service_generation, open_private_file,
         sync_directory, validate_existing_sidecars, validate_store_file,
@@ -31,21 +37,39 @@ use super::{
     },
 };
 
-struct StoreCore {
+#[path = "sqlite/insert.rs"]
+mod insert;
+
+pub(super) struct StoreCore {
     // Field order is deliberate: SQLite checkpoints/closes before the service lock is released.
-    connection: Connection,
+    pub(super) connection: Connection,
+    pub(super) profile_resources: BTreeMap<LeaseId, super::fence::HeldProfileResource>,
+    pub(super) profile_fences: BTreeMap<crate::model::ProfileUid, ProfileAutomationFenceGuard>,
+    pub(super) profile_fence_busy:
+        BTreeMap<crate::model::ProfileUid, Vec<ProfileAutomationFenceBusyGuard>>,
+    pub(super) profile_fence_deferred:
+        BTreeMap<crate::model::ProfileUid, Vec<ProfileAutomationDeferredFenceGuard>>,
+    pub(super) paths: AppPaths,
+    pub(super) installation_uid: InstallationUid,
+    pub(super) fence_cleanup_deferred: BTreeSet<crate::model::ProfileUid>,
+    pub(super) retryable_cleanup_deferred: BTreeSet<crate::model::ProfileUid>,
+    pub(super) durability_uncertain: bool,
+    #[cfg(test)]
+    pub(super) fail_next_post_terminal_cleanup: bool,
+    #[cfg(test)]
+    pub(super) fail_next_post_terminal_cleanup_integrity: bool,
     _service_lock: File,
-    service_generation: ServiceClockGeneration,
+    pub(super) service_generation: ServiceClockGeneration,
 }
 
 /// An opened store that has recorded a new, recovery-incomplete generation.
 pub(crate) struct RecoveringStore {
-    core: StoreCore,
+    pub(super) core: StoreCore,
 }
 
 /// A store whose current generation completed the conservative recovery gate.
 pub(crate) struct ReadyStore {
-    core: StoreCore,
+    pub(super) core: StoreCore,
 }
 
 impl RecoveringStore {
@@ -61,6 +85,8 @@ impl RecoveringStore {
             Err(source) if source.kind() == ErrorKind::NotFound
         );
         ensure_secure_directory(&automation_dir).map_err(|_| StoreError::UnsafeStorage)?;
+        ensure_secure_directory(&paths.state_dir.join("profile-locks"))
+            .map_err(|_| StoreError::UnsafeStorage)?;
         if automation_was_missing {
             sync_directory(&automation_dir)?;
             if let Some(parent) = automation_dir.parent() {
@@ -75,6 +101,11 @@ impl RecoveringStore {
         service_lock
             .try_lock()
             .map_err(|_| StoreError::ServiceBusy)?;
+
+        // Marker validation is read-only and precedes every database write so
+        // an unsafe marker cannot append failed recovery generations.
+        let profile_fences = recover_profile_automation_fences(paths, installation_uid)
+            .map_err(fence_store_error)?;
 
         let database_path = paths.automation_lease_store();
         validate_existing_sidecars(&database_path)?;
@@ -97,6 +128,18 @@ impl RecoveringStore {
         configure_connection(&connection)?;
         migrations::migrate_and_bind(&mut connection, installation_uid, &now)?;
         verify_integrity(&connection)?;
+        {
+            // Existing v3 semantic corruption must fail before this open
+            // appends another recovery generation. Qualified v1/v2 stores
+            // are migrated first, then checked through the same loader.
+            let validation = connection
+                .unchecked_transaction()
+                .map_err(|_| StoreError::DatabaseUnavailable)?;
+            load::validate_all_leases(&validation)?;
+            validation
+                .commit()
+                .map_err(|_| StoreError::DatabaseUnavailable)?;
+        }
         enable_wal(&connection)?;
         verify_connection_settings(&connection)?;
         validate_existing_sidecars(&database_path)?;
@@ -105,6 +148,19 @@ impl RecoveringStore {
         Ok(Self {
             core: StoreCore {
                 connection,
+                profile_resources: BTreeMap::new(),
+                profile_fences,
+                profile_fence_busy: BTreeMap::new(),
+                profile_fence_deferred: BTreeMap::new(),
+                paths: paths.clone(),
+                installation_uid: installation_uid.clone(),
+                fence_cleanup_deferred: BTreeSet::new(),
+                retryable_cleanup_deferred: BTreeSet::new(),
+                durability_uncertain: false,
+                #[cfg(test)]
+                fail_next_post_terminal_cleanup: false,
+                #[cfg(test)]
+                fail_next_post_terminal_cleanup_integrity: false,
                 _service_lock: service_lock,
                 service_generation,
             },
@@ -137,7 +193,15 @@ impl RecoveringStore {
                 |row| row.get(0),
             )
             .map_err(|_| StoreError::IntegrityCheckFailed)?;
-        if recovery_required {
+        if recovery_required
+            || !core.fence_cleanup_deferred.is_empty()
+            || !core.retryable_cleanup_deferred.is_empty()
+            || core.durability_uncertain
+            || !core.profile_fences.is_empty()
+            || !core.profile_fence_busy.is_empty()
+            || !core.profile_fence_deferred.is_empty()
+            || !core.profile_resources.is_empty()
+        {
             return Err(StoreError::RecoveryRequired);
         }
 
@@ -184,6 +248,11 @@ impl RecoveringStore {
     pub(super) const fn test_connection(&self) -> &Connection {
         &self.core.connection
     }
+
+    #[cfg(test)]
+    pub(super) const fn test_connection_mut(&mut self) -> &mut Connection {
+        &mut self.core.connection
+    }
 }
 
 impl ReadyStore {
@@ -192,36 +261,27 @@ impl ReadyStore {
         self.core.service_generation
     }
 
-    pub(crate) fn begin_acquire(
+    pub(in crate::automation::store) fn begin_acquire(
         &mut self,
         request: &IdentityLeaseRequest,
         caller: &CallerSubject,
         host: &HostIdentity,
         issuance_clock: &ClockSample,
     ) -> Result<BeginAcquireResult, StoreError> {
-        if issuance_clock.service_generation() != self.core.service_generation {
-            return Err(StoreError::InvalidRequest);
-        }
-        let issued_at = StoredTimestamp::from_utc(issuance_clock.wall())?;
-        let issued_monotonic = issuance_clock.monotonic().as_nanoseconds().to_be_bytes();
-        let generation = generation_i64(self.core.service_generation)?;
-        let transaction = self
+        // Reading the in-memory latch does not touch the profile filesystem or
+        // database. Its effect is deliberately deferred until after the first
+        // SQL statement and an exact replay binding match.
+        let cleanup_deferred = self.core.has_cleanup_deferred();
+        let first = self
             .core
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreError::DatabaseUnavailable)?;
-
         // This global replay lookup is deliberately the first statement after BEGIN IMMEDIATE.
-        let replay =
-            load::replay_by_client_request(&transaction, request.client_request_id.as_str())?;
-        let canonical = request
-            .canonical_authority_json()
-            .map_err(|_| StoreError::InvalidRequest)?;
-        if canonical.len() > 131_072 {
-            return Err(StoreError::InvalidRequest);
-        }
-        let digest = Sha256Digest::hash(&canonical).to_string();
+        let replay = load::replay_by_client_request(&first, request.client_request_id.as_str())?;
         if let Some(replay) = replay {
+            let canonical = canonical_request(request)?;
+            let digest = Sha256Digest::hash(&canonical).to_string();
             if replay.digest.to_string() != digest
                 || replay.canonical != canonical
                 || &replay.caller != caller
@@ -229,185 +289,384 @@ impl ReadyStore {
             {
                 return Err(StoreError::IdempotencyConflict);
             }
+            if cleanup_deferred {
+                first
+                    .commit()
+                    .map_err(|_| StoreError::DatabaseUnavailable)?;
+                return Err(StoreError::RecoveryRequired);
+            }
+            let row_version = replay.loaded.row_version;
+            let status = replay.loaded.lease.status();
+            let snapshot = replay.loaded.snapshot.clone();
             let outcome = outcome_from_loaded(replay.loaded)?;
-            transaction
+            first
                 .commit()
                 .map_err(|_| StoreError::DatabaseUnavailable)?;
-            return Ok(BeginAcquireResult::new(outcome, true));
+            match status {
+                LeaseStatus::Requested => self.core.validate_lease_fence(&snapshot)?,
+                LeaseStatus::Active | LeaseStatus::Renewing | LeaseStatus::Error => {
+                    let _ = self
+                        .core
+                        .validate_lease_authority_guards(snapshot.lease_id(), &snapshot)?;
+                }
+                LeaseStatus::Refused
+                | LeaseStatus::Closed
+                | LeaseStatus::Revoked
+                | LeaseStatus::Expired => {}
+            }
+            return Ok(BeginAcquireResult::new(outcome, true, row_version));
         }
-        load::validate_all_leases(&transaction)?;
+        first
+            .commit()
+            .map_err(|_| StoreError::DatabaseUnavailable)?;
 
-        let authorization_expiry =
-            StoredTimestamp::from_utc(&request.work_order_authorization.expires_at)?;
-        let replay_retain_until = replay_retain_until(
-            issuance_clock.wall(),
-            &request.work_order_authorization.expires_at,
-        )?;
-        let replay_retention = StoredTimestamp::from_utc(&replay_retain_until)?;
-        let request_record_id = allocate_id(
-            &transaction,
-            REQUEST_PREFIX,
-            "SELECT EXISTS(SELECT 1 FROM lease_requests WHERE request_record_id = ?1)",
-        )?;
-        let lease_text = allocate_id(
-            &transaction,
-            LEASE_PREFIX,
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE lease_id = ?1)",
-        )?;
-        let lease_id =
-            LeaseId::parse(lease_text.clone()).map_err(|_| StoreError::IdentifierCollision)?;
-        let audit_id = allocate_id(
-            &transaction,
-            AUDIT_PREFIX,
-            "SELECT EXISTS(SELECT 1 FROM audit_events WHERE audit_event_id = ?1)",
-        )?;
+        if self.core.has_cleanup_deferred() {
+            return Err(StoreError::RecoveryRequired);
+        }
+        if issuance_clock.service_generation() != self.core.service_generation {
+            return Err(StoreError::InvalidRequest);
+        }
+        let canonical = canonical_request(request)?;
+        let digest = Sha256Digest::hash(&canonical).to_string();
+        let profile_id = request
+            .profile_ref
+            .as_str()
+            .parse::<ProfileId>()
+            .map_err(|_| StoreError::InvalidRequest)?;
+        let metadata = MetadataStore::new(self.core.paths.clone());
+        let had_fence = self.core.profile_fences.contains_key(&request.profile_uid);
+        let mut created_fence = false;
+        let fence_refusal = if had_fence {
+            let result = {
+                let fence = match self.core.fence(&request.profile_uid) {
+                    Ok(fence) => fence,
+                    Err(error) => {
+                        self.core.latch_profile_cleanup(request.profile_uid.clone());
+                        return Err(error);
+                    }
+                };
+                validate_profile_automation_fence_profile(
+                    &metadata,
+                    &self.core.installation_uid,
+                    &profile_id,
+                    request.provider,
+                    &request.profile_uid,
+                    fence,
+                )
+            };
+            result.map_err(|error| {
+                self.core.latch_profile_cleanup(request.profile_uid.clone());
+                fence_store_error(error)
+            })?
+        } else {
+            match prepare_profile_automation_fence(
+                &metadata,
+                &self.core.installation_uid,
+                &profile_id,
+                request.provider,
+                &request.profile_uid,
+            )
+            .map_err(fence_store_error)?
+            {
+                ProfileAutomationFencePreparation::Prepared(guard) => {
+                    if let Err(error) = self.core.retain_fence(request.profile_uid.clone(), guard) {
+                        self.core.latch_profile_cleanup(request.profile_uid.clone());
+                        return Err(error);
+                    }
+                    created_fence = true;
+                    None
+                }
+                ProfileAutomationFencePreparation::Refused(refusal) => Some(refusal),
+                ProfileAutomationFencePreparation::Busy => return Err(StoreError::ServiceBusy),
+                ProfileAutomationFencePreparation::CleanupBusy(guard) => {
+                    self.core
+                        .retain_busy_fence(request.profile_uid.clone(), guard);
+                    return Err(StoreError::ServiceBusy);
+                }
+                ProfileAutomationFencePreparation::CleanupDeferred(failure) => {
+                    self.core
+                        .retain_fence_failure(request.profile_uid.clone(), failure);
+                    return Err(StoreError::UnsafeStorage);
+                }
+            }
+        };
 
-        insert_request(
-            &transaction,
+        let mut commit_attempted = false;
+        let second = persist_acquire_second_phase(
+            &mut self.core.connection,
             request,
             caller,
             host,
-            &request_record_id,
+            issuance_clock,
+            self.core.service_generation,
             &canonical,
             &digest,
-            &authorization_expiry,
-            &replay_retention,
-            &issued_at,
-        )?;
-        insert_requested_lease(
-            &transaction,
-            request,
-            caller,
-            host,
-            &request_record_id,
-            &lease_text,
-            generation,
-            &issued_at,
-            &issued_monotonic,
-        )?;
-        insert_requested_audit(
-            &transaction,
-            request,
-            caller,
-            host,
-            &audit_id,
-            &lease_text,
-            generation,
-            &issued_at,
-        )?;
-        transaction
-            .commit()
-            .map_err(|_| StoreError::DatabaseUnavailable)?;
-
-        let binding = LeaseBinding::from_request(lease_id, request, caller.clone(), host.clone())
-            .map_err(|_| StoreError::InvalidRequest)?;
-        let response = Lease::requested(binding, issuance_clock.clone())
-            .identity_response()
-            .map_err(|_| StoreError::IntegrityCheckFailed)?;
-        Ok(BeginAcquireResult::new(
-            PersistedAcquireOutcome::Requested {
-                response,
-                issuance: PersistedIssuance::new(
-                    issuance_clock.wall().clone(),
-                    issuance_clock.monotonic(),
-                    self.core.service_generation,
-                ),
-            },
-            false,
-        ))
-    }
-
-    pub(crate) fn refuse_requested(
-        &mut self,
-        lease_id: &LeaseId,
-        refusal_code: RefusalCode,
-        now: &UtcTimestamp,
-    ) -> Result<(), StoreError> {
-        let now = StoredTimestamp::from_utc(now)?;
-        let transaction = self
-            .core
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| StoreError::DatabaseUnavailable)?;
-        let loaded = load::lease_by_id(&transaction, lease_id.as_str())?
-            .ok_or(StoreError::InvalidTransition)?;
-        if loaded.lease.status() != LeaseStatus::Requested
-            || loaded.origin_generation != self.core.service_generation
-        {
-            return Err(StoreError::InvalidTransition);
-        }
-        let attribution = load_attribution(&transaction, lease_id.as_str())?
-            .ok_or(StoreError::InvalidTransition)?;
-        if attribution.status != "REQUESTED" {
-            return Err(StoreError::InvalidTransition);
-        }
-        let audit_id = allocate_id(
-            &transaction,
-            AUDIT_PREFIX,
-            "SELECT EXISTS(SELECT 1 FROM audit_events WHERE audit_event_id = ?1)",
-        )?;
-        let changed = transaction
-            .execute(
-                "UPDATE leases
-                 SET status = 'REFUSED', refusal_code = ?1,
-                     terminal_at_utc = ?2, terminal_at_seconds = ?3, terminal_at_nanos = ?4,
-                     row_version = row_version + 1,
-                     next_audit_sequence = next_audit_sequence + 1
-                 WHERE lease_id = ?5 AND status = 'REQUESTED'
-                   AND recovery_state = 'NONE' AND quarantined = 0",
-                params![
-                    refusal_label(refusal_code),
-                    now.wire,
-                    now.seconds,
-                    now.nanos,
-                    lease_id.as_str()
-                ],
-            )
-            .map_err(|_| StoreError::DatabaseUnavailable)?;
-        if changed != 1 {
-            return Err(StoreError::InvalidTransition);
-        }
-        insert_refused_audit(
-            &transaction,
-            &audit_id,
-            lease_id.as_str(),
-            refusal_code,
-            &attribution,
-            &now,
-        )?;
-        transaction
-            .commit()
-            .map_err(|_| StoreError::DatabaseUnavailable)
+            fence_refusal,
+            &mut commit_attempted,
+        );
+        let second = match second {
+            Ok(second) => second,
+            Err(error) => {
+                if commit_attempted {
+                    self.core.latch_profile_cleanup(request.profile_uid.clone());
+                } else if created_fence
+                    && let Err(cleanup) = self.core.try_clear_profile_fence(&request.profile_uid)
+                {
+                    return Err(cleanup);
+                }
+                return Err(error);
+            }
+        };
+        finish_acquire_second_phase(&mut self.core, request, created_fence, second)
     }
 
     #[cfg(test)]
     pub(super) const fn test_connection(&self) -> &Connection {
         &self.core.connection
     }
+
+    #[cfg(test)]
+    pub(super) const fn test_connection_mut(&mut self) -> &mut Connection {
+        &mut self.core.connection
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_latch_durability_uncertain(&mut self) {
+        self.core.durability_uncertain = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_fail_next_post_terminal_cleanup(&mut self) {
+        self.core.fail_next_post_terminal_cleanup = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_fail_next_post_terminal_cleanup_integrity(&mut self) {
+        self.core.fail_next_post_terminal_cleanup_integrity = true;
+    }
+}
+
+pub(super) enum AcquireSecondPhase {
+    Replay(BeginAcquireResult),
+    Conflict,
+    Inserted {
+        result: BeginAcquireResult,
+        lease_id: LeaseId,
+    },
+}
+
+pub(super) fn finish_acquire_second_phase(
+    core: &mut StoreCore,
+    request: &IdentityLeaseRequest,
+    created_fence: bool,
+    second: AcquireSecondPhase,
+) -> Result<BeginAcquireResult, StoreError> {
+    match second {
+        AcquireSecondPhase::Replay(result) => {
+            if matches!(
+                result.outcome().response().status,
+                LeaseStatus::Active | LeaseStatus::Renewing | LeaseStatus::Error
+            ) {
+                core.latch_profile_cleanup(request.profile_uid.clone());
+                return Err(StoreError::RecoveryRequired);
+            }
+            if created_fence && core.try_clear_profile_fence(&request.profile_uid).is_err() {
+                return Err(StoreError::RecoveryRequired);
+            }
+            Ok(result)
+        }
+        AcquireSecondPhase::Conflict => {
+            if created_fence {
+                // Cleanup state never replaces the stable replay conflict.
+                let _ = core.try_clear_profile_fence(&request.profile_uid);
+            }
+            Err(StoreError::IdempotencyConflict)
+        }
+        AcquireSecondPhase::Inserted {
+            mut result,
+            lease_id,
+        } => {
+            if matches!(result.outcome(), PersistedAcquireOutcome::Refused { .. })
+                && let Err(error) = core.post_terminal_cleanup(&lease_id, &request.profile_uid)
+            {
+                core.latch_cleanup_failure(request.profile_uid.clone(), error);
+                result.mark_cleanup_deferred();
+            }
+            Ok(result)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_acquire_second_phase(
+    connection: &mut Connection,
+    request: &IdentityLeaseRequest,
+    caller: &CallerSubject,
+    host: &HostIdentity,
+    issuance_clock: &ClockSample,
+    service_generation: ServiceClockGeneration,
+    canonical: &[u8],
+    digest: &str,
+    fence_refusal: Option<ProfileFenceRefusal>,
+    commit_attempted: &mut bool,
+) -> Result<AcquireSecondPhase, StoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| StoreError::DatabaseUnavailable)?;
+    let replay = load::replay_by_client_request(&transaction, request.client_request_id.as_str())?;
+    if let Some(replay) = replay {
+        let exact = replay.digest.to_string() == digest
+            && replay.canonical == canonical
+            && &replay.caller == caller
+            && &replay.host == host;
+        let phase = if exact {
+            let row_version = replay.loaded.row_version;
+            let outcome = outcome_from_loaded(replay.loaded)?;
+            AcquireSecondPhase::Replay(BeginAcquireResult::new(outcome, true, row_version))
+        } else {
+            AcquireSecondPhase::Conflict
+        };
+        transaction
+            .commit()
+            .map_err(|_| StoreError::DatabaseUnavailable)?;
+        return Ok(phase);
+    }
+    load::validate_all_leases(&transaction)?;
+    let issued_at = StoredTimestamp::from_utc(issuance_clock.wall())?;
+    let issued_monotonic = issuance_clock.monotonic().as_nanoseconds().to_be_bytes();
+    let generation = generation_i64(service_generation)?;
+    let authorization_expiry =
+        StoredTimestamp::from_utc(&request.work_order_authorization.expires_at)?;
+    let replay_retain_until = replay_retain_until(
+        issuance_clock.wall(),
+        &request.work_order_authorization.expires_at,
+    )?;
+    let replay_retention = StoredTimestamp::from_utc(&replay_retain_until)?;
+    let request_record_id = allocate_id(
+        &transaction,
+        REQUEST_PREFIX,
+        "SELECT EXISTS(SELECT 1 FROM lease_requests WHERE request_record_id = ?1)",
+    )?;
+    let lease_text = allocate_id(
+        &transaction,
+        LEASE_PREFIX,
+        "SELECT EXISTS(SELECT 1 FROM leases WHERE lease_id = ?1)",
+    )?;
+    let lease_id =
+        LeaseId::parse(lease_text.clone()).map_err(|_| StoreError::IdentifierCollision)?;
+    let audit_id = allocate_id(
+        &transaction,
+        AUDIT_PREFIX,
+        "SELECT EXISTS(SELECT 1 FROM audit_events WHERE audit_event_id = ?1)",
+    )?;
+    insert::request(
+        &transaction,
+        request,
+        caller,
+        host,
+        &request_record_id,
+        canonical,
+        digest,
+        &authorization_expiry,
+        &replay_retention,
+        &issued_at,
+    )?;
+    insert::requested_lease(
+        &transaction,
+        request,
+        caller,
+        host,
+        &request_record_id,
+        &lease_text,
+        generation,
+        &issued_at,
+        &issued_monotonic,
+    )?;
+    insert::requested_audit(
+        &transaction,
+        request,
+        caller,
+        host,
+        &audit_id,
+        &lease_text,
+        generation,
+        &issued_at,
+    )?;
+    let issuance = PersistedIssuance::new(
+        issuance_clock.wall().clone(),
+        issuance_clock.monotonic(),
+        service_generation,
+    );
+    let (outcome, row_version) = if let Some(refusal) = fence_refusal {
+        let refusal = fence_refusal_code(refusal);
+        let mut loaded = load::lease_by_id(&transaction, lease_id.as_str())?
+            .ok_or(StoreError::IntegrityCheckFailed)?;
+        loaded
+            .lease
+            .refuse(refusal)
+            .map_err(|_| StoreError::IntegrityCheckFailed)?;
+        let response = loaded
+            .lease
+            .identity_response()
+            .map_err(|_| StoreError::IntegrityCheckFailed)?;
+        let after = loaded.lease.snapshot();
+        let row_version = super::lifecycle::persist::persist(
+            &transaction,
+            &loaded,
+            &after,
+            issuance_clock.wall(),
+            super::lifecycle::persist::AuditActor::Service,
+            service_generation,
+        )?;
+        (
+            PersistedAcquireOutcome::Refused {
+                response,
+                issuance,
+                refusal_code: refusal,
+            },
+            row_version,
+        )
+    } else {
+        let loaded = load::lease_by_id(&transaction, lease_id.as_str())?
+            .ok_or(StoreError::IntegrityCheckFailed)?;
+        let row_version = loaded.row_version;
+        (outcome_from_loaded(loaded)?, row_version)
+    };
+    *commit_attempted = true;
+    transaction
+        .commit()
+        .map_err(|_| StoreError::DatabaseUnavailable)?;
+    Ok(AcquireSecondPhase::Inserted {
+        result: BeginAcquireResult::new(outcome, false, row_version),
+        lease_id,
+    })
 }
 
 fn generation_i64(generation: ServiceClockGeneration) -> Result<i64, StoreError> {
     i64::try_from(generation.get()).map_err(|_| StoreError::IntegrityCheckFailed)
 }
 
-fn allocate_id(
-    transaction: &Transaction<'_>,
-    prefix: &str,
-    exists_query: &str,
-) -> Result<String, StoreError> {
-    for _ in 0..COLLISION_RETRIES {
-        let candidate = random_id(prefix).map_err(|()| StoreError::EntropyUnavailable)?;
-        let exists: bool = transaction
-            .query_row(exists_query, [&candidate], |row| row.get(0))
-            .map_err(|_| StoreError::DatabaseUnavailable)?;
-        if !exists {
-            return Ok(candidate);
-        }
+fn canonical_request(request: &IdentityLeaseRequest) -> Result<Vec<u8>, StoreError> {
+    let canonical = request
+        .canonical_authority_json()
+        .map_err(|_| StoreError::InvalidRequest)?;
+    if canonical.len() > 131_072 {
+        Err(StoreError::InvalidRequest)
+    } else {
+        Ok(canonical)
     }
-    Err(StoreError::IdentifierCollision)
 }
 
-fn outcome_from_loaded(loaded: load::LoadedLease) -> Result<PersistedAcquireOutcome, StoreError> {
+const fn fence_refusal_code(refusal: ProfileFenceRefusal) -> RefusalCode {
+    match refusal {
+        ProfileFenceRefusal::ProfileNotFound => RefusalCode::ProfileNotFound,
+        ProfileFenceRefusal::ProviderMismatch => RefusalCode::ProviderMismatch,
+    }
+}
+
+pub(super) fn outcome_from_loaded(
+    loaded: load::LoadedLease,
+) -> Result<PersistedAcquireOutcome, StoreError> {
     let status = loaded.lease.status();
     let response = loaded
         .lease
@@ -435,280 +694,4 @@ fn outcome_from_loaded(loaded: load::LoadedLease) -> Result<PersistedAcquireOutc
             issuance: loaded.issuance,
         },
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn insert_request(
-    transaction: &Transaction<'_>,
-    request: &IdentityLeaseRequest,
-    caller: &CallerSubject,
-    host: &HostIdentity,
-    request_record_id: &str,
-    canonical: &[u8],
-    digest: &str,
-    authorization_expiry: &StoredTimestamp<'_>,
-    replay_retention: &StoredTimestamp<'_>,
-    recorded_at: &StoredTimestamp<'_>,
-) -> Result<(), StoreError> {
-    transaction
-        .execute(
-            "INSERT INTO lease_requests (
-                request_record_id, client_request_id, canonical_authority_digest,
-                canonical_request, authenticated_caller, host_identity,
-                authorization_expires_at_utc, authorization_expires_at_seconds,
-                authorization_expires_at_nanos, replay_retain_until_utc,
-                replay_retain_until_seconds, replay_retain_until_nanos,
-                recorded_at_utc, recorded_at_seconds, recorded_at_nanos
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
-             )",
-            params![
-                request_record_id,
-                request.client_request_id.as_str(),
-                digest,
-                canonical,
-                caller.as_str(),
-                host.as_str(),
-                authorization_expiry.wire,
-                authorization_expiry.seconds,
-                authorization_expiry.nanos,
-                replay_retention.wire,
-                replay_retention.seconds,
-                replay_retention.nanos,
-                recorded_at.wire,
-                recorded_at.seconds,
-                recorded_at.nanos
-            ],
-        )
-        .map(|_| ())
-        .map_err(|_| StoreError::DatabaseUnavailable)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn insert_requested_lease(
-    transaction: &Transaction<'_>,
-    request: &IdentityLeaseRequest,
-    caller: &CallerSubject,
-    host: &HostIdentity,
-    request_record_id: &str,
-    lease_id: &str,
-    service_generation: i64,
-    issued_at: &StoredTimestamp<'_>,
-    issued_monotonic: &[u8; 16],
-) -> Result<(), StoreError> {
-    let policy_digest = request.policy_digest.map(|value| value.to_string());
-    let requested_ttl = i64::try_from(request.requested_ttl_seconds.get())
-        .map_err(|_| StoreError::InvalidRequest)?;
-    transaction
-        .execute(
-            "INSERT INTO leases (
-                lease_id, request_record_id, service_generation, row_version,
-                next_audit_sequence, status, recovery_state, quarantined,
-                tenant_id, work_order_id, work_order_digest, run_id, attempt_id,
-                role, provider, profile_uid, profile_ref, repository_id, workspace_id,
-                environment, authenticated_caller, host_identity, requested_ttl_seconds,
-                requested_policy_digest, issued_at_utc, issued_at_seconds, issued_at_nanos,
-                issued_monotonic_nanos
-             ) VALUES (
-                ?1, ?2, ?3, 1, 2, 'REQUESTED', 'NONE', 0,
-                ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
-             )",
-            params![
-                lease_id,
-                request_record_id,
-                service_generation,
-                request.tenant_id.as_str(),
-                request.work_order_id.as_str(),
-                request.work_order_digest.to_string(),
-                request.run_id.as_str(),
-                request.attempt_id.as_str(),
-                role_label(request.role),
-                request.provider.to_string(),
-                request.profile_uid.as_str(),
-                request.profile_ref.as_str(),
-                request.repository.as_str(),
-                request.workspace_id.as_str(),
-                request.environment.as_str(),
-                caller.as_str(),
-                host.as_str(),
-                requested_ttl,
-                policy_digest,
-                issued_at.wire,
-                issued_at.seconds,
-                issued_at.nanos,
-                issued_monotonic.as_slice()
-            ],
-        )
-        .map(|_| ())
-        .map_err(|_| StoreError::DatabaseUnavailable)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn insert_requested_audit(
-    transaction: &Transaction<'_>,
-    request: &IdentityLeaseRequest,
-    caller: &CallerSubject,
-    host: &HostIdentity,
-    audit_id: &str,
-    lease_id: &str,
-    service_generation: i64,
-    now: &StoredTimestamp<'_>,
-) -> Result<(), StoreError> {
-    transaction
-        .execute(
-            "INSERT INTO audit_events (
-                audit_event_id, lease_id, sequence, service_generation, event_type,
-                outcome, lease_status, recovery_state, quarantined,
-                event_at_utc, event_at_seconds, event_at_nanos, actor,
-                client_request_id, tenant_id, work_order_id, work_order_digest,
-                run_id, attempt_id, role, provider, profile_uid, profile_ref,
-                repository_id, workspace_id, environment, authenticated_caller, host_identity
-             ) VALUES (
-                ?1, ?2, 1, ?3, 'lease.requested', 'recorded', 'REQUESTED', 'NONE', 0,
-                ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20, ?21, ?22
-             )",
-            params![
-                audit_id,
-                lease_id,
-                service_generation,
-                now.wire,
-                now.seconds,
-                now.nanos,
-                caller.as_str(),
-                request.client_request_id.as_str(),
-                request.tenant_id.as_str(),
-                request.work_order_id.as_str(),
-                request.work_order_digest.to_string(),
-                request.run_id.as_str(),
-                request.attempt_id.as_str(),
-                role_label(request.role),
-                request.provider.to_string(),
-                request.profile_uid.as_str(),
-                request.profile_ref.as_str(),
-                request.repository.as_str(),
-                request.workspace_id.as_str(),
-                request.environment.as_str(),
-                caller.as_str(),
-                host.as_str()
-            ],
-        )
-        .map(|_| ())
-        .map_err(|_| StoreError::DatabaseUnavailable)
-}
-
-struct LeaseAttribution {
-    status: String,
-    sequence: i64,
-    service_generation: i64,
-    client_request_id: String,
-    tenant_id: String,
-    work_order_id: String,
-    work_order_digest: String,
-    run_id: String,
-    attempt_id: String,
-    role: String,
-    provider: String,
-    profile_uid: String,
-    profile_ref: String,
-    repository_id: String,
-    workspace_id: String,
-    environment: String,
-    caller: String,
-    host: String,
-}
-
-fn load_attribution(
-    transaction: &Transaction<'_>,
-    lease_id: &str,
-) -> Result<Option<LeaseAttribution>, StoreError> {
-    transaction
-        .query_row(
-            "SELECT l.status, l.next_audit_sequence, l.service_generation,
-                    r.client_request_id, l.tenant_id, l.work_order_id, l.work_order_digest,
-                    l.run_id, l.attempt_id, l.role, l.provider, l.profile_uid, l.profile_ref,
-                    l.repository_id, l.workspace_id, l.environment,
-                    l.authenticated_caller, l.host_identity
-             FROM leases l JOIN lease_requests r ON r.request_record_id = l.request_record_id
-             WHERE l.lease_id = ?1",
-            [lease_id],
-            |row| {
-                Ok(LeaseAttribution {
-                    status: row.get(0)?,
-                    sequence: row.get(1)?,
-                    service_generation: row.get(2)?,
-                    client_request_id: row.get(3)?,
-                    tenant_id: row.get(4)?,
-                    work_order_id: row.get(5)?,
-                    work_order_digest: row.get(6)?,
-                    run_id: row.get(7)?,
-                    attempt_id: row.get(8)?,
-                    role: row.get(9)?,
-                    provider: row.get(10)?,
-                    profile_uid: row.get(11)?,
-                    profile_ref: row.get(12)?,
-                    repository_id: row.get(13)?,
-                    workspace_id: row.get(14)?,
-                    environment: row.get(15)?,
-                    caller: row.get(16)?,
-                    host: row.get(17)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|_| StoreError::IntegrityCheckFailed)
-}
-
-fn insert_refused_audit(
-    transaction: &Transaction<'_>,
-    audit_id: &str,
-    lease_id: &str,
-    refusal_code: RefusalCode,
-    value: &LeaseAttribution,
-    now: &StoredTimestamp<'_>,
-) -> Result<(), StoreError> {
-    transaction
-        .execute(
-            "INSERT INTO audit_events (
-                audit_event_id, lease_id, sequence, service_generation, event_type,
-                outcome, lease_status, recovery_state, quarantined,
-                event_at_utc, event_at_seconds, event_at_nanos, actor,
-                client_request_id, tenant_id, work_order_id, work_order_digest,
-                run_id, attempt_id, role, provider, profile_uid, profile_ref,
-                repository_id, workspace_id, environment, authenticated_caller,
-                host_identity, refusal_code
-             ) VALUES (
-                ?1, ?2, ?3, ?4, 'lease.refused', 'refused', 'REFUSED', 'NONE', 0,
-                ?5, ?6, ?7, 'service', ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
-             )",
-            params![
-                audit_id,
-                lease_id,
-                value.sequence,
-                value.service_generation,
-                now.wire,
-                now.seconds,
-                now.nanos,
-                value.client_request_id,
-                value.tenant_id,
-                value.work_order_id,
-                value.work_order_digest,
-                value.run_id,
-                value.attempt_id,
-                value.role,
-                value.provider,
-                value.profile_uid,
-                value.profile_ref,
-                value.repository_id,
-                value.workspace_id,
-                value.environment,
-                value.caller,
-                value.host,
-                refusal_label(refusal_code)
-            ],
-        )
-        .map(|_| ())
-        .map_err(|_| StoreError::DatabaseUnavailable)
 }

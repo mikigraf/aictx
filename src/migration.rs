@@ -15,7 +15,10 @@ use std::{fmt, fs::File, path::Path};
 
 use crate::{
     Error, Result,
-    config::{AppPaths, ProfileLockGuard, acquire_profile_lock, decode_config_for_migration},
+    config::{
+        AppPaths, ProfileLockGuard, acquire_profile_lock, decode_config_for_migration,
+        ensure_profile_automation_unfenced,
+    },
     model::{Config, InstallationUid, MutableState, Profile},
 };
 use filesystem::{VendorEntry, VendorEntryKind};
@@ -286,10 +289,14 @@ impl MigrationPlan {
             .collect::<Vec<_>>();
         lock_paths.sort();
         lock_paths.dedup();
-        lock_paths
+        let guards = lock_paths
             .iter()
             .map(|path| acquire_profile_lock(path, true))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        for profile in self.migrated_config.profiles.values() {
+            ensure_profile_automation_unfenced(&self.legacy, profile.profile_uid())?;
+        }
+        Ok(guards)
     }
 
     fn revalidate_source_and_target(&self) -> Result<()> {

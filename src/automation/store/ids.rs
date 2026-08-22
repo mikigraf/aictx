@@ -1,11 +1,33 @@
+use rusqlite::Transaction;
+
+use super::StoreError;
+
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 pub(super) const AUDIT_PREFIX: &str = "audit_";
+pub(super) const CAPACITY_PREFIX: &str = "capacity_";
 pub(super) const LEASE_PREFIX: &str = "lease_";
 pub(super) const REQUEST_PREFIX: &str = "request_";
 pub(super) const SERVICE_PREFIX: &str = "service_";
 pub(super) const STORE_PREFIX: &str = "store_";
 pub(super) const COLLISION_RETRIES: usize = 16;
+
+pub(super) fn allocate_id(
+    transaction: &Transaction<'_>,
+    prefix: &str,
+    exists_query: &str,
+) -> Result<String, StoreError> {
+    for _ in 0..COLLISION_RETRIES {
+        let candidate = random_id(prefix).map_err(|()| StoreError::EntropyUnavailable)?;
+        let exists: bool = transaction
+            .query_row(exists_query, [&candidate], |row| row.get(0))
+            .map_err(|_| StoreError::DatabaseUnavailable)?;
+        if !exists {
+            return Ok(candidate);
+        }
+    }
+    Err(StoreError::IdentifierCollision)
+}
 
 pub(super) fn random_id(prefix: &str) -> Result<String, ()> {
     let mut bytes = [0_u8; 16];

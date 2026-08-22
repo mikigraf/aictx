@@ -5,20 +5,26 @@ use tempfile::TempDir;
 use crate::{
     automation::{
         contracts::{
-            CallerSubject, HostIdentity, IdentityLeaseRequest, ProfileRef, RefusalCode,
-            RequestedTtlSeconds, Sha256Digest, UtcTimestamp,
+            CallerSubject, HostIdentity, IdentityLeaseRequest, RefusalCode, RequestedTtlSeconds,
+            Sha256Digest, UtcTimestamp,
         },
         lease::{ClockSample, MonotonicMoment},
-        store::{PersistedAcquireOutcome, ReadyStore, RecoveringStore},
+        store::{
+            AuthenticatedRequestControl, PersistedAcquireOutcome, ReadyStore, RecoveringStore,
+        },
     },
     config::AppPaths,
     model::InstallationUid,
 };
 
+use super::lifecycle_types::NonCapacityRefusal;
+use super::test_support::TestAutomationProfile;
+
 struct Fixture {
     _temporary: TempDir,
     paths: AppPaths,
     installation: InstallationUid,
+    profile: TestAutomationProfile,
 }
 
 impl Fixture {
@@ -28,10 +34,12 @@ impl Fixture {
             .path()
             .canonicalize()
             .unwrap_or_else(|error| panic!("canonical tempdir: {error}"));
+        let paths = AppPaths::for_root(root.join("ctxlane"));
+        let profile = TestAutomationProfile::install(&paths);
         Self {
-            paths: AppPaths::for_root(root.join("ctxlane")),
-            installation: InstallationUid::generate()
-                .unwrap_or_else(|error| panic!("installation: {error}")),
+            paths,
+            installation: profile.installation.clone(),
+            profile,
             _temporary: temporary,
         }
     }
@@ -45,6 +53,12 @@ impl Fixture {
         .unwrap_or_else(|error| panic!("open: {error:?}"))
         .into_ready(&stamp("2026-08-22T10:00:01Z"))
         .unwrap_or_else(|error| panic!("ready: {error:?}"))
+    }
+
+    fn request(&self) -> IdentityLeaseRequest {
+        let mut request = request();
+        self.profile.bind_request(&mut request);
+        request
     }
 }
 
@@ -80,6 +94,11 @@ fn host() -> HostIdentity {
     parsed("host:runner-01")
 }
 
+fn policy_refusal(code: RefusalCode) -> NonCapacityRefusal {
+    NonCapacityRefusal::from_evaluation(code)
+        .unwrap_or_else(|| panic!("capacity denial is activation-owned"))
+}
+
 fn clock(ready: &ReadyStore, monotonic: u128) -> ClockSample {
     ClockSample::new(
         stamp("2026-08-22T10:00:02Z"),
@@ -90,28 +109,30 @@ fn clock(ready: &ReadyStore, monotonic: u128) -> ClockSample {
 
 #[test]
 fn semantic_failures_remain_durable_requested_and_refused_replay_outcomes() {
-    let mut authorization_mismatch = request();
-    authorization_mismatch.profile_ref = parsed::<ProfileRef>("codex:different-profile");
-    let mut ttl_exceeded = request();
-    ttl_exceeded.requested_ttl_seconds =
-        RequestedTtlSeconds::from_seconds(901).unwrap_or_else(|error| panic!("ttl: {error:?}"));
-    let mut not_yet_valid = request();
-    not_yet_valid.work_order_authorization.not_before = stamp("2026-08-22T11:00:00Z");
-    let mut policy_mismatch = request();
-    policy_mismatch.policy_digest = Some(parsed::<Sha256Digest>(
-        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    ));
-
-    for (request, refusal) in [
-        (
-            authorization_mismatch,
-            RefusalCode::WorkOrderAuthorizationMismatch,
-        ),
-        (ttl_exceeded, RefusalCode::RequestedTtlNotAllowed),
-        (not_yet_valid, RefusalCode::WorkOrderProofInvalid),
-        (policy_mismatch, RefusalCode::PolicyDigestMismatch),
+    for (case, refusal) in [
+        (0, RefusalCode::WorkOrderAuthorizationMismatch),
+        (1, RefusalCode::RequestedTtlNotAllowed),
+        (2, RefusalCode::WorkOrderProofInvalid),
+        (3, RefusalCode::PolicyDigestMismatch),
     ] {
         let fixture = Fixture::new();
+        let mut request = fixture.request();
+        match case {
+            0 => request.work_order_id = parsed("wo_01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+            1 => {
+                request.requested_ttl_seconds = RequestedTtlSeconds::from_seconds(901)
+                    .unwrap_or_else(|error| panic!("ttl: {error:?}"));
+            }
+            2 => {
+                request.work_order_authorization.not_before = stamp("2026-08-22T11:00:00Z");
+            }
+            3 => {
+                request.policy_digest = Some(parsed::<Sha256Digest>(
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                ));
+            }
+            _ => unreachable!(),
+        }
         let mut ready = fixture.ready();
         let begun = ready
             .begin_acquire(&request, &caller(), &host(), &clock(&ready, 10))
@@ -126,10 +147,18 @@ fn semantic_failures_remain_durable_requested_and_refused_replay_outcomes() {
         assert!(requested_replay.replayed());
         assert_eq!(requested_replay.outcome(), begun.outcome());
 
+        let authenticated_caller = caller();
+        let authenticated_host = host();
+        let control = AuthenticatedRequestControl::new(
+            begun.outcome().lease_id(),
+            begun.row_version(),
+            &authenticated_caller,
+            &authenticated_host,
+        );
         ready
             .refuse_requested(
-                begun.outcome().lease_id(),
-                refusal,
+                &control,
+                policy_refusal(refusal),
                 &stamp("2026-08-22T10:00:03Z"),
             )
             .unwrap_or_else(|error| panic!("refuse {refusal:?}: {error:?}"));

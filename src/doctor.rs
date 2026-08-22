@@ -3,7 +3,10 @@ use std::{env, path::Path};
 use serde::Serialize;
 
 use crate::{
-    config::{AppPaths, validate_secure_directory, validate_sensitive_file},
+    config::{
+        AppPaths, acquire_ordered_profile_locks, ensure_profile_automation_unfenced,
+        validate_secure_directory, validate_sensitive_file,
+    },
     model::{ClaudeAuth, CodexAuth, Config, Profile, Provider, validate_wif_token_location},
     runner::{
         is_blocked_key, resolve_vendor_binary, validate_claude_settings, validate_codex_settings,
@@ -184,6 +187,32 @@ pub fn inspect(
                 CheckLevel::Failure,
                 format!("{profile_id} native WIF runtime"),
                 "Codex WIF enrollment is stored, but native runtime qualification is unavailable in this release",
+            );
+            continue;
+        }
+        let alias_path = paths.profile_lock(profile.provider(), profile_id.name());
+        let lifecycle_path = paths.profile_lifecycle_lock(profile.profile_uid());
+        let resource_path = paths.profile_resource_lock(profile.profile_uid());
+        let _profile_locks = match acquire_ordered_profile_locks([
+            (alias_path, false),
+            (lifecycle_path, false),
+            (resource_path, true),
+        ]) {
+            Ok(locks) => locks,
+            Err(error) => {
+                report.push(
+                    CheckLevel::Failure,
+                    format!("{profile_id} state isolation"),
+                    error.to_string(),
+                );
+                continue;
+            }
+        };
+        if let Err(error) = ensure_profile_automation_unfenced(paths, profile.profile_uid()) {
+            report.push(
+                CheckLevel::Failure,
+                format!("{profile_id} state isolation"),
+                error.to_string(),
             );
             continue;
         }

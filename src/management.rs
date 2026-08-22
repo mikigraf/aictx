@@ -8,7 +8,7 @@ use crate::{
     Error, Result,
     config::{
         AppPaths, MetadataStore, OrderedProfileLocks, acquire_ordered_profile_locks,
-        acquire_profile_lock, ensure_secure_directory,
+        acquire_profile_lock, ensure_profile_automation_unfenced, ensure_secure_directory,
     },
     model::{
         AutomationPolicy, BillingDomain, Binding, ClaudeAuth, CodexAuth, CodexCredentialStore,
@@ -171,6 +171,7 @@ pub fn edit_profile(
         ]
         .into_iter(),
     )?;
+    ensure_profile_automation_unfenced(paths, expected.profile_uid())?;
     store.update_config(|config| {
         let profile = expected_profile_mut(config, id, expected)?;
         apply_profile_edit(profile, edit)?;
@@ -198,6 +199,7 @@ pub fn rename_profile(
         ]
         .into_iter(),
     )?;
+    ensure_profile_automation_unfenced(paths, expected.profile_uid())?;
     store.update_config(|config| {
         let current = config.profiles.get(old).ok_or(Error::ConfigBusy)?;
         if current != expected {
@@ -247,6 +249,7 @@ pub(crate) fn remove_profile_with<T>(
         ]
         .into_iter(),
     )?;
+    ensure_profile_automation_unfenced(paths, expected.profile_uid())?;
     store.update_config(|config| {
         let current = config.profiles.get(id).ok_or(Error::ConfigBusy)?;
         if current != expected {

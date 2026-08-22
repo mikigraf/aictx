@@ -51,6 +51,7 @@ fn binding() -> LeaseBinding {
         repository: parsed::<RepositoryId>("github:acme/repo"),
         workspace_id: parsed::<WorkspaceId>("workspace-one"),
         environment: parsed::<EnvironmentName>("production"),
+        requested_policy_digest: None,
         initial_requested_ttl_seconds: 60,
         signed_maximum_ttl_seconds: 600,
         signed_maximum_session_seconds: 600,

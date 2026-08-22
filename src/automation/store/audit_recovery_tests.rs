@@ -2,13 +2,13 @@ use rusqlite::{Connection, params};
 
 use crate::automation::{
     contracts::{LeaseStatus, Sha256Digest},
-    store::{RecoveringStore, RecoveryPageRequest, StoreError, load_tests, recovery_tests},
+    store::{RecoveringStore, StoreError, load_tests, recovery_tests},
 };
 
 #[test]
 fn authority_progress_cannot_clear_a_recovery_gate() {
     let fixture = load_tests::Fixture::new();
-    let request = load_tests::request();
+    let request = fixture.request();
     let mut ready = fixture.ready();
     load_tests::seed(&mut ready, &request);
     let connection = ready.test_connection();
@@ -60,7 +60,7 @@ fn inject_recovery_gate_before_renewal(connection: &Connection) {
 #[test]
 fn process_start_requires_a_matching_launch_intent() {
     let fixture = load_tests::Fixture::new();
-    let request = load_tests::request();
+    let request = fixture.request();
     let mut ready = fixture.ready();
     load_tests::seed(&mut ready, &request);
     let connection = ready.test_connection();
@@ -90,7 +90,7 @@ fn process_start_requires_a_matching_launch_intent() {
 #[test]
 fn unmatched_process_audit_cannot_escape_the_recovery_gate() {
     let fixture = load_tests::Fixture::new();
-    let request = load_tests::request();
+    let request = fixture.request();
     let mut ready = fixture.ready();
     load_tests::seed(&mut ready, &request);
     load_tests::resolved_status(ready.test_connection(), LeaseStatus::Active);
@@ -99,31 +99,62 @@ fn unmatched_process_audit_cannot_escape_the_recovery_gate() {
         .test_connection()
         .execute("DELETE FROM lease_processes", [])
         .unwrap_or_else(|error| panic!("remove process evidence: {error}"));
+    let before = ready
+        .test_connection()
+        .query_row(
+            "SELECT (SELECT count(*) FROM service_generations),
+                    (SELECT count(*) FROM audit_events), status, row_version,
+                    (SELECT count(*) FROM lease_processes)
+             FROM leases",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .unwrap_or_else(|error| panic!("corrupt projection: {error}"));
     drop(ready);
 
-    let recovering = RecoveringStore::open(
-        &fixture.paths,
-        &fixture.installation,
-        &load_tests::stamp("2026-08-22T10:01:00Z"),
-    )
-    .unwrap_or_else(|error| panic!("reopen: {error:?}"));
-    assert_eq!(
-        recovering.recovery_candidates(
-            &RecoveryPageRequest::first(10)
-                .unwrap_or_else(|error| panic!("page request: {error:?}")),
-        ),
-        Err(StoreError::IntegrityCheckFailed),
-    );
     assert!(matches!(
-        recovering.into_ready(&load_tests::stamp("2026-08-22T10:01:01Z")),
+        RecoveringStore::open(
+            &fixture.paths,
+            &fixture.installation,
+            &load_tests::stamp("2026-08-22T10:01:00Z"),
+        ),
         Err(StoreError::IntegrityCheckFailed)
     ));
+    let connection = Connection::open(fixture.paths.automation_lease_store())
+        .unwrap_or_else(|error| panic!("inspect rejected open: {error}"));
+    let after = connection
+        .query_row(
+            "SELECT (SELECT count(*) FROM service_generations),
+                    (SELECT count(*) FROM audit_events), status, row_version,
+                    (SELECT count(*) FROM lease_processes)
+             FROM leases",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .unwrap_or_else(|error| panic!("rejected-open projection: {error}"));
+    assert_eq!(after, before);
 }
 
 #[test]
 fn an_error_lease_can_expire_without_becoming_replay_corruption() {
     let fixture = load_tests::Fixture::new();
-    let request = load_tests::request();
+    let request = fixture.request();
     let mut ready = fixture.ready();
     load_tests::seed(&mut ready, &request);
     load_tests::resolved_status(ready.test_connection(), LeaseStatus::Error);
@@ -175,7 +206,7 @@ fn expire_error_lease(connection: &Connection) {
 #[test]
 fn recovery_markers_cannot_rewrite_the_error_reason() {
     let fixture = load_tests::Fixture::new();
-    let request = load_tests::request();
+    let request = fixture.request();
     let mut ready = fixture.ready();
     load_tests::seed(&mut ready, &request);
     load_tests::resolved_status(ready.test_connection(), LeaseStatus::Error);
@@ -222,7 +253,7 @@ fn rewrite_error_reason_through_recovery(connection: &Connection) {
 #[test]
 fn every_historical_authority_digest_honors_the_request_assertion() {
     let fixture = load_tests::Fixture::new();
-    let mut request = load_tests::request();
+    let mut request = fixture.request();
     request.policy_digest = Some(
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .parse::<Sha256Digest>()
@@ -267,7 +298,7 @@ fn persisted_deadlines_cannot_widen_or_replace_signed_request_limits() {
         DeadlineCorruption::MaximumSession,
     ] {
         let fixture = load_tests::Fixture::new();
-        let request = load_tests::request();
+        let request = fixture.request();
         let mut ready = fixture.ready();
         load_tests::seed(&mut ready, &request);
         let status = if matches!(corruption, DeadlineCorruption::RenewalTtl) {

@@ -14,6 +14,61 @@ use super::StoreError;
 
 const MAX_PAGE_SIZE: u16 = 100;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveryMutationResult {
+    status: LeaseStatus,
+    row_version: u64,
+    released_reservations: u64,
+    changed: bool,
+    cleanup_deferred: bool,
+}
+
+impl RecoveryMutationResult {
+    pub(super) const fn new(
+        status: LeaseStatus,
+        row_version: u64,
+        released_reservations: u64,
+        changed: bool,
+    ) -> Self {
+        Self {
+            status,
+            row_version,
+            released_reservations,
+            changed,
+            cleanup_deferred: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn status(self) -> LeaseStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub(crate) const fn row_version(self) -> u64 {
+        self.row_version
+    }
+
+    #[must_use]
+    pub(crate) const fn released_reservations(self) -> u64 {
+        self.released_reservations
+    }
+
+    #[must_use]
+    pub(crate) const fn changed(self) -> bool {
+        self.changed
+    }
+
+    #[must_use]
+    pub(crate) const fn cleanup_deferred(self) -> bool {
+        self.cleanup_deferred
+    }
+
+    pub(super) fn mark_cleanup_deferred(&mut self) {
+        self.cleanup_deferred = true;
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecoveryCursor(pub(super) LeaseId);
 
@@ -40,7 +95,7 @@ impl RecoveryPageRequest {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub(crate) struct RecoveryPage {
     pub(super) candidates: Vec<RecoveryCandidate>,
     pub(super) next_cursor: Option<RecoveryCursor>,
@@ -68,7 +123,7 @@ impl fmt::Debug for RecoveryPage {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub(crate) struct RecoveryCandidate {
     pub(super) lease_id: LeaseId,
     pub(super) status: LeaseStatus,
@@ -231,7 +286,7 @@ pub(crate) enum ProcessState {
     RecoveryRequired,
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub(crate) struct ProcessEvidence {
     pub(super) process_record_id: String,
     pub(super) state: ProcessState,

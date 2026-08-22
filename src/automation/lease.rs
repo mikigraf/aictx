@@ -14,6 +14,7 @@ use super::{
     policy::EffectivePolicy,
 };
 
+mod activation;
 mod clock;
 mod error;
 mod replay;
@@ -272,57 +273,6 @@ impl Lease {
         Ok(())
     }
 
-    pub fn activate(
-        &mut self,
-        policy: &EffectivePolicy,
-        resolution: LeaseResolution,
-        now: &ClockSample,
-    ) -> Result<(), LeaseDomainError> {
-        self.require_status(LeaseStatus::Requested)?;
-        self.observe_activation_clock(now)?;
-        self.validate_policy_binding(policy)?;
-        if policy.requested_ttl_seconds != self.binding.initial_requested_ttl_seconds {
-            return Err(LeaseDomainError::PolicyBindingMismatch);
-        }
-        validate_resolution(self.binding.provider, policy, &resolution)?;
-        let maximum_by_session = add_seconds(self.issued_at(), policy.maximum_session_seconds)?;
-        let maximum_expires_at = earlier(&policy.signed_expires_at, &maximum_by_session).clone();
-        let expires_at = add_seconds(self.issued_at(), policy.requested_ttl_seconds)?;
-        if maximum_expires_at.is_before(&expires_at) || !self.issued_at().is_before(&expires_at) {
-            return Err(LeaseDomainError::SessionLimitReached);
-        }
-        let maximum_runtime = wall_nanoseconds_between(self.issued_at(), &maximum_expires_at)?;
-        let monotonic_maximum_deadline = self
-            .issuance_clock
-            .monotonic
-            .checked_add_nanoseconds(maximum_runtime)
-            .ok_or(LeaseDomainError::ClockOverflow)?;
-        let monotonic_deadline = self
-            .issuance_clock
-            .monotonic
-            .checked_add_seconds(policy.requested_ttl_seconds)
-            .ok_or(LeaseDomainError::ClockOverflow)?;
-        if monotonic_deadline > monotonic_maximum_deadline
-            || deadline_reached(now, &expires_at, monotonic_deadline)
-            || deadline_reached(now, &maximum_expires_at, monotonic_maximum_deadline)
-        {
-            return Err(LeaseDomainError::SessionLimitReached);
-        }
-        self.state = LeaseState::Active(ResolvedAuthority {
-            resolution,
-            effective_policy_digest: policy.digest(),
-            fencing_generation: FencingGeneration::from_value(1)
-                .map_err(|_| LeaseDomainError::GenerationExhausted)?,
-            expires_at,
-            maximum_expires_at,
-            interval_anchor_wall: self.issuance_clock.wall.clone(),
-            interval_anchor_monotonic: self.issuance_clock.monotonic,
-            monotonic_deadline,
-            monotonic_maximum_deadline,
-        });
-        Ok(())
-    }
-
     /// Start renewal against a freshly recomputed effective policy.
     pub fn begin_renewal(
         &mut self,
@@ -331,11 +281,15 @@ impl Lease {
         now: &ClockSample,
     ) -> Result<FencingGeneration, LeaseDomainError> {
         self.validate_caller(control)?;
-        if self.enforce_deadlines(now)? {
+        let control_error = self.validate_control(control).err();
+        let deadline_result = self.enforce_deadlines(now);
+        if let Some(error) = control_error {
+            return Err(error);
+        }
+        if deadline_result? {
             return Err(self.state_error(LeaseStatus::Renewing));
         }
         self.require_status(LeaseStatus::Active)?;
-        self.validate_control(control)?;
         self.validate_policy_binding(current_policy)?;
         if current_policy.requested_ttl_seconds > current_policy.maximum_ttl_seconds
             || current_policy.requested_ttl_seconds > current_policy.maximum_session_seconds
@@ -348,6 +302,7 @@ impl Lease {
                 to: LeaseStatus::Renewing,
             });
         };
+        validate_resolution(self.binding.provider, current_policy, &authority.resolution)?;
         let current_policy_maximum =
             add_seconds(self.issued_at(), current_policy.maximum_session_seconds)?;
         let effective_maximum = earlier(
@@ -423,7 +378,9 @@ impl Lease {
         control: &LeaseControl<'_>,
         now: &ClockSample,
     ) -> Result<(), LeaseDomainError> {
-        if let Err(error) = self.validate_caller(control) {
+        let control_error = self.validate_control(control).err();
+        let deadline_result = self.enforce_deadlines(now);
+        if let Some(error) = control_error {
             if let LeaseState::Renewing { authority, .. } = &self.state {
                 self.state = LeaseState::Revoked {
                     authority: authority.clone(),
@@ -432,7 +389,7 @@ impl Lease {
             }
             return Err(error);
         }
-        if self.enforce_deadlines(now)? {
+        if deadline_result? {
             return Err(self.state_error(LeaseStatus::Active));
         }
         self.require_status(LeaseStatus::Renewing)?;
@@ -440,13 +397,6 @@ impl Lease {
             return Err(LeaseDomainError::LeaseNotActive);
         };
         let authority = authority.clone();
-        if let Err(error) = self.validate_control(control) {
-            self.state = LeaseState::Revoked {
-                authority,
-                reason: LeaseReasonCode::RenewalAcknowledgementFailed,
-            };
-            return Err(error);
-        }
         self.state = LeaseState::Active(authority);
         Ok(())
     }
@@ -458,20 +408,26 @@ impl Lease {
         now: &ClockSample,
     ) -> Result<(), LeaseDomainError> {
         self.validate_caller(control)?;
-        if !matches!(
+        let control_error = self.validate_control(control).err();
+        let reason_error = (!matches!(
             reason,
             LeaseReasonCode::Completed | LeaseReasonCode::WorkerFailed
-        ) {
-            return Err(LeaseDomainError::InvalidReason {
-                status: LeaseStatus::Closed,
-                reason,
-            });
+        ))
+        .then_some(LeaseDomainError::InvalidReason {
+            status: LeaseStatus::Closed,
+            reason,
+        });
+        let deadline_result = self.enforce_deadlines(now);
+        if let Some(error) = control_error {
+            return Err(error);
         }
-        if self.enforce_deadlines(now)? {
+        if let Some(error) = reason_error {
+            return Err(error);
+        }
+        if deadline_result? {
             return Err(self.state_error(LeaseStatus::Closed));
         }
         self.require_active_or_renewing(LeaseStatus::Closed)?;
-        self.validate_control(control)?;
         let authority = self
             .state
             .authority()
@@ -501,6 +457,30 @@ impl Lease {
             .ok_or(LeaseDomainError::LeaseNotActive)?;
         self.state = LeaseState::Revoked { authority, reason };
         Ok(())
+    }
+
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    pub(crate) fn revoke_controlled(
+        &mut self,
+        control: &LeaseControl<'_>,
+        now: &ClockSample,
+    ) -> Result<(), LeaseDomainError> {
+        self.validate_caller(control)?;
+        let control_error = self.validate_control(control).err();
+        let deadline_result = self.enforce_deadlines(now);
+        if let Some(error) = control_error {
+            return Err(error);
+        }
+        if deadline_result? {
+            return Err(self.state_error(LeaseStatus::Revoked));
+        }
+        if !matches!(
+            self.status(),
+            LeaseStatus::Active | LeaseStatus::Renewing | LeaseStatus::Error
+        ) {
+            return Err(LeaseDomainError::LeaseNotActive);
+        }
+        self.revoke(LeaseReasonCode::OperatorRevoked)
     }
 
     pub fn mark_error(&mut self, reason: LeaseReasonCode) -> Result<(), LeaseDomainError> {
@@ -627,6 +607,14 @@ impl Lease {
         require_generation(current, control.fencing_generation)
     }
 
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    pub(crate) fn validate_control_binding(
+        &self,
+        control: &LeaseControl<'_>,
+    ) -> Result<(), LeaseDomainError> {
+        self.validate_control(control)
+    }
+
     fn validate_caller(&self, control: &LeaseControl<'_>) -> Result<(), LeaseDomainError> {
         if control.caller_subject == &self.binding.caller_subject {
             Ok(())
@@ -635,7 +623,10 @@ impl Lease {
         }
     }
 
-    fn observe_activation_clock(&mut self, now: &ClockSample) -> Result<(), LeaseDomainError> {
+    pub(crate) fn observe_activation_clock(
+        &mut self,
+        now: &ClockSample,
+    ) -> Result<(), LeaseDomainError> {
         if now.service_generation != self.issuance_clock.service_generation {
             return Err(LeaseDomainError::ClockGenerationMismatch);
         }
@@ -661,6 +652,10 @@ impl Lease {
     }
 
     fn validate_policy_binding(&self, policy: &EffectivePolicy) -> Result<(), LeaseDomainError> {
+        if !policy.resource_isolation_is_consistent() {
+            return Err(LeaseDomainError::PolicyBindingMismatch);
+        }
+        let digest = policy.digest();
         let matches = self.binding.client_request_id == policy.client_request_id
             && self.binding.authority_digest == policy.source_request_digest
             && self.binding.tenant_id == policy.tenant_id
@@ -676,7 +671,18 @@ impl Lease {
             && self.binding.workspace_id == policy.workspace_id
             && self.binding.environment == policy.environment
             && self.binding.caller_subject == policy.caller_subject
-            && self.binding.host_identity == policy.host_identity;
+            && self.binding.host_identity == policy.host_identity
+            && self
+                .binding
+                .requested_policy_digest
+                .is_none_or(|expected| expected == digest)
+            && policy.maximum_ttl_seconds <= self.binding.signed_maximum_ttl_seconds
+            && policy.maximum_session_seconds <= self.binding.signed_maximum_session_seconds
+            && policy.requested_ttl_seconds <= policy.maximum_ttl_seconds
+            && policy.requested_ttl_seconds <= policy.maximum_session_seconds
+            && policy.requested_ttl_seconds <= self.binding.signed_maximum_ttl_seconds
+            && policy.requested_ttl_seconds <= self.binding.signed_maximum_session_seconds
+            && policy.signed_expires_at == self.binding.signed_authorization_expires_at;
         let capacity_matches = self.binding.profile_uid == policy.capacity_claim.profile_uid
             && self.binding.provider == policy.capacity_claim.provider
             && self.binding.caller_subject == policy.capacity_claim.caller_subject

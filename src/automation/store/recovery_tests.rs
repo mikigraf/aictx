@@ -10,18 +10,24 @@ use crate::{
             RefusalCode, UtcTimestamp,
         },
         lease::{ClockSample, MonotonicMoment},
-        store::{PersistedAcquireOutcome, ReadyStore, RecoveringStore, StoreError},
+        store::{
+            AuthenticatedRequestControl, PersistedAcquireOutcome, ReadyStore, RecoveringStore,
+            StoreError,
+        },
     },
     config::AppPaths,
     model::InstallationUid,
 };
 
+use super::lifecycle_types::NonCapacityRefusal;
 use super::load_tests::{resolved_status, transition_to_revoked};
+use super::test_support::TestAutomationProfile;
 
 struct Fixture {
     _temporary: TempDir,
     paths: AppPaths,
     installation: InstallationUid,
+    profile: TestAutomationProfile,
 }
 
 impl Fixture {
@@ -31,10 +37,12 @@ impl Fixture {
             .path()
             .canonicalize()
             .unwrap_or_else(|error| panic!("canonical tempdir: {error}"));
+        let paths = AppPaths::for_root(root.join("ctxlane"));
+        let profile = TestAutomationProfile::install(&paths);
         Self {
-            paths: AppPaths::for_root(root.join("ctxlane")),
-            installation: InstallationUid::generate()
-                .unwrap_or_else(|error| panic!("installation: {error}")),
+            paths,
+            installation: profile.installation.clone(),
+            profile,
             _temporary: temporary,
         }
     }
@@ -48,6 +56,12 @@ impl Fixture {
         self.recovering("2026-08-22T10:00:00Z")
             .into_ready(&stamp("2026-08-22T10:00:01Z"))
             .unwrap_or_else(|error| panic!("ready: {error:?}"))
+    }
+
+    fn request(&self) -> IdentityLeaseRequest {
+        let mut request = request();
+        self.profile.bind_request(&mut request);
+        request
     }
 }
 
@@ -83,6 +97,11 @@ fn host() -> HostIdentity {
     parsed("host:runner-01")
 }
 
+fn refusal(code: RefusalCode) -> NonCapacityRefusal {
+    NonCapacityRefusal::from_evaluation(code)
+        .unwrap_or_else(|| panic!("capacity denial is activation-owned"))
+}
+
 fn clock(store: &ReadyStore, wall: &str, monotonic: u128) -> ClockSample {
     ClockSample::new(
         stamp(wall),
@@ -91,15 +110,15 @@ fn clock(store: &ReadyStore, wall: &str, monotonic: u128) -> ClockSample {
     )
 }
 
-fn seed_requested(ready: &mut ReadyStore) {
+fn seed_requested(ready: &mut ReadyStore, request: &IdentityLeaseRequest) {
     let issuance = clock(ready, "2026-08-22T10:00:02Z", 1);
     ready
-        .begin_acquire(&request(), &caller(), &host(), &issuance)
+        .begin_acquire(request, &caller(), &host(), &issuance)
         .unwrap_or_else(|error| panic!("seed request: {error:?}"));
 }
 
-fn request_with_id(value: &str) -> IdentityLeaseRequest {
-    let mut request = request();
+fn request_with_id(fixture: &Fixture, value: &str) -> IdentityLeaseRequest {
+    let mut request = fixture.request();
     let client_request_id = parsed::<ClientRequestId>(value);
     request.client_request_id = client_request_id.clone();
     request.work_order_authorization.client_request_id = client_request_id;
@@ -273,20 +292,28 @@ fn fractional_high_monotonic_refusal_replays_exactly_after_reopen() {
     let high_monotonic = u128::from(u64::MAX) + 9_876_543_210;
     let issuance = clock(&ready, "2026-08-22T10:00:02.123456789Z", high_monotonic);
     let begun = ready
-        .begin_acquire(&request(), &caller(), &host(), &issuance)
+        .begin_acquire(&fixture.request(), &caller(), &host(), &issuance)
         .unwrap_or_else(|error| panic!("fractional begin: {error:?}"));
     let lease_id = begun.outcome().lease_id().clone();
     let original_generation = ready.service_clock_generation();
+    let authenticated_caller = caller();
+    let authenticated_host = host();
+    let control = AuthenticatedRequestControl::new(
+        &lease_id,
+        begun.row_version(),
+        &authenticated_caller,
+        &authenticated_host,
+    );
     ready
         .refuse_requested(
-            &lease_id,
-            RefusalCode::ProfileNotReady,
+            &control,
+            refusal(RefusalCode::ProfileNotReady),
             &stamp("2026-08-22T10:00:03.987654321Z"),
         )
         .unwrap_or_else(|error| panic!("fractional refusal: {error:?}"));
     let expected = ready
         .begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller(),
             &host(),
             &clock(&ready, "2026-08-22T10:00:04Z", high_monotonic + 1),
@@ -304,7 +331,7 @@ fn fractional_high_monotonic_refusal_replays_exactly_after_reopen() {
     assert_ne!(reopened.service_clock_generation(), original_generation);
     let replay = reopened
         .begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller(),
             &host(),
             &clock(&reopened, "2026-08-22T11:00:00Z", high_monotonic + 2),
@@ -346,7 +373,7 @@ fn each_unresolved_state_independently_blocks_readiness_until_resolved() {
     for case in cases {
         let fixture = Fixture::new();
         let mut ready = fixture.ready();
-        seed_requested(&mut ready);
+        seed_requested(&mut ready, &fixture.request());
         match case {
             RecoveryGateCase::ErrorLease => {
                 resolved_status(ready.test_connection(), LeaseStatus::Error);
@@ -364,12 +391,18 @@ fn each_unresolved_state_independently_blocks_readiness_until_resolved() {
                          ) SELECT
                             'capacity_00000000000000000000000000', lease_id, provider,
                             profile_uid, authenticated_caller, host_identity, tenant_id,
-                            'provider', provider, 1, 1, ?1,
+                            'provider', provider, 1, 1, 'HELD',
                             '2026-08-22T10:00:04Z', issued_at_seconds + 2, 0
                          FROM leases",
-                        [state],
+                        [],
                     )
                     .unwrap_or_else(|error| panic!("seed {case:?}: {error}"));
+                if state != "HELD" {
+                    ready
+                        .test_connection()
+                        .execute("UPDATE capacity_reservations SET state = ?1", [state])
+                        .unwrap_or_else(|error| panic!("transition {case:?}: {error}"));
+                }
                 transition_to_revoked(ready.test_connection());
             }
             RecoveryGateCase::Process => {
@@ -412,7 +445,7 @@ fn each_unresolved_state_independently_blocks_readiness_until_resolved() {
                     .execute_batch(
                         "UPDATE capacity_reservations SET state = 'RELEASED',
                             released_at_utc = '2026-08-22T10:01:02Z',
-                            released_at_seconds = reserved_at_seconds + 1,
+                            released_at_seconds = 1787392862,
                             released_at_nanos = 0;",
                     )
                     .unwrap_or_else(|error| panic!("release {case:?}: {error}"));
@@ -434,8 +467,13 @@ fn each_unresolved_state_independently_blocks_readiness_until_resolved() {
         }
         drop(connection);
 
-        fixture
-            .recovering("2026-08-22T10:02:00Z")
+        let mut recovering = fixture.recovering("2026-08-22T10:02:00Z");
+        assert!(
+            recovering
+                .clear_orphan_profile_fence(&fixture.profile.profile_uid)
+                .unwrap_or_else(|error| panic!("clear resolved {case:?}: {error:?}"))
+        );
+        recovering
             .into_ready(&stamp("2026-08-22T10:02:01Z"))
             .unwrap_or_else(|error| panic!("resolved {case:?} remained blocked: {error:?}"));
     }
@@ -451,7 +489,7 @@ fn recovery_pages_are_keyset_paginated_cross_generation_and_redacted() {
         ("01ARZ3NDEKTSV4RRFFQ69G5FA1", 11_u128),
         ("01ARZ3NDEKTSV4RRFFQ69G5FA2", 12_u128),
     ] {
-        seed_request(&mut ready, &request_with_id(id), monotonic);
+        seed_request(&mut ready, &request_with_id(&fixture, id), monotonic);
     }
     drop(ready);
 
@@ -520,7 +558,7 @@ fn recovery_candidate_seals_typed_capacity_process_and_snapshot_evidence() {
     let fixture = Fixture::new();
     let mut ready = fixture.ready();
     let origin_generation = ready.service_clock_generation();
-    seed_requested(&mut ready);
+    seed_requested(&mut ready, &fixture.request());
     resolved_status(ready.test_connection(), LeaseStatus::Active);
     insert_running_evidence(ready.test_connection());
     drop(ready);
@@ -574,6 +612,111 @@ fn recovery_candidate_seals_typed_capacity_process_and_snapshot_evidence() {
     );
 }
 
+#[test]
+fn frozen_v2_terminal_partial_capacity_without_marker_recovers_to_ready() {
+    let fixture = Fixture::new();
+    let mut ready = fixture.ready();
+    let issuance = clock(&ready, "2026-08-22T10:00:02Z", 1);
+    let begun = ready
+        .begin_acquire(&fixture.request(), &caller(), &host(), &issuance)
+        .unwrap_or_else(|error| panic!("begin: {error:?}"));
+    let lease_id = begun.outcome().lease_id().clone();
+    let authenticated_caller = caller();
+    let authenticated_host = host();
+    let control = AuthenticatedRequestControl::new(
+        &lease_id,
+        begun.row_version(),
+        &authenticated_caller,
+        &authenticated_host,
+    );
+    ready
+        .refuse_requested(
+            &control,
+            refusal(RefusalCode::ProfileNotReady),
+            &stamp("2026-08-22T10:00:03Z"),
+        )
+        .unwrap_or_else(|error| panic!("refuse: {error:?}"));
+    ready
+        .test_connection()
+        .execute_batch(
+            "DROP TRIGGER capacity_reservations_insert_held;
+             DROP TRIGGER capacity_reservations_transition_only;
+             DROP TRIGGER capacity_reservations_delete_released;
+             DROP INDEX capacity_reservations_lease_state;
+             DROP INDEX lease_processes_lease_state;
+             DELETE FROM schema_migrations WHERE version = 3;
+             PRAGMA user_version = 2;
+             INSERT INTO capacity_reservations (
+                reservation_id, lease_id, provider, profile_uid, authenticated_caller,
+                host_identity, tenant_id, capacity_dimension, capacity_key,
+                capacity_limit, slot, state, reserved_at_utc, reserved_at_seconds,
+                reserved_at_nanos
+             ) SELECT 'capacity_00000000000000000000000000', lease_id, provider,
+                profile_uid, authenticated_caller, host_identity, tenant_id,
+                'provider', provider, 1, 7, 'QUARANTINED',
+                '2026-08-22T10:00:02Z', issued_at_seconds, issued_at_nanos FROM leases;
+             INSERT INTO capacity_reservations (
+                reservation_id, lease_id, provider, profile_uid, authenticated_caller,
+                host_identity, tenant_id, capacity_dimension, capacity_key,
+                capacity_limit, slot, state, reserved_at_utc, reserved_at_seconds,
+                reserved_at_nanos
+             ) SELECT 'capacity_00000000000000000000000001', lease_id, provider,
+                profile_uid, authenticated_caller, host_identity, tenant_id,
+                'profile', profile_uid, 1, 2, 'RECOVERY_REQUIRED',
+                '2026-08-22T10:00:02Z', issued_at_seconds, issued_at_nanos FROM leases;
+             INSERT INTO capacity_reservations (
+                reservation_id, lease_id, provider, profile_uid, authenticated_caller,
+                host_identity, tenant_id, capacity_dimension, capacity_key,
+                capacity_limit, slot, state, reserved_at_utc, reserved_at_seconds,
+                reserved_at_nanos
+             ) SELECT 'capacity_00000000000000000000000002', lease_id, provider,
+                profile_uid, authenticated_caller, host_identity, tenant_id,
+                'caller', authenticated_caller, 1, 1, 'HELD',
+                '2026-08-22T10:00:02Z', issued_at_seconds, issued_at_nanos FROM leases;",
+        )
+        .unwrap_or_else(|error| panic!("seed frozen v2 capacity: {error}"));
+    drop(ready);
+
+    assert!(matches!(
+        fixture
+            .recovering("2026-08-22T10:01:00Z")
+            .into_ready(&stamp("2026-08-22T10:01:01Z")),
+        Err(StoreError::RecoveryRequired)
+    ));
+    let mut recovering = fixture.recovering("2026-08-22T10:02:00Z");
+    assert!(recovering.recovered_profile_fences().is_empty());
+    let candidate = recovering
+        .recovery_candidates(
+            &super::RecoveryPageRequest::first(10)
+                .unwrap_or_else(|error| panic!("page request: {error:?}")),
+        )
+        .unwrap_or_else(|error| panic!("candidate: {error:?}"));
+    let row_version = candidate.candidates()[0].lease_row_version();
+    let result = recovering
+        .terminalize_prior_generation(&lease_id, row_version, &stamp("2026-08-22T10:02:01Z"))
+        .unwrap_or_else(|error| panic!("terminal capacity recovery: {error:?}"));
+    assert_eq!(result.status(), LeaseStatus::Refused);
+    assert_eq!(result.released_reservations(), 3);
+    assert_eq!(result.row_version(), row_version + 1);
+    assert!(result.changed());
+    assert!(!result.cleanup_deferred());
+    assert!(recovering.recovered_profile_fences().is_empty());
+    assert_eq!(
+        recovering
+            .test_connection()
+            .query_row(
+                "SELECT count(*) FROM capacity_reservations WHERE state = 'RELEASED'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or_else(|error| panic!("released count: {error}")),
+        3
+    );
+    recovering
+        .into_ready(&stamp("2026-08-22T10:02:02Z"))
+        .unwrap_or_else(|error| panic!("ready after terminal recovery: {error:?}"));
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ProcessCorruption {
     Identifier,
@@ -594,7 +737,7 @@ fn recovery_rejects_corrupt_process_evidence_without_exposing_it() {
     ] {
         let fixture = Fixture::new();
         let mut ready = fixture.ready();
-        seed_requested(&mut ready);
+        seed_requested(&mut ready, &fixture.request());
         resolved_status(ready.test_connection(), LeaseStatus::Active);
         insert_running_evidence(ready.test_connection());
         drop(ready);
@@ -618,12 +761,14 @@ fn recovery_rejects_corrupt_process_evidence_without_exposing_it() {
             ),
         }
         .unwrap_or_else(|error| panic!("corrupt {corruption:?}: {error}"));
-        assert_eq!(
-            recovering.recovery_candidates(
-                &super::RecoveryPageRequest::first(10)
-                    .unwrap_or_else(|error| panic!("page request: {error:?}"))
+        assert!(
+            matches!(
+                recovering.recovery_candidates(
+                    &super::RecoveryPageRequest::first(10)
+                        .unwrap_or_else(|error| panic!("page request: {error:?}"))
+                ),
+                Err(StoreError::IntegrityCheckFailed)
             ),
-            Err(StoreError::IntegrityCheckFailed),
             "{corruption:?}"
         );
     }

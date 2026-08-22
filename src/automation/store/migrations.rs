@@ -11,15 +11,19 @@ use super::{
 };
 
 pub(super) const APPLICATION_ID: i32 = 0x4354_584c;
-pub(super) const SCHEMA_VERSION: i32 = 2;
+pub(super) const SCHEMA_VERSION: i32 = 3;
 pub(super) const MIGRATION_V1_CHECKSUM: &str =
     "sha256:35180e832ffe3110fd4e52b5842828afdaeac4f1947909a8a36bd2f41e4ddba2";
 pub(super) const MIGRATION_V2_CHECKSUM: &str =
     "sha256:fc3f0897b18a4dd1d5d8e9edd0d8b536e5e474c0431da4f6f216972679919e84";
+pub(super) const MIGRATION_V3_CHECKSUM: &str =
+    "sha256:cfef4f51f45f2d9d1a1d1d092782f5cf65bac066ac0f50dcc52380d4f6c19375";
 const MIGRATION_V1_NAME: &str = "lease-store-v1";
 const MIGRATION_V2_NAME: &str = "lease-store-v2-runtime-clocks";
+const MIGRATION_V3_NAME: &str = "lease-store-v3-capacity-retention-guards";
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
 const SCHEMA_V2: &str = include_str!("schema_v2.sql");
+const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 
 pub(super) fn migrate_and_bind(
     connection: &mut Connection,
@@ -54,6 +58,14 @@ pub(super) fn migrate_and_bind(
         verify_integrity(connection)?;
         verify_existing_version(connection, installation_uid, 1)?;
         apply_v2(connection, installation_uid, now)?;
+    }
+
+    if pragma_i32(connection, "user_version")? == 2 {
+        // The frozen v2 store is qualified before installing forward-only v3
+        // writer guards. Legal legacy capacity history remains untouched.
+        verify_integrity(connection)?;
+        verify_existing_version(connection, installation_uid, 2)?;
+        apply_v3(connection, installation_uid, now)?;
     }
 
     if pragma_i32(connection, "user_version")? != SCHEMA_VERSION {
@@ -140,16 +152,54 @@ fn apply_v2(
         now,
     )?;
     transaction
-        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .pragma_update(None, "user_version", 2)
         .map_err(|_| StoreError::DatabaseUnavailable)?;
 
     // Qualification belongs to the migration transaction. Any schema,
     // checksum, integrity, or backfill failure rolls the entire v2 step back.
     verify_integrity(&transaction)?;
+    verify_existing_version(&transaction, installation_uid, 2)?;
+    transaction
+        .commit()
+        .map_err(|_| StoreError::DatabaseUnavailable)
+}
+
+fn apply_v3(
+    connection: &mut Connection,
+    installation_uid: &InstallationUid,
+    now: &StoredTimestamp<'_>,
+) -> Result<(), StoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| StoreError::DatabaseUnavailable)?;
+    transaction
+        .execute_batch(SCHEMA_V3)
+        .map_err(|_| StoreError::IntegrityCheckFailed)?;
+    insert_migration(
+        &transaction,
+        3,
+        MIGRATION_V3_NAME,
+        MIGRATION_V3_CHECKSUM,
+        now,
+    )?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(|_| StoreError::DatabaseUnavailable)?;
+    verify_integrity(&transaction)?;
     verify_existing_version(&transaction, installation_uid, SCHEMA_VERSION)?;
     transaction
         .commit()
         .map_err(|_| StoreError::DatabaseUnavailable)
+}
+
+#[cfg(test)]
+pub(super) fn test_apply_v3(
+    connection: &mut Connection,
+    installation_uid: &InstallationUid,
+    now: &crate::automation::contracts::UtcTimestamp,
+) -> Result<(), StoreError> {
+    let stored = StoredTimestamp::from_utc(now)?;
+    apply_v3(connection, installation_uid, &stored)
 }
 
 fn insert_migration(
@@ -194,7 +244,7 @@ fn verify_existing_version(
     }
     verify_migrations(connection, version)?;
     verify_object_allowlist(connection, version)?;
-    if version == 2 {
+    if version >= 2 {
         verify_runtime_clock_coverage(connection)?;
     }
     Ok(())
@@ -204,6 +254,7 @@ fn verify_migrations(connection: &Connection, version: i32) -> Result<(), StoreE
     let expected = [
         (1, MIGRATION_V1_NAME, MIGRATION_V1_CHECKSUM),
         (2, MIGRATION_V2_NAME, MIGRATION_V2_CHECKSUM),
+        (3, MIGRATION_V3_NAME, MIGRATION_V3_CHECKSUM),
     ];
     let mut statement = connection
         .prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version")
@@ -235,9 +286,14 @@ fn verify_object_allowlist(connection: &Connection, version: i32) -> Result<(), 
     reference
         .execute_batch(SCHEMA_V1)
         .map_err(|_| StoreError::IntegrityCheckFailed)?;
-    if version == 2 {
+    if version >= 2 {
         reference
             .execute_batch(SCHEMA_V2)
+            .map_err(|_| StoreError::IntegrityCheckFailed)?;
+    }
+    if version >= 3 {
+        reference
+            .execute_batch(SCHEMA_V3)
             .map_err(|_| StoreError::IntegrityCheckFailed)?;
     }
     if schema_objects(connection)? == schema_objects(&reference)? {
@@ -334,6 +390,7 @@ fn verify_embedded_checksums() -> Result<(), StoreError> {
     let valid = [
         (SCHEMA_V1, MIGRATION_V1_CHECKSUM),
         (SCHEMA_V2, MIGRATION_V2_CHECKSUM),
+        (SCHEMA_V3, MIGRATION_V3_CHECKSUM),
     ]
     .into_iter()
     .all(|(schema, checksum)| Sha256Digest::hash(schema.as_bytes()).to_string() == checksum);

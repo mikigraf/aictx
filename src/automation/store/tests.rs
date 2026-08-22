@@ -6,22 +6,29 @@ use tempfile::TempDir;
 use crate::{
     automation::{
         contracts::{
-            CallerSubject, HostIdentity, IdentityLeaseRequest, RefusalCode, Sha256Digest,
-            UtcTimestamp,
+            CallerSubject, HostIdentity, IdentityLeaseRequest, ProfileRef, RefusalCode,
+            Sha256Digest, UtcTimestamp,
         },
-        lease::{ClockSample, MonotonicMoment},
-        store::{PersistedAcquireOutcome, ReadyStore, RecoveringStore, StoreError},
+        lease::{ClockSample, LeaseDomainError, MonotonicMoment},
+        store::{
+            AuthenticatedRequestControl, PersistedAcquireOutcome, ReadyStore, RecoveringStore,
+            StoreError,
+        },
     },
-    config::{AppPaths, ensure_secure_directory},
-    model::InstallationUid,
+    config::{AppPaths, MetadataStore, ensure_secure_directory},
+    management::{ProfileDraft, add_profile},
+    model::{CodexAuth, CodexCredentialStore, InstallationUid, Name, ProfileId, ProfileUid},
 };
 
+use super::lifecycle_types::NonCapacityRefusal;
 use super::load_tests::{resolved_status, transition_to_revoked};
 
 struct Fixture {
     _temporary: TempDir,
     paths: AppPaths,
     installation: InstallationUid,
+    profile_id: ProfileId,
+    profile_uid: ProfileUid,
 }
 
 impl Fixture {
@@ -31,10 +38,35 @@ impl Fixture {
             .path()
             .canonicalize()
             .unwrap_or_else(|error| panic!("canonical tempdir: {error}"));
+        let paths = AppPaths::for_root(root.join("ctxlane"));
+        let metadata = MetadataStore::new(paths.clone());
+        metadata
+            .initialize()
+            .unwrap_or_else(|error| panic!("metadata initialize: {error}"));
+        let receipt = add_profile(
+            &metadata,
+            ProfileDraft::Codex {
+                name: Name::parse("automation-production")
+                    .unwrap_or_else(|error| panic!("profile name: {error}")),
+                auth: CodexAuth::ChatgptOauth,
+                secret_ref: None,
+                account_hint: None,
+                expected_workspace_id: None,
+                credential_store: CodexCredentialStore::File,
+                trusted_runners_only: false,
+                wif: None,
+            },
+        )
+        .unwrap_or_else(|error| panic!("add profile: {error}"));
+        let installation = metadata
+            .load_config()
+            .unwrap_or_else(|error| panic!("load metadata: {error}"))
+            .installation_uid;
         Self {
-            paths: AppPaths::for_root(root.join("ctxlane")),
-            installation: InstallationUid::generate()
-                .unwrap_or_else(|error| panic!("installation: {error}")),
+            paths,
+            installation,
+            profile_id: receipt.id,
+            profile_uid: receipt.profile_uid,
             _temporary: temporary,
         }
     }
@@ -48,6 +80,16 @@ impl Fixture {
         self.recovering("2026-08-22T10:00:00Z")
             .into_ready(&stamp("2026-08-22T10:00:01Z"))
             .unwrap_or_else(|error| panic!("ready: {error:?}"))
+    }
+
+    fn request(&self) -> IdentityLeaseRequest {
+        let mut request = request();
+        let profile_ref: ProfileRef = parsed(&self.profile_id.to_string());
+        request.profile_ref = profile_ref.clone();
+        request.profile_uid = self.profile_uid.clone();
+        request.work_order_authorization.profile_ref = profile_ref;
+        request.work_order_authorization.profile_uid = self.profile_uid.clone();
+        request
     }
 }
 
@@ -83,6 +125,11 @@ fn host(value: &str) -> HostIdentity {
     parsed(value)
 }
 
+fn refusal(code: RefusalCode) -> NonCapacityRefusal {
+    NonCapacityRefusal::from_evaluation(code)
+        .unwrap_or_else(|| panic!("capacity denial is activation-owned"))
+}
+
 fn clock(store: &ReadyStore, wall: &str, monotonic: u128) -> ClockSample {
     ClockSample::new(
         stamp(wall),
@@ -115,7 +162,7 @@ fn schema_settings_integrity_and_extension_boundary_are_enforced() {
         scalar::<i64>(connection, "PRAGMA application_id"),
         0x4354_584c
     );
-    assert_eq!(scalar::<i64>(connection, "PRAGMA user_version"), 2);
+    assert_eq!(scalar::<i64>(connection, "PRAGMA user_version"), 3);
     assert_eq!(scalar::<i64>(connection, "PRAGMA foreign_keys"), 1);
     assert_eq!(scalar::<String>(connection, "PRAGMA journal_mode"), "wal");
     assert_eq!(scalar::<i64>(connection, "PRAGMA synchronous"), 2);
@@ -248,7 +295,7 @@ fn lifetime_lock_survives_typestate_and_empty_generation_reopens() {
 fn exact_replay_preserves_original_issuance_and_conflicts_disclose_nothing() {
     let fixture = Fixture::new();
     let mut ready = fixture.ready();
-    let request = request();
+    let request = fixture.request();
     let caller_subject = caller("caller:local-controller");
     let host_identity = host("host:runner-01");
     let first_clock = clock(&ready, "2026-08-22T10:00:02Z", 42);
@@ -321,7 +368,7 @@ fn wrong_clock_generation_is_rejected_before_any_write() {
     );
     assert_eq!(
         ready.begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller("caller:local-controller"),
             &host("host:runner-01"),
             &wrong_clock,
@@ -335,7 +382,7 @@ fn wrong_clock_generation_is_rejected_before_any_write() {
 fn refusal_replays_with_original_issuance_and_monotonic_audit_sequence() {
     let fixture = Fixture::new();
     let mut ready = fixture.ready();
-    let request = request();
+    let request = fixture.request();
     let caller = caller("caller:local-controller");
     let host = host("host:runner-01");
     let issuance = clock(&ready, "2026-08-22T10:00:02Z", 77);
@@ -343,10 +390,11 @@ fn refusal_replays_with_original_issuance_and_monotonic_audit_sequence() {
         .begin_acquire(&request, &caller, &host, &issuance)
         .unwrap_or_else(|error| panic!("begin: {error:?}"));
     let lease_id = first.outcome().lease_id().clone();
+    let control = AuthenticatedRequestControl::new(&lease_id, first.row_version(), &caller, &host);
     ready
         .refuse_requested(
-            &lease_id,
-            RefusalCode::ProfileNotReady,
+            &control,
+            refusal(RefusalCode::ProfileNotReady),
             &stamp("2026-08-22T10:00:03Z"),
         )
         .unwrap_or_else(|error| panic!("refuse: {error:?}"));
@@ -380,14 +428,21 @@ fn refusal_replays_with_original_issuance_and_monotonic_audit_sequence() {
         ),
         3
     );
-    assert_eq!(
-        ready.refuse_requested(
-            &lease_id,
-            RefusalCode::ProfileNotReady,
-            &stamp("2026-08-22T10:00:04Z")
-        ),
-        Err(StoreError::InvalidTransition)
-    );
+    let second_control =
+        AuthenticatedRequestControl::new(&lease_id, replay.row_version(), &caller, &host);
+    let invalid = ready
+        .refuse_requested(
+            &second_control,
+            refusal(RefusalCode::ProfileNotReady),
+            &stamp("2026-08-22T10:00:04Z"),
+        )
+        .unwrap_or_else(|error| panic!("committed invalid transition: {error:?}"));
+    assert!(matches!(
+        invalid.domain_result(),
+        Err(LeaseDomainError::TerminalImmutable(
+            crate::automation::contracts::LeaseStatus::Refused
+        ))
+    ));
 
     drop(ready);
     let mut reopened = fixture
@@ -413,12 +468,20 @@ fn refusal_audit_failure_rolls_back_the_terminal_transition() {
     let issuance = clock(&ready, "2026-08-22T10:00:02Z", 12);
     let begun = ready
         .begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller("caller:local-controller"),
             &host("host:runner-01"),
             &issuance,
         )
         .unwrap_or_else(|error| panic!("begin: {error:?}"));
+    let authenticated_caller = caller("caller:local-controller");
+    let authenticated_host = host("host:runner-01");
+    let control = AuthenticatedRequestControl::new(
+        begun.outcome().lease_id(),
+        begun.row_version(),
+        &authenticated_caller,
+        &authenticated_host,
+    );
     ready
         .test_connection()
         .execute_batch(
@@ -427,14 +490,14 @@ fn refusal_audit_failure_rolls_back_the_terminal_transition() {
              BEGIN SELECT RAISE(ABORT, 'injected refusal audit failure'); END;",
         )
         .unwrap_or_else(|error| panic!("failure trigger: {error}"));
-    assert_eq!(
+    assert!(matches!(
         ready.refuse_requested(
-            begun.outcome().lease_id(),
-            RefusalCode::ProfileNotReady,
+            &control,
+            refusal(RefusalCode::ProfileNotReady),
             &stamp("2026-08-22T10:00:03Z")
         ),
         Err(StoreError::DatabaseUnavailable)
-    );
+    ));
     assert_eq!(
         scalar::<String>(ready.test_connection(), "SELECT status FROM leases"),
         "REQUESTED"
@@ -465,7 +528,7 @@ fn audit_failure_rolls_back_request_and_lease_atomically() {
         )
         .unwrap_or_else(|error| panic!("failure trigger: {error}"));
     let result = ready.begin_acquire(
-        &request(),
+        &fixture.request(),
         &caller("caller:local-controller"),
         &host("host:runner-01"),
         &clock(&ready, "2026-08-22T10:00:02Z", 1),
@@ -484,7 +547,7 @@ fn requested_state_survives_crash_and_blocks_ready_until_recovery_exists() {
     let issuance = clock(&ready, "2026-08-22T10:00:02Z", 1);
     ready
         .begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller("caller:local-controller"),
             &host("host:runner-01"),
             &issuance,
@@ -512,7 +575,7 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
     let issuance = clock(&ready, "2026-08-22T10:00:02Z", 88);
     ready
         .begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller("caller:local-controller"),
             &host("host:runner-01"),
             &issuance,
@@ -520,19 +583,6 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
         .unwrap_or_else(|error| panic!("begin: {error:?}"));
     let connection = ready.test_connection();
     resolved_status(connection, crate::automation::contracts::LeaseStatus::Error);
-    connection
-        .execute_batch(
-            "INSERT INTO lease_processes (
-                process_id, lease_id, service_generation, state, execution_handle,
-                observed_fencing_generation, launch_intent_at_utc,
-                launch_intent_at_seconds, launch_intent_at_nanos
-             ) SELECT
-                'process_00000000000000000000000000', lease_id, service_generation,
-                'LAUNCH_INTENT', execution_handle, 1,
-                '2026-08-22T10:00:03Z', issued_at_seconds + 1, 0
-             FROM leases;",
-        )
-        .unwrap_or_else(|error| panic!("resolved error setup: {error}"));
     assert_eq!(
         scalar::<String>(connection, "SELECT status FROM leases"),
         "ERROR"
@@ -540,14 +590,6 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
     assert_eq!(
         scalar::<String>(connection, "SELECT execution_handle FROM leases"),
         "exec_00000000000000000000000000"
-    );
-    assert_eq!(
-        scalar::<i64>(
-            connection,
-            "SELECT count(*) FROM lease_processes p JOIN leases l
-             ON (p.lease_id, p.execution_handle) = (l.lease_id, l.execution_handle)"
-        ),
-        1
     );
     assert!(
         connection
@@ -558,34 +600,30 @@ fn error_is_live_and_resolved_handles_remain_bound_through_terminal_state() {
             .is_err()
     );
     transition_to_revoked(connection);
-    connection
-        .execute_batch(
-            "UPDATE lease_processes SET state = 'EXITED',
-                started_at_utc = '2026-08-22T10:00:03Z',
-                started_at_seconds = launch_intent_at_seconds, started_at_nanos = 0,
-                ended_at_utc = '2026-08-22T10:00:05Z',
-                ended_at_seconds = launch_intent_at_seconds + 2, ended_at_nanos = 0;",
-        )
-        .unwrap_or_else(|error| panic!("terminal transition: {error}"));
     assert_eq!(
         scalar::<String>(connection, "SELECT execution_handle FROM leases"),
         "exec_00000000000000000000000000"
     );
     drop(ready);
-    fixture
-        .recovering("2026-08-22T10:01:00Z")
+    let mut recovering = fixture.recovering("2026-08-22T10:01:00Z");
+    assert!(
+        recovering
+            .clear_orphan_profile_fence(&fixture.profile_uid)
+            .unwrap_or_else(|error| panic!("clear terminal marker: {error:?}"))
+    );
+    recovering
         .into_ready(&stamp("2026-08-22T10:01:01Z"))
         .unwrap_or_else(|error| panic!("terminal recovery: {error:?}"));
 }
 
 #[test]
-fn replay_retention_is_at_least_seven_days() {
+fn replay_retention_is_later_of_local_horizon_and_signed_expiry() {
     let fixture = Fixture::new();
     let mut ready = fixture.ready();
     let issuance = clock(&ready, "2026-08-22T10:00:02Z", 1);
     ready
         .begin_acquire(
-            &request(),
+            &fixture.request(),
             &caller("caller:local-controller"),
             &host("host:runner-01"),
             &issuance,
@@ -601,7 +639,7 @@ fn replay_retention_is_at_least_seven_days() {
 
     let long_fixture = Fixture::new();
     let mut long_ready = long_fixture.ready();
-    let mut long_request = request();
+    let mut long_request = long_fixture.request();
     long_request.work_order_authorization.expires_at = stamp("2026-09-30T12:34:56Z");
     let issuance = clock(&long_ready, "2026-08-22T10:00:02Z", 2);
     long_ready
@@ -655,7 +693,7 @@ fn installation_schema_and_migration_identity_fail_closed() {
     let connection = Connection::open(future.paths.automation_lease_store())
         .unwrap_or_else(|error| panic!("future open: {error}"));
     connection
-        .pragma_update(None, "user_version", 3)
+        .pragma_update(None, "user_version", 4)
         .unwrap_or_else(|error| panic!("future version: {error}"));
     drop(connection);
     assert!(matches!(
@@ -709,6 +747,8 @@ fn all_store_errors_are_stable_and_redacted() {
         StoreError::EntropyUnavailable,
         StoreError::IdentifierCollision,
         StoreError::InvalidTransition,
+        StoreError::LeaseNotFound,
+        StoreError::ConcurrentMutation,
     ];
     for error in errors {
         let rendered = format!("{error:?} {error}");

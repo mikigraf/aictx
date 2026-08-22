@@ -14,9 +14,23 @@ use crate::{
 };
 
 mod automation_paths;
+mod profile_fence;
 mod storage;
 mod upgrade;
 
+#[allow(unused_imports)]
+pub(crate) use profile_fence::{
+    ProfileAutomationDeferredFenceGuard, ProfileAutomationFenceAliasExtension,
+    ProfileAutomationFenceBusyGuard, ProfileAutomationFenceClearGuard,
+    ProfileAutomationFenceDowngrade, ProfileAutomationFenceFailure, ProfileAutomationFenceGuard,
+    ProfileAutomationFencePreparation, ProfileAutomationFenceUpgrade,
+    ProfileAutomationRecoveryFencePreparation, ProfileAutomationResourceAcquisition,
+    ProfileAutomationResourceGuard, ProfileAutomationResourceMode, ProfileFenceRefusal,
+    acquire_profile_automation_resource, ensure_profile_automation_unfenced,
+    extend_profile_automation_recovery_fence_alias, prepare_profile_automation_fence,
+    prepare_profile_automation_recovery_fence, profile_automation_fence_presence,
+    recover_profile_automation_fences, validate_profile_automation_fence_profile,
+};
 pub use storage::write_secure_text;
 pub(crate) use storage::{
     OrderedProfileLocks, ProfileLockGuard, acquire_ordered_profile_locks, acquire_profile_lock,
@@ -186,6 +200,15 @@ impl AppPaths {
         self.state_dir
             .join("profile-locks")
             .join(format!("{}-resource.lock", profile_uid.as_str()))
+    }
+
+    /// Durable per-profile interlock derived without opening automation state.
+    #[must_use]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    pub(crate) fn profile_automation_fence(&self, profile_uid: &ProfileUid) -> PathBuf {
+        self.state_dir
+            .join("profile-locks")
+            .join(format!("{}-automation.fence", profile_uid.as_str()))
     }
 
     /// Private state root used only by an explicitly opened automation service.

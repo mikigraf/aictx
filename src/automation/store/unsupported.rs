@@ -4,14 +4,21 @@
 
 use crate::{
     automation::{
-        contracts::{CallerSubject, HostIdentity, IdentityLeaseRequest, RefusalCode, UtcTimestamp},
-        lease::{ClockSample, ServiceClockGeneration},
+        contracts::{
+            CallerSubject, HostIdentity, IdentityLeaseRequest, LeaseId, LeaseReasonCode,
+            UtcTimestamp,
+        },
+        lease::{ClockSample, LeaseControl, LeaseResolution, ServiceClockGeneration},
+        policy::EffectivePolicy,
     },
     config::AppPaths,
     model::InstallationUid,
 };
 
-use super::{BeginAcquireResult, RecoveryPage, RecoveryPageRequest, StoreError};
+use super::{
+    AuthenticatedRequestControl, BeginAcquireResult, CapacityReleaseResult, CommittedMutation,
+    PruneResult, RecoveryMutationResult, RecoveryPage, RecoveryPageRequest, StoreError,
+};
 
 pub(crate) struct RecoveringStore {
     _private: (),
@@ -44,6 +51,26 @@ impl RecoveringStore {
     ) -> Result<RecoveryPage, StoreError> {
         Err(StoreError::UnsupportedPlatform)
     }
+
+    pub(crate) fn recovered_profile_fences(&self) -> Vec<crate::model::ProfileUid> {
+        Vec::new()
+    }
+
+    pub(crate) fn clear_orphan_profile_fence(
+        &mut self,
+        _profile_uid: &crate::model::ProfileUid,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn terminalize_prior_generation(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _now: &UtcTimestamp,
+    ) -> Result<RecoveryMutationResult, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
 }
 
 impl ReadyStore {
@@ -52,7 +79,7 @@ impl ReadyStore {
         ServiceClockGeneration::from_value(0)
     }
 
-    pub(crate) fn begin_acquire(
+    pub(in crate::automation::store) fn begin_acquire(
         &mut self,
         _request: &IdentityLeaseRequest,
         _caller: &CallerSubject,
@@ -62,12 +89,117 @@ impl ReadyStore {
         Err(StoreError::UnsupportedPlatform)
     }
 
-    pub(crate) fn refuse_requested(
+    pub(in crate::automation::store) fn refuse_requested(
         &mut self,
-        _lease_id: &crate::automation::contracts::LeaseId,
-        _refusal_code: RefusalCode,
+        _control: &AuthenticatedRequestControl<'_>,
+        _refusal: super::lifecycle_types::NonCapacityRefusal,
         _now: &UtcTimestamp,
-    ) -> Result<(), StoreError> {
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn activate_requested(
+        &mut self,
+        _control: &AuthenticatedRequestControl<'_>,
+        _policy: &EffectivePolicy,
+        _resolution: LeaseResolution,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn begin_renewal(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _control: &LeaseControl<'_>,
+        _policy: &EffectivePolicy,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<crate::automation::contracts::FencingGeneration>, StoreError>
+    {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn acknowledge_renewal(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _control: &LeaseControl<'_>,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn close_lease(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _control: &LeaseControl<'_>,
+        _reason: LeaseReasonCode,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn revoke_authenticated(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _control: &LeaseControl<'_>,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn revoke_by_service(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _reason: LeaseReasonCode,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn mark_error(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _reason: LeaseReasonCode,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<()>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn enforce_expiration(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _now: &ClockSample,
+    ) -> Result<CommittedMutation<bool>, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn release_terminal_capacity(
+        &mut self,
+        _lease_id: &LeaseId,
+        _expected_row_version: u64,
+        _now: &UtcTimestamp,
+    ) -> Result<CapacityReleaseResult, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn retry_profile_fence_cleanup(
+        &mut self,
+        _profile_uid: &crate::model::ProfileUid,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    pub(in crate::automation::store) fn prune_retained(
+        &mut self,
+        _now: &UtcTimestamp,
+    ) -> Result<PruneResult, StoreError> {
         Err(StoreError::UnsupportedPlatform)
     }
 }

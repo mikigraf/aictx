@@ -20,7 +20,8 @@ use crate::{
     brand::is_wrapper_environment_key,
     config::{
         AppPaths, MetadataStore, ProfileLockGuard, acquire_ordered_profile_locks,
-        ensure_secure_directory, validate_sensitive_file, write_secure_text,
+        ensure_profile_automation_unfenced, ensure_secure_directory, validate_sensitive_file,
+        write_secure_text,
     },
     model::{
         ClaudeAuth, CodexAuth, Config, Profile, ProfileId, Provider, validate_wif_token_location,
@@ -363,6 +364,7 @@ pub fn run_profile(
         (resource_path, true),
     ])?;
     let lifecycle = locks.guard(&lifecycle_path)?;
+    ensure_profile_automation_unfenced(paths, profile.profile_uid())?;
     ensure_profile_is_current(paths, profile_id, profile)?;
     if matches!(
         profile,
@@ -750,6 +752,7 @@ pub fn credential_state(
         (resource_path, true),
     ])?;
     let lifecycle = locks.guard(&lifecycle_path)?;
+    ensure_profile_automation_unfenced(paths, profile.profile_uid())?;
     ensure_profile_is_current(paths, profile_id, profile)?;
     enforce_pull_request_static_secret_policy(profile)?;
     match profile {

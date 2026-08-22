@@ -23,6 +23,7 @@ pub struct LeaseBinding {
     pub(super) repository: RepositoryId,
     pub(super) workspace_id: WorkspaceId,
     pub(super) environment: EnvironmentName,
+    pub(super) requested_policy_digest: Option<Sha256Digest>,
     pub(super) initial_requested_ttl_seconds: u64,
     pub(super) signed_maximum_ttl_seconds: u64,
     pub(super) signed_maximum_session_seconds: u64,
@@ -54,6 +55,7 @@ impl LeaseBinding {
             repository: request.repository.clone(),
             workspace_id: request.workspace_id.clone(),
             environment: request.environment.clone(),
+            requested_policy_digest: request.policy_digest,
             initial_requested_ttl_seconds: request.requested_ttl_seconds.get(),
             signed_maximum_ttl_seconds: request.work_order_authorization.maximum_ttl_seconds.get(),
             signed_maximum_session_seconds: request

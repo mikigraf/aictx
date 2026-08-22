@@ -1,4 +1,4 @@
-use std::{fmt::Debug, num::NonZeroU32, str::FromStr};
+use std::{collections::BTreeSet, fmt::Debug, num::NonZeroU32, str::FromStr};
 
 use super::*;
 
@@ -141,4 +141,109 @@ fn effective_digest_changes_for_every_effective_authority_and_limit_field() {
     replay_only.source_request_digest =
         parsed("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
     assert_eq!(replay_only.digest(), digest);
+}
+
+#[test]
+fn shared_resource_mode_accepts_only_the_two_proven_isolation_pairs() {
+    for (isolation, shared, accepted) in [
+        (
+            IsolationClassification::CredentialIsolated,
+            Some(SharedStateIsolationRequirement::Stateless),
+            true,
+        ),
+        (
+            IsolationClassification::PerLeaseIsolated,
+            Some(SharedStateIsolationRequirement::PerLeaseIsolated),
+            true,
+        ),
+        (
+            IsolationClassification::CopiedCredentialDevelopment,
+            Some(SharedStateIsolationRequirement::Stateless),
+            false,
+        ),
+        (
+            IsolationClassification::Unproven,
+            Some(SharedStateIsolationRequirement::Stateless),
+            false,
+        ),
+        (IsolationClassification::CredentialIsolated, None, false),
+    ] {
+        assert_eq!(valid_shared_resource_isolation(isolation, shared), accepted);
+        let mut policy = baseline();
+        policy.concurrency_mode = AutomationConcurrencyMode::Shared;
+        policy.isolation = isolation;
+        policy.shared_state_isolation = shared;
+        assert_eq!(policy.resource_isolation_is_consistent(), accepted);
+    }
+}
+
+#[test]
+fn copied_credentials_are_refused_for_shared_local_and_pr_exception_shapes() {
+    for (environment, role) in [
+        ("local-development", AgentRole::Implementer),
+        ("production", AgentRole::PrReviewer),
+    ] {
+        let mut request: IdentityLeaseRequest = serde_json::from_str(include_str!(
+            "../../../schemas/examples/identity-lease-request.v1.json"
+        ))
+        .unwrap_or_else(|error| panic!("request fixture: {error}"));
+        request.environment = parsed(environment);
+        request.work_order_authorization.environment = request.environment.clone();
+        request.role = role;
+        request.work_order_authorization.role = role;
+        let caller = parsed::<CallerSubject>("caller:local-controller");
+        let host = parsed::<HostIdentity>("host:runner-01");
+        let profile = ProfilePolicy {
+            profile_uid: request.profile_uid.clone(),
+            profile_ref: request.profile_ref.clone(),
+            provider: request.provider,
+            auth_mode: AutomationAuthMode::ChatgptOauth,
+            eligible: true,
+            environments: BTreeSet::from([request.environment.clone()]),
+            roles: vec![request.role],
+            caller_subjects: BTreeSet::from([caller.clone()]),
+            maximum_ttl_seconds: request.work_order_authorization.maximum_ttl_seconds,
+            maximum_session_seconds: request.work_order_authorization.maximum_session_seconds,
+            maximum_concurrent_leases: NonZeroU32::MIN,
+            concurrency_mode: AutomationConcurrencyMode::Shared,
+            shared_state_isolation_requirement: Some(SharedStateIsolationRequirement::Stateless),
+            requirements: PolicyRequirements {
+                workload_identity: false,
+                authentication_exception: true,
+                isolation_exception: true,
+            },
+        };
+        let controller = ControllerPolicy {
+            profile_uids: AllowScope::Any,
+            providers: AllowScope::Any,
+            environments: AllowScope::Any,
+            roles: AllowScope::Any,
+            caller_subjects: AllowScope::Any,
+            repositories: AllowScope::Any,
+            maximum_ttl_seconds: request.work_order_authorization.maximum_ttl_seconds,
+            maximum_session_seconds: request.work_order_authorization.maximum_session_seconds,
+            capacity: limits(1, 1, 1, 1),
+            allow_authentication_exception: true,
+            allow_isolation_exception: true,
+        };
+        let now = valid_timestamp("2026-08-21T10:01:00Z");
+        assert_eq!(
+            evaluate_policy(&PolicyEvaluation {
+                request: &request,
+                profile: &profile,
+                controller: &controller,
+                caller_subject: &caller,
+                host_identity: &host,
+                authorization_proof: AuthorizationProof::Verified,
+                readiness: RuntimeReadiness::Ready {
+                    isolation: IsolationClassification::CopiedCredentialDevelopment,
+                    shared_state_isolation: Some(SharedStateIsolationRequirement::Stateless),
+                },
+                capacity_usage: CapacityUsage::default(),
+                now: &now,
+            }),
+            PolicyDecision::Refused(RefusalCode::IsolationUnproven),
+            "{environment} {role:?}"
+        );
+    }
 }

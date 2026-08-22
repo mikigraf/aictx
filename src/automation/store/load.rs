@@ -24,6 +24,10 @@ use super::{
 
 #[path = "load/audit.rs"]
 pub(super) mod audit;
+#[path = "load/global_audit.rs"]
+mod global_audit;
+#[path = "load/history.rs"]
+mod history;
 
 pub(super) struct LoadedLease {
     pub(super) lease: Lease,
@@ -33,6 +37,7 @@ pub(super) struct LoadedLease {
     pub(super) recovery_state: RecoveryState,
     pub(super) quarantined: bool,
     pub(super) row_version: u64,
+    pub(super) next_audit_sequence: u64,
     pub(super) clock_row_version: u64,
     pub(super) process_audit: audit::ProcessAuditProjection,
 }
@@ -93,6 +98,7 @@ pub(super) fn lease_by_id(
 }
 
 pub(super) fn validate_all_leases(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    global_audit::validate(transaction)?;
     let mut statement = transaction
         .prepare("SELECT client_request_id FROM lease_requests ORDER BY client_request_id")
         .map_err(|_| StoreError::IntegrityCheckFailed)?;
@@ -105,7 +111,8 @@ pub(super) fn validate_all_leases(transaction: &Transaction<'_>) -> Result<(), S
     for client_request_id in client_request_ids {
         let request = request_by_client_id(transaction, &client_request_id)?
             .ok_or(StoreError::IntegrityCheckFailed)?;
-        lease_for_request(transaction, &request)?;
+        let loaded = lease_for_request(transaction, &request)?;
+        history::validate(transaction, &loaded)?;
     }
     Ok(())
 }
@@ -474,6 +481,8 @@ impl RawLease {
             recovery_state,
             quarantined: self.quarantined == 1,
             row_version: u64::try_from(self.row_version)
+                .map_err(|_| StoreError::IntegrityCheckFailed)?,
+            next_audit_sequence: u64::try_from(self.next_audit_sequence)
                 .map_err(|_| StoreError::IntegrityCheckFailed)?,
             clock_row_version: u64::try_from(self.clock_row_version)
                 .map_err(|_| StoreError::IntegrityCheckFailed)?,

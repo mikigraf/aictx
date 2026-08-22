@@ -9,6 +9,8 @@ use super::{
 };
 use crate::automation::contracts::{Sha256Digest, UtcTimestamp};
 
+#[path = "snapshot/accessors.rs"]
+mod accessors;
 #[path = "snapshot/validate.rs"]
 mod validate;
 use validate::{

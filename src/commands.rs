@@ -17,7 +17,10 @@ use crate::{
         Cli, Command, ContextCommand, CredentialCommand, InitArgs, LoginArgs, MigrateCommand,
         ProfileAddArgs, ProfileCommand,
     },
-    config::{AppPaths, MetadataStore, acquire_ordered_profile_locks, ensure_secure_directory},
+    config::{
+        AppPaths, MetadataStore, acquire_ordered_profile_locks, ensure_profile_automation_unfenced,
+        ensure_secure_directory,
+    },
     doctor,
     identity::{LEGACY_AICTX, TARGET_CTXLANE},
     management::{self, ProfileDraft},
@@ -225,6 +228,29 @@ pub fn execute(cli: Cli, paths: &AppPaths) -> Result<i32> {
                 .contexts
                 .get(&resolved.name)
                 .ok_or_else(|| Error::ContextNotFound(resolved.name.to_string()))?;
+            let selected_profiles = [Provider::Claude, Provider::Codex]
+                .into_iter()
+                .filter_map(|provider| {
+                    let profile_id = context.profile(provider)?;
+                    let profile = config.profiles.get(profile_id)?;
+                    Some((profile_id, profile))
+                })
+                .collect::<Vec<_>>();
+            let _lifecycle_locks =
+                acquire_ordered_profile_locks(selected_profiles.iter().map(|(_, profile)| {
+                    (paths.profile_lifecycle_lock(profile.profile_uid()), false)
+                }))?;
+            for (_, profile) in &selected_profiles {
+                ensure_profile_automation_unfenced(paths, profile.profile_uid())?;
+            }
+            let current = store.load_config()?;
+            if current.contexts.get(&resolved.name) != Some(context)
+                || selected_profiles
+                    .iter()
+                    .any(|(profile_id, profile)| current.profiles.get(profile_id) != Some(profile))
+            {
+                return Err(Error::ConfigBusy);
+            }
             for line in shell::environment_lines(&config, &resolved.name, context, args.shell)? {
                 println!("{line}");
             }
@@ -931,6 +957,7 @@ fn execute_login(
         (resource_path, true),
     ])?;
     let lifecycle = locks.guard(&lifecycle_path)?;
+    ensure_profile_automation_unfenced(paths, profile.profile_uid())?;
     let current = store.load_config()?;
     if current.profiles.get(profile_id) != Some(&profile) {
         return Err(Error::ConfigBusy);
@@ -1180,6 +1207,7 @@ fn execute_logout(
         (resource_path, true),
     ])?;
     let lifecycle = locks.guard(&lifecycle_path)?;
+    ensure_profile_automation_unfenced(paths, profile.profile_uid())?;
     let current = store.load_config()?;
     if current.profiles.get(profile_id) != Some(&profile) {
         return Err(Error::ConfigBusy);

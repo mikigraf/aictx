@@ -731,7 +731,7 @@ const fn recovery_did_not_escalate(prior: RecoveryState, next: RecoveryState) ->
     )
 }
 
-fn valid_audit_id(value: &str) -> bool {
+pub(super) fn valid_audit_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 32
         && bytes.starts_with(b"audit_")
