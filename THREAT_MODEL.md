@@ -8,7 +8,7 @@ The primary protected assets are API keys, subscription/setup tokens, Codex acce
 
 ### Automation implementation status
 
-The current code is a local CLI and TUI, not a production automation identity plane. It has no supported identity-lease service, production MCP server, authenticated controller channel, signed work-order verifier, durable lease journal, or lease-enforced provider harness. `--trusted-runner` is an assertion for existing CLI flows; it is not caller attestation and never grants production automation authority.
+The current code is a local CLI and TUI, not a production automation identity plane. It has no supported identity-lease service, production MCP server, authenticated controller channel, signed work-order verifier, complete durable lease recovery, or lease-enforced provider harness. A sealed crate-internal SQLite foundation can durably record initial requests, replay bindings, refusals, and audit events and can block readiness on unresolved prior state; it does not activate leases, reconcile processes, prune records, or grant authority. `--trusted-runner` is an assertion for existing CLI flows; it is not caller attestation and never grants production automation authority.
 
 [Automation identity plane](docs/automation-identity-plane.md) records the Phase-0 security and architecture contract for later implementation. Until the later service, integration, native-provider, recovery, and negative-security phases pass their release gates, no deployment of the current code may claim production automation isolation on Linux, macOS, or Windows.
 
@@ -48,7 +48,7 @@ Untrusted or potentially hostile inputs:
 
 ## Phase-0 automation threats
 
-The controls in this table are requirements, not implemented mitigations. The detailed authority matrix and release gates are in [Automation identity plane](docs/automation-identity-plane.md).
+The controls in this table are production requirements, not a claim that the current implementation is qualified. The sealed store implements only an owner-private transactional journal and conservative recovery gate; caller authentication, signature verification, process reconciliation, harness isolation, pruning, and native deployment qualification remain future work. The detailed authority matrix and release gates are in [Automation identity plane](docs/automation-identity-plane.md).
 
 | Threat | Consequence | Required control before production | Residual risk |
 | --- | --- | --- | --- |
@@ -78,6 +78,13 @@ The controls in this table are requirements, not implemented mitigations. The de
 - undocumented OAuth/cache compatibility or independent token verification.
 
 OS keyrings are useful at-rest storage, not a sandbox from code already executing as the same user.
+
+The internal automation journal assumes an owner-controlled local filesystem.
+Its SQLite WAL, file permissions, integrity checks, and service lock do not make
+it tamper-proof against the same user, root, or copied database files, and do
+not establish safe operation on NFS or another network filesystem. Ordinary
+CLI/TUI paths do not open the journal, so a corrupt or unavailable automation
+store must not reduce standalone account-switching availability.
 
 ## Secret lifecycle
 

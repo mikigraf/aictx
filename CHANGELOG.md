@@ -11,6 +11,7 @@ All notable changes are documented here. The project follows [Semantic Versionin
 - Added pure, controller-neutral automation policy-intersection and identity-lease lifecycle domains, covering no-widening authority checks, replay binding, deadlines, fencing, renewal acknowledgement, and terminal-state invariants. These library APIs perform no persistence, credential access, process management, or service startup.
 - Added configuration schema v2 with immutable non-secret installation and profile UIDs, retired-profile UID tracking, and a validated per-profile automation policy that defaults to `eligible = false`. Valid config-schema-v1 stores are upgraded under the coordinated metadata locks.
 - Added strict Codex WIF CLI metadata enrollment and pure config-shape validation; the dashboard does not expose its enrollment or authority fields. CLI enrollment checks Git-worktree ancestry without opening the token, explicit credential diagnostics own availability checks, and doctor skips the token probe. This is enrollment only: `login`, `logout`, `run`, and runtime readiness remain fail-closed before token-path traversal until a native Codex WIF runtime is implemented and qualified.
+- Added a sealed, crate-internal SQLite lease-store and recovery-gate foundation on Linux and macOS. It atomically records initial requests, replay bindings, refusals, and append-only audit events, but it is not a service and does not yet activate leases, manage processes, or claim production recovery. Windows refuses this store boundary before filesystem access.
 
 ### Changed
 
@@ -21,6 +22,7 @@ All notable changes are documented here. The project follows [Semantic Versionin
 - Added the automation identity-plane architecture, authority matrix, platform boundary, fencing and renewal rules, fixed-harness boundary, and seven-day audited-retention contract. The current binary remains explicitly unqualified for production automation.
 - Profile Rename now preserves private vendor state and the secret reference while updating context links. Context Rename refuses a name change while the context is active; otherwise it updates default and directory-binding references. Binding Edit can change both path and context.
 - Clarified that ordinary CLI/TUI account switching and supported local vendor workflows remain standalone, with no service, controller, MCP, ASF, or Runmill dependency. No lease-service, controller, or automation-MCP runtime ships in this tranche; ASF and Runmill are optional future-integration examples only.
+- Added standalone boundary regressions that run ordinary CLI and real dashboard PTY flows beside a deliberately invalid would-be lease database and prove it is neither opened nor changed.
 - Doctor now reports disabled/eligible automation policy, warns when either explicit exception is acknowledged, and reduces environment, role, and caller scopes to counts. This is policy visibility, not lease readiness.
 
 ### Security

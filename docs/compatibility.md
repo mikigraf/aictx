@@ -11,12 +11,13 @@ This document distinguishes implemented behavior from evidence still required in
 | Linux | current GitHub-hosted Ubuntu image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
 | macOS | current GitHub-hosted macOS image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
 | Windows | current GitHub-hosted Windows image | unit, CLI, native fake-vendor, and PTY tests in CI; Unix shell-fixture contracts are disabled |
+| Automation store | SQLite WAL on an owner-private local filesystem; Linux service target and macOS development only | sealed internal schema/replay/recovery-gate tests on Linux/macOS; Windows rejects before filesystem access; NFS and other network filesystems are unqualified |
 | Terminal UI | Ratatui with Crossterm | renderer/state tests plus native PTY resize, exit, refusal, and restoration checks; deployment terminals still need qualification |
 | Coverage | regions/functions/lines | CI floors are 75%/60%/70%; see [Testing](testing.md) for the measured baseline and interpretation |
 
 CI configuration is an intended validation matrix, not proof that a given commit has passed until its workflow run is green. The OS matrix uses native GitHub-hosted runners. It does not qualify every architecture, distribution, terminal host, or vendor release. See [Testing](testing.md) for exact commands and test-layer limits.
 
-The config-v2 automation policy is operator-owned foundation and defaults to `eligible = false`. This release has no lease service, automation MCP server, or controller runtime. Ordinary CLI/TUI account switching and supported local vendor workflows remain standalone, with no ASF, Runmill, service, controller, or MCP dependency.
+The config-v2 automation policy is operator-owned foundation and defaults to `eligible = false`. This release has no supported lease service, automation MCP server, or controller runtime. It contains a crate-internal Linux/macOS SQLite store foundation for initial request, refusal, replay, audit, and recovery-gate work only; it is not opened by ordinary commands and is not a production-recovery claim. Ordinary CLI/TUI account switching and supported local vendor workflows remain standalone, with no ASF, Runmill, service, controller, MCP, or lease-store dependency.
 
 ## Evidence classes
 

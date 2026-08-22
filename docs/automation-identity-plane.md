@@ -4,7 +4,7 @@
 
 This document is the Phase-0 security and architecture contract for evolving `ctxlane` into a local automation identity plane. Phase 0 defines authority, isolation, lifecycle, and integration ownership; it does not implement or qualify those controls.
 
-The current `ctxlane` code remains a local account-isolation CLI and TUI. It does not yet provide a supported production MCP server, an authenticated lease service, signed work-order verification, durable lease recovery, or a lease-enforced structured provider harness. `--trusted-runner` remains a backwards-compatible assertion for existing CLI flows and never grants production automation authority. Production automation identity-plane use is blocked until the later implementation phases and their Linux-native, controller-integration, failure-injection, recovery, credential-search, and negative-security tests pass.
+The current `ctxlane` code remains a local account-isolation CLI and TUI. It does not yet provide a supported production MCP server, an authenticated lease service, signed work-order verification, complete durable lease recovery, or a lease-enforced structured provider harness. A sealed crate-internal SQLite foundation now records initial request, replay, refusal, and audit state and enforces a conservative recovery gate on Linux/macOS local filesystems; it is not a service or a CTX-LEASE-007 completion claim. `--trusted-runner` remains a backwards-compatible assertion for existing CLI flows and never grants production automation authority. Production automation identity-plane use is blocked until the later implementation phases and their Linux-native, controller-integration, failure-injection, recovery, credential-search, and negative-security tests pass.
 
 The production contract is:
 
@@ -32,6 +32,16 @@ not runtime, build, configuration, or authentication dependencies.
 Ordinary standalone commands never discover, auto-start, or depend on the
 automation service. Automation state and failures cannot change the selected
 account or availability of a normal interactive command.
+
+The internal store foundation preserves that boundary by construction. Only a
+future explicit automation-service entry point may create or open
+`state/automation/lease-store.sqlite3`; metadata loading, profile and context
+commands, login/logout, normal runs, doctor, and the dashboard do not. Its WAL
+mode is qualified only for an owner-private local filesystem. NFS and other
+network filesystems have no safety claim and must be rejected by future
+deployment preflight. On Windows, opening the automation store is unsupported
+and fails before filesystem mutation while ordinary interactive behavior is
+unchanged.
 
 ## Published Phase-0 wire contracts
 
@@ -195,7 +205,7 @@ Renewal is a fenced state transition:
 3. An attached harness must acknowledge that exact generation over its authenticated execution channel within the bounded acknowledgement window.
 4. Until acknowledgement, the renewal is not reported as usable. A missing, late, or mismatched acknowledgement revokes the lease, fences new access immediately, records the reason, and terminates the harness after the bounded grace period.
 
-Once rotation is persisted, the old generation cannot launch, reconnect, or perform another privileged provider operation. Revocation, expiration, service restart, and recovery apply the same fail-closed generation checks. The later implementation must journal intent before returning success and must reconcile every lease and harness before reporting service readiness.
+Once rotation is persisted, the old generation cannot launch, reconnect, or perform another privileged provider operation. Revocation, expiration, service restart, and recovery apply the same fail-closed generation checks. The current sealed store establishes the atomic journal and refuses readiness when unresolved prior-generation state exists, but it does not yet persist these activation/renewal transitions or reconcile a process. The later service implementation must journal intent before returning success and must reconcile every lease and harness before reporting service readiness.
 
 ## Fixed structured harness
 
@@ -238,7 +248,7 @@ This matrix does not remove or downgrade supported interactive CLI and TUI behav
 This Phase-0 document is complete when the contracts and threat boundaries are reviewable. It does not make the current binary production-ready. Later phases must implement and prove, in dependency order:
 
 1. Immutable profile UIDs, CLI-only automation policy, canonical signed-work-order verification, stable refusal codes, and server-computed policy digests.
-2. The existing-binary Linux service, durable transactional lease/audit store, fencing, TTL, renewal acknowledgement, revocation, recovery, retention, and audited pruning.
+2. The existing-binary Linux service, complete durable transactional lease/audit transitions, fencing, TTL, renewal acknowledgement, revocation, process recovery, retention, and audited pruning. The current sealed store covers only the initial request/refusal/replay/audit and conservative recovery-gate foundation of this item.
 3. Authenticated controller and execution channels, multiple-controller isolation, inherited-channel STDIO MCP, the bounded tool schema, and the fixed structured fake-provider harness.
 4. Controller-neutral end-to-end integration proving that coding-agent and tool sandboxes cannot reach service channels, credentials, vendor homes, or unsupported execution surfaces, plus optional Runmill compatibility coverage.
 5. Native Claude and Codex provider identity qualification on protected Linux, including principal/workspace verification and per-lease state isolation.

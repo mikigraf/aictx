@@ -298,9 +298,13 @@ For supported runnable profiles, `ctxlane env` emits non-secret selectors only. 
 
 ## Automation
 
-Every config-v2 profile carries a validated automation policy, but it is disabled by default with `eligible = false`. This release has no lease service, automation MCP server, controller runtime, or policy-editing command, and changing metadata by hand does not create those capabilities. The Phase-0 schemas and architecture documents define a possible controller-neutral future boundary; ASF and Runmill appear only as optional integration examples.
+Every config-v2 profile carries a validated automation policy, but it is disabled by default with `eligible = false`. This release has no supported lease service, automation MCP server, controller runtime, or policy-editing command, and changing metadata by hand does not create those capabilities. The Phase-0 schemas and architecture documents define a possible controller-neutral future boundary; ASF and Runmill appear only as optional integration examples.
 
 The Rust library also exposes pure, controller-neutral policy-evaluation and lease-lifecycle domains. They are inert building blocks for a future trusted service: they do not persist leases, authenticate callers, access credentials, start processes, or connect the CLI or dashboard to a controller.
+
+An internal, sealed lease-store foundation is available only to future service code on Linux and macOS. It uses an owner-private SQLite journal for atomic request, replay, refusal, and audit records, and it refuses readiness when unresolved state requires recovery. It does not yet activate or renew leases, reconcile processes, prune history, authenticate a controller, or expose a public service API. Windows rejects this store boundary before filesystem access. The journal is qualified only for a local owner-controlled filesystem; network filesystems such as NFS are not supported or claimed safe.
+
+Ordinary commands and the terminal dashboard never discover, create, or open that journal. Their standalone tests deliberately place invalid bytes at the would-be database path and prove normal CLI and TUI behavior succeeds without reading, changing, locking, or repairing it.
 
 The direct CLI controls below predate that future identity plane. Neither `--non-interactive` nor `--trusted-runner` changes `eligible`, creates a lease, or grants production automation authority.
 
