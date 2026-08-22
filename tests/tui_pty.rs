@@ -24,6 +24,8 @@ const SMALL_TERMINAL_FOOTER_MARKER: &str = "quit";
 const MAX_TERMINAL_QUERY_LENGTH: usize = 5;
 const SECRET_REF_CANARY: &str = "keyring://pty-canary/never-render-this-secret-ref";
 const EDITED_ACCOUNT_LABEL: &str = "visible-smoke-account";
+const AUTOMATION_STORE_SENTINEL: &[u8] =
+    b"not-a-sqlite-database\nstandalone-dashboard-boundary-canary\n";
 
 type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -520,11 +522,33 @@ fn exercise_profile_crud(script: &mut PtyScript<'_>, child: &mut ChildGuard, roo
     script.send(b"q", "quit after the CRUD journey");
 }
 
+fn add_invalid_automation_store_sentinel(root: &Path) -> std::path::PathBuf {
+    let automation = root.join("state/automation");
+    std::fs::create_dir(&automation)
+        .unwrap_or_else(|error| panic!("create automation sentinel directory: {error}"));
+    let database = automation.join("lease-store.sqlite3");
+    std::fs::write(&database, AUTOMATION_STORE_SENTINEL)
+        .unwrap_or_else(|error| panic!("write automation store sentinel: {error}"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&automation, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("secure automation sentinel directory: {error}"));
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("secure automation store sentinel: {error}"));
+    }
+
+    database
+}
+
 #[test]
 fn dashboard_quits_after_resize_and_restores_terminal_state() {
     let temporary = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let root = temporary.path().join("ctxlane");
     initialize(&root);
+    let database = add_invalid_automation_store_sentinel(&root);
 
     let (code, output) = run_in_pty(&root, &[], b"q", true);
     assert_eq!(code, 0, "PTY output:\n{output}");
@@ -542,6 +566,23 @@ fn dashboard_quits_after_resize_and_restores_terminal_state() {
         "alternate screen was not restored"
     );
     assert!(output.contains("\u{1b}[?25h"), "cursor was not restored");
+    assert!(!output.contains("standalone-dashboard-boundary-canary"));
+    assert_eq!(
+        std::fs::read(&database)
+            .unwrap_or_else(|error| panic!("read automation store sentinel: {error}")),
+        AUTOMATION_STORE_SENTINEL
+    );
+    for suffix in [
+        "service.lock",
+        "lease-store.sqlite3-journal",
+        "lease-store.sqlite3-wal",
+        "lease-store.sqlite3-shm",
+    ] {
+        assert!(
+            !database.with_file_name(suffix).exists(),
+            "dashboard created automation artifact {suffix}"
+        );
+    }
 }
 
 #[test]

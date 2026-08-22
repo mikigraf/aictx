@@ -186,6 +186,26 @@ impl AppPaths {
             .join("profile-locks")
             .join(format!("{}-resource.lock", profile_uid.as_str()))
     }
+
+    /// Private state root used only by an explicitly opened automation service.
+    ///
+    /// This is a pure path derivation. It does not inspect or create the path.
+    #[must_use]
+    pub fn automation_state_dir(&self) -> PathBuf {
+        self.state_dir.join("automation")
+    }
+
+    /// Durable automation lease-store path, without touching the filesystem.
+    #[must_use]
+    pub fn automation_lease_store(&self) -> PathBuf {
+        self.automation_state_dir().join("lease-store.sqlite3")
+    }
+
+    /// Lifetime service-lock path, without touching the filesystem.
+    #[must_use]
+    pub fn automation_service_lock(&self) -> PathBuf {
+        self.automation_state_dir().join("service.lock")
+    }
 }
 
 fn valid_profile_state_leaf(leaf: &std::ffi::OsStr) -> bool {
