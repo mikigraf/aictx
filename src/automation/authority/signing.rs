@@ -1,7 +1,7 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use crate::automation::{
-    attestation::AuthenticatedCaller,
+    attestation::AuthenticatedMessage,
     contracts::{Sha256Digest, UtcTimestamp, WorkOrderAuthorization},
 };
 
@@ -13,36 +13,43 @@ pub(super) struct VerifiedClaims {
 }
 
 impl PreparedAuthority {
-    pub(super) fn verify_work_order(
+    /// Verify an authorization parsed from this exact authenticated payload.
+    ///
+    /// This primitive binds and authenticates bytes; it does not prove that a
+    /// separately supplied authorization came from them. A future service must
+    /// parse `WorkOrderAuthorization` from `message.payload()` and pass that
+    /// same value here. Supplying authorization from any other source would be
+    /// a confused-deputy bug.
+    pub(crate) fn verify_work_order(
         &self,
-        caller: &AuthenticatedCaller,
+        message: &AuthenticatedMessage<'_>,
         authorization: &WorkOrderAuthorization,
         now: &UtcTimestamp,
     ) -> Result<VerifiedWorkOrder, ProofError> {
-        if !caller.assurance().permits_work_order_verification() {
+        if !message.assurance().permits_work_order_verification() {
             return Err(ProofError::WorkOrderProofInvalid);
         }
-        caller
+        message
             .revalidate(self)
             .map_err(|_| ProofError::WorkOrderProofInvalid)?;
-        if caller.host_identity() != &self.host_identity {
+        if message.host_identity() != &self.host_identity {
             return Err(ProofError::WorkOrderProofInvalid);
         }
         let controller = self
             .controllers
             .iter()
-            .find(|value| value.subject == *caller.subject())
-            .filter(|value| *value == caller.controller())
+            .find(|value| value.subject == *message.subject())
+            .filter(|value| *value == message.controller())
             .ok_or(ProofError::WorkOrderProofInvalid)?;
         let claims = self.verify_claims(controller, authorization, now)?;
-        caller
+        message
             .revalidate(self)
             .map_err(|_| ProofError::WorkOrderProofInvalid)?;
         Ok(VerifiedWorkOrder {
-            caller_subject: caller.subject().clone(),
-            host_identity: caller.host_identity().clone(),
-            assurance: caller.assurance(),
-            attestation_binding: caller.attestation_binding(),
+            caller_subject: message.subject().clone(),
+            host_identity: message.host_identity().clone(),
+            assurance: message.assurance(),
+            attestation_binding: message.attestation_binding(),
             configuration_digest: self.configuration_digest(),
             key_id: claims.key_id,
             signed_message_digest: claims.signed_message_digest,

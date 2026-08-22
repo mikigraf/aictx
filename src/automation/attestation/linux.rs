@@ -1,9 +1,8 @@
 use std::{
     fs::{self, File},
     io::Read,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
 
@@ -19,8 +18,11 @@ use crate::{
 
 use super::{AttestationError, AuthenticatedCaller};
 
+#[path = "linux/channel.rs"]
+mod channel;
 #[path = "linux_snapshot.rs"]
 mod snapshot;
+pub(crate) use channel::LinuxAuthenticatedChannel;
 use snapshot::{ExecutableSnapshot, attestation_binding, matches_retained_executable};
 
 const MAX_PROC_TEXT_BYTES: u64 = 65_536;
@@ -64,19 +66,17 @@ pub(super) struct LinuxProcessGuard {
 pub(crate) struct LinuxAttestor;
 
 impl LinuxAttestor {
-    /// Attest the process that opened `stream`.
+    /// Attest the process that opened a connected Unix-domain socket.
     ///
-    /// This does not establish the identity of every later stream writer.
-    /// Before authorizing a frame, a future listener must enable credential
-    /// passing and match that frame's credentials to the retained process
-    /// identity. Listener and framing integration are intentionally out of
-    /// scope here.
-    pub(crate) fn attest(
-        stream: &UnixStream,
+    /// This does not establish the identity of a later record writer. Only
+    /// `LinuxAuthenticatedChannel` may add the exact per-record credential and
+    /// payload binding required for message authority.
+    pub(crate) fn attest<Fd: AsFd>(
+        socket: &Fd,
         authority: &PreparedAuthority,
     ) -> Result<AuthenticatedCaller, AttestationError> {
         validate_procfs()?;
-        let (credentials, pidfd) = extract_peer_identity(stream)?;
+        let (credentials, pidfd) = extract_peer_identity(socket)?;
         if !authority.controllers().iter().any(|controller| {
             controller.linux_peer_policy().is_some_and(|policy| {
                 policy.uid() == credentials.uid && policy.gid() == credentials.gid
@@ -129,10 +129,10 @@ impl LinuxAttestor {
     }
 }
 
-fn extract_peer_identity(
-    stream: &UnixStream,
+fn extract_peer_identity<Fd: AsFd>(
+    socket: &Fd,
 ) -> Result<(PeerCredentials, OwnedFd), AttestationError> {
-    let credentials = rustix::net::sockopt::socket_peercred(stream)
+    let credentials = rustix::net::sockopt::socket_peercred(socket)
         .map_err(|_| AttestationError::CallerAuthenticationFailed)?;
     let credentials = PeerCredentials {
         pid: credentials.pid,
@@ -140,13 +140,13 @@ fn extract_peer_identity(
         gid: credentials.gid.as_raw(),
     };
     let pidfd =
-        extract_peer_pidfd(stream).map_err(|_| AttestationError::CallerAuthenticationFailed)?;
+        extract_peer_pidfd(socket).map_err(|_| AttestationError::CallerAuthenticationFailed)?;
     validate_pidfd(&pidfd, credentials.pid)?;
     Ok((credentials, pidfd))
 }
 
-fn extract_peer_pidfd(stream: &UnixStream) -> nix::Result<OwnedFd> {
-    nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerPidfd)
+fn extract_peer_pidfd<Fd: AsFd>(socket: &Fd) -> nix::Result<OwnedFd> {
+    nix::sys::socket::getsockopt(socket, nix::sys::socket::sockopt::PeerPidfd)
 }
 
 pub(super) fn revalidate(
@@ -739,6 +739,8 @@ mod tests {
     #[test]
     #[allow(clippy::similar_names)]
     fn native_socket_peer_credentials_are_kernel_derived() {
+        use std::os::unix::net::UnixStream;
+
         let (left, right) =
             UnixStream::pair().unwrap_or_else(|error| panic!("socket pair: {error}"));
         let left_credentials = rustix::net::sockopt::socket_peercred(&left)

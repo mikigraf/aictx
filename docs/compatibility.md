@@ -12,7 +12,7 @@ This document distinguishes implemented behavior from evidence still required in
 | macOS | current GitHub-hosted macOS image | unit, CLI, Unix runner, native fake-vendor, and PTY tests in CI |
 | Windows | current GitHub-hosted Windows image | unit, CLI, native fake-vendor, and PTY tests in CI; Unix shell-fixture contracts are disabled |
 | Automation store | store schema v3; SQLite WAL on an owner-private local filesystem; Linux service target and macOS development only | exact frozen-v1/v2 qualification and forward transactional migration, lossless clock snapshots, all-status replay, store-private lifecycle/capacity/retention writers, and audit/recovery-gate tests on Linux/macOS; Windows and other unsupported targets reject before filesystem access; NFS and other network filesystems are unqualified |
-| Automation authority checkpoint | crate-internal, unwired, closed version-1 owner-private `config/automation-authority.toml` of at most 1 MiB; Linux connection-origin evidence, macOS local development, unsupported elsewhere | strict loader/Ed25519/scope/redaction negatives, native macOS development proof, Linux compile and native peer-pidfd CI coverage, and a native Windows test of the shared unsupported zero-filesystem stub; other unsupported targets remain unqualified; no listener, per-frame authentication, lease authority, or operator-facing syntax |
+| Automation authority checkpoint | crate-internal, unwired, closed version-1 owner-private `config/automation-authority.toml` of at most 1 MiB; Linux opener plus payload-bound record evidence, macOS local development, unsupported elsewhere | strict loader/Ed25519/scope/redaction negatives, native macOS development proof, Linux compile and native peer-pidfd plus `SOCK_SEQPACKET`/`SO_PASSCRED` record coverage, and a native Windows test of the shared unsupported zero-filesystem stub; other unsupported targets remain unqualified; no listener, socket path, lease authority, or operator-facing syntax |
 | Terminal UI | Ratatui with Crossterm | renderer/state tests plus native PTY resize, exit, refusal, and restoration checks; deployment terminals still need qualification |
 | Coverage | regions/functions/lines | CI floors are 75%/60%/70%; see [Testing](testing.md) for the measured baseline and interpretation |
 
@@ -78,22 +78,26 @@ controller entry exposes only its subject, assurance, and scope counts.
 On macOS, this path requires an acknowledged configuration and an independent
 runtime opt-in, accepts only exact `local-development` scope, and is always
 classified as development-unqualified. On Linux, it requires atomic
-`SO_PEERPIDFD` (upstream Linux 6.5 or a qualified backport) and attests only the
+`SO_PEERPIDFD` (upstream Linux 6.5 or a qualified backport) and attests the
 connection opener using peer credentials, a retained live pidfd, stable
 process identity, an allowlisted non-writable single-link native executable and
-digest, and protected unified-cgroup/systemd placement. It cannot authenticate
-each later stream writer, so Linux evidence is verifier-ineligible. A future
-listener must add `SO_PASSCRED` and exact per-frame `SCM_CREDENTIALS` matching
-before any request can carry authority. Windows and other targets refuse
+digest, and protected unified-cgroup/systemd placement. That connection-only
+evidence is verifier-ineligible. The sealed receiver requires a close-on-exec
+Unix `SOCK_SEQPACKET` channel, enables and reads back `SO_PASSCRED`, and accepts
+only one bounded record with one non-truncated matching `SCM_CREDENTIALS` item
+and no retained ancillary descriptors. It binds the exact payload to the
+revalidated opener before Linux verification. Windows and other targets refuse
 authority loading before deriving or reading the path.
 
-There is no listener, service integration, lease authority, or harness in this
-checkpoint. The code observes procfs, cgroup v2/systemd placement, executable
+There is no listener, socket-discovery/acceptance path, service integration,
+lease authority, or harness in this checkpoint. The code observes procfs,
+cgroup v2/systemd placement, executable
 ownership and metadata, and pidfd state, but those observations still require
 native protected-deployment qualification. The trusted kernel, local filesystem
 semantics, authority owner, signing system, and controller executable remain in
 the trusted computing base. Loader/libraries, environment/arguments,
-memory/ptrace, and descriptor delegation are not attested. The new cryptography
+memory/ptrace are not attested. Delegating an already-connected descriptor to a
+different writer is rejected by the opener/message PID match. The new cryptography
 and Linux socket dependencies compile at the Rust 1.89 MSRV and remain
 target-gated where applicable; native behavior still requires the matching OS
 job.

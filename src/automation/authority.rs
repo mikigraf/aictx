@@ -51,17 +51,22 @@ pub(crate) enum ProofError {
 pub(crate) enum AuthenticationAssurance {
     /// The connection-opening process passed the complete Linux attestation.
     ///
-    /// This does not attest each writer on a stream after `fork` or descriptor
-    /// passing. A future service must additionally match per-message
-    /// `SCM_CREDENTIALS` to the retained live process identity before treating
-    /// a message as authorized.
+    /// This does not attest a writer after `fork` or descriptor passing and is
+    /// never verifier-eligible. The sealed record receiver must additionally
+    /// match `SCM_CREDENTIALS` to the retained live process identity.
     LinuxConnectionAttested,
+    /// One bounded Linux record carried exactly matching kernel credentials
+    /// and remained bound to the retained, revalidated connection opener.
+    LinuxMessageAuthenticated,
     MacosDevelopmentUnqualified,
 }
 
 impl AuthenticationAssurance {
     const fn permits_work_order_verification(self) -> bool {
-        matches!(self, Self::MacosDevelopmentUnqualified)
+        matches!(
+            self,
+            Self::LinuxMessageAuthenticated | Self::MacosDevelopmentUnqualified
+        )
     }
 }
 
@@ -437,18 +442,18 @@ impl VerifiedWorkOrder {
     pub(crate) fn matches(
         &self,
         authority: &PreparedAuthority,
-        caller: &crate::automation::attestation::AuthenticatedCaller,
+        message: &crate::automation::attestation::AuthenticatedMessage<'_>,
         authorization: &WorkOrderAuthorization,
         now: &crate::automation::contracts::UtcTimestamp,
     ) -> bool {
-        caller.revalidate(authority).is_ok()
+        message.revalidate(authority).is_ok()
             && !now.is_before(&authorization.not_before)
             && now.is_before(&authorization.expires_at)
             && self.configuration_digest == authority.configuration_digest()
-            && self.caller_subject == *caller.subject()
-            && self.host_identity == *caller.host_identity()
-            && self.assurance == caller.assurance()
-            && self.attestation_binding == caller.attestation_binding()
+            && self.caller_subject == *message.subject()
+            && self.host_identity == *message.host_identity()
+            && self.assurance == message.assurance()
+            && self.attestation_binding == message.attestation_binding()
             && self.authorization == *authorization
     }
 }

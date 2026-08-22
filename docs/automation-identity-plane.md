@@ -148,14 +148,15 @@ The provider harness is trusted and may receive the model-provider credential. T
 - The existing `ctxlane` binary will host the future service and MCP adapter modes. Phase 0 does not introduce a separate service executable.
 - One future host service must support multiple independently authenticated controllers. Every controller receives its own caller identity and authorization scope; controller concurrency never falls back to the global active context or directory bindings.
 - Linux is the only production automation platform. macOS is supported for local development and contract testing only. Windows and all other unsupported automation service, MCP, lease, and execution entry points must refuse before credential access, harness launch, network activity, or authority-bearing state mutation. Existing interactive behavior remains separate.
-- Production STDIO MCP is framing, not authentication. It must use an inherited, already-connected service channel that has passed controller authentication. It must not discover an ambient control socket, trust environment-supplied identity, infer authority from its parent process, or fall back to an unauthenticated in-process lease service.
+- Production STDIO MCP is framing, not authentication. The allowlisted adapter must open the fixed operator-owned service channel itself after exec, or connect immediately before exec without changing PID. A supervisor-created connected descriptor delegated from a different opener is rejected because opener and record credentials differ. No delegation protocol exists. The adapter must not discover an ambient untrusted socket, trust environment-supplied identity, infer authority from parentage, or fall back to an unauthenticated in-process lease service.
 - The service channel and all provider state remain outside repository and tool-execution sandboxes.
 
 ## Authority matrix
 
 This is the target service authority matrix. The current sealed authority and
 attestation values are evidence objects only: Linux connection-origin evidence
-is explicitly verifier-ineligible, macOS evidence is explicitly development
+is verifier-ineligible, only the sealed payload-bound authenticated-message
+evidence is verifier-eligible, macOS evidence is explicitly development
 unqualified, and no listener or lease-authority consumer exists.
 
 | Actor or input | Authentication or trust basis | Permitted authority | Explicitly denied authority |
@@ -174,7 +175,7 @@ Authority requires both authenticated transport identity and authorized workload
 
 ## Caller authentication and channel binding
 
-The sealed Linux checkpoint attests the process that opened a Unix stream. It
+The sealed Linux checkpoint attests the process that opened a Unix-domain socket. It
 requires `SO_PEERCRED` and atomic `SO_PEERPIDFD` (upstream Linux 6.5 or a
 qualified backport), retains the pidfd, and fails closed when that facility is
 unavailable. It verifies the pidfd's kernel-reported PID and liveness; stable
@@ -187,13 +188,17 @@ executable, and deployment observations are included in the attestation
 binding and revalidated.
 
 That result is named connection-origin attestation, not production caller
-authority. A connected Unix-stream descriptor can be inherited or delegated
-to another writer. The current verifier therefore rejects Linux connection
-evidence. A future listener must enable `SO_PASSCRED`, require exactly one
-non-truncated `SCM_CREDENTIALS` record on every accepted frame, match its
-PID/UID/GID to the retained still-live peer identity, and reject missing,
-duplicate, changed, or ambiguous credentials before making Linux work-order
-verification eligible.
+authority. A connected descriptor can be inherited or delegated to another
+writer, so the verifier rejects connection evidence. A sealed receiver now
+requires a close-on-exec Unix `SOCK_SEQPACKET` channel, enables and reads back
+`SO_PASSCRED`, and receives one bounded kernel record. It requires exactly one
+non-truncated `SCM_CREDENTIALS` item whose PID/UID/GID match the retained,
+still-live opener; rejects missing, duplicate, changed, or unknown ancillary
+data; closes and rejects every delivered `SCM_RIGHTS` descriptor; and
+revalidates the opener before and after receipt. Its non-cloneable evidence owns
+the exact payload and binds that payload digest to the retained connection
+evidence. Only this message evidence is Linux verifier-eligible. It remains
+crate-internal and unwired.
 
 Every future production controller channel must additionally satisfy all of
 these checks:
@@ -207,13 +212,13 @@ A missing, unreadable, unsupported, or mismatched attribute fails closed. UID/GI
 
 The future service must support multiple controllers concurrently. Each allowlist entry has a stable caller subject, independent lease scope, and independent rate and capacity accounting. Client-supplied caller names are diagnostic only and never override the authenticated subject.
 
-For production STDIO, the supervisor starts the adapter with an inherited channel that the service has already authenticated. On Linux, that inherited channel still requires the per-frame credential gate described above; connection-origin evidence alone is insufficient. The adapter refuses when the channel or frame identity is absent or invalid. Stdin and stdout carry MCP frames only; possession of those streams, process parentage, environment variables, and `--trusted-runner` do not authenticate the caller.
+For production STDIO, the allowlisted adapter must open the fixed private service channel itself after exec, or connect immediately before exec while retaining the same PID. Passing a supervisor-opened connected descriptor to a distinct adapter process is not supported: `SO_PEERCRED` identifies the opener while `SCM_CREDENTIALS` identifies the writer, and the receiver rejects the mismatch. The adapter refuses when channel or record identity is absent or invalid. Stdin and stdout carry MCP frames only; possession of those streams, process parentage, environment variables, and `--trusted-runner` do not authenticate the caller.
 
 ## Signed work orders and effective policy
 
 The sealed authority loader stores only prepared operator-approved Ed25519 public verification keys. It requires exact lowercase `ed25519:` public-key encoding, rejects weak keys, requires every unique key ID to be referenced by at least one exact controller scope, and never loads a private signing key. Signing private keys remain with the operator's chosen signing system and never enter `ctxlane`.
 
-A lease request carries a versioned signed work-order digest reference. Its canonical signed envelope binds the signing-key ID, client request ID, tenant, work-order ID and digest, run and attempt IDs, role, provider, immutable profile UID and explicit display alias, repository/workspace identity, environment, validity bounds, maximum TTL/session authority, and schema version. Changing any bound value invalidates the signature. The internal verifier reuses the published canonical signature message, accepts only the canonical 64-byte unpadded base64url signature form, uses strict Ed25519 verification, enforces validity plus every configured authorization key/scope and TTL/session ceiling, and collapses key, signature, and authorization failures into one redacted error. Its unforgeable result remains bound to the current authority configuration, caller evidence, host, assurance, and attestation binding. It is crate-private and unwired, and it cannot itself issue or activate a lease. Today only the explicitly unqualified macOS local-development evidence is verifier-eligible; Linux connection-origin evidence is rejected.
+A lease request carries a versioned signed work-order digest reference. Its canonical signed envelope binds the signing-key ID, client request ID, tenant, work-order ID and digest, run and attempt IDs, role, provider, immutable profile UID and explicit display alias, repository/workspace identity, environment, validity bounds, maximum TTL/session authority, and schema version. Changing any bound value invalidates the signature. The internal verifier reuses the published canonical signature message, accepts only the canonical 64-byte unpadded base64url signature form, uses strict Ed25519 verification, enforces validity plus every configured authorization key/scope and TTL/session ceiling, and collapses key, signature, and authorization failures into one redacted error. Its unforgeable result remains bound to the current authority configuration, authenticated message, host, assurance, and payload-specific attestation binding. It is crate-private and unwired, and it cannot itself issue or activate a lease. A future service must parse the authorization from those same authenticated payload bytes; passing a separately sourced authorization would break the binding. The explicitly unqualified macOS local-development message and the sealed Linux authenticated-message evidence are verifier-eligible; Linux connection-origin evidence is rejected.
 
 The parsed top-level `client_request_id` is a service-global replay key. After strict decoding and transport authentication, the service looks it up under the global idempotency lock before semantic evaluation. The first request durably records its canonical request digest and authenticated caller, host, and authority binding. An exact retry returns the same lease result only when every recorded value matches. A changed request or cross-caller or cross-host reuse returns the pre-lease `idempotency-conflict` error with no lease ID and no disclosure about an existing request or lease. The signed envelope contains the same ID as an authority gate. A fresh top-level ID paired with an envelope that signs another ID can create a durable `work-order-authorization-mismatch` refusal, but it cannot create additional authority. These rules are controller-neutral and would apply equally to future standalone automation and optional controller integrations.
 
@@ -372,7 +377,7 @@ Local retention is not tamper-proof archival. Deployments requiring longer evide
 
 | Platform | Phase-0 automation status | Required behavior |
 | --- | --- | --- |
-| Linux | Sealed connection-origin checkpoint; production target only after all later release gates pass | Require upstream Linux 6.5 or a qualified `SO_PEERPIDFD` backport; retain and revalidate peer UID/GID, pidfd/process, executable path/digest/snapshot, and protected systemd/cgroup binding; keep it verifier-ineligible until a future per-frame `SO_PASSCRED`/`SCM_CREDENTIALS` gate exists; then add durable recovery and native provider qualification |
+| Linux | Sealed opener and authenticated-record checkpoint; production target only after all later release gates pass | Require upstream Linux 6.5 or a qualified `SO_PEERPIDFD` backport; retain and revalidate peer UID/GID, pidfd/process, executable path/digest/snapshot, and protected systemd/cgroup binding; accept authority verification only from the sealed `SOCK_SEQPACKET`/`SO_PASSCRED` payload-bound message evidence; then add listener/service composition, durable process recovery, and native provider qualification |
 | macOS | Explicit development-only checkpoint | Require both configured acknowledgement and runtime opt-in, restrict authority scope to exact `local-development`, and always report caller and credential isolation as unqualified |
 | Windows and other targets | Authority checkpoint unsupported with zero filesystem access | Refuse authority loading before deriving or reading its path; future automation service, MCP, lease, and execution entry points must also refuse before credentials, harness launch, network activity, or authority-bearing mutation |
 
@@ -384,7 +389,7 @@ This Phase-0 document is complete when the contracts and threat boundaries are r
 
 1. A supported operator surface for automation policy and trust roots, plus service integration of the existing immutable profile UIDs, canonical signed-work-order verifier, stable refusal codes, and server-computed policy digests.
 2. The existing-binary Linux service, complete durable transactional lease/audit transitions, fencing, TTL, renewal acknowledgement, revocation, process recovery, retention, and audited pruning. The current sealed schema-v3 store covers the unwired transactional lease/capacity/retention mechanics and a conservative terminal-only recovery gate, but not authenticated authority composition, process reconciliation, launch, or service readiness.
-3. An authenticated controller listener with the mandatory Linux per-frame credential gate, execution channels, multiple-controller isolation, inherited-channel STDIO MCP, the bounded tool schema, and the fixed structured fake-provider harness. The current platform adapters provide only sealed connection/development evidence.
+3. An authenticated controller listener composed with the existing sealed Linux record receiver, execution channels, multiple-controller isolation, authenticated-channel STDIO MCP, the bounded tool schema, and the fixed structured fake-provider harness. The current checkpoint provides the record evidence but no listener or service consumer.
 4. Controller-neutral end-to-end integration proving that coding-agent and tool sandboxes cannot reach service channels, credentials, vendor homes, or unsupported execution surfaces, plus optional Runmill compatibility coverage.
 5. Native Claude and Codex provider identity qualification on protected Linux, including principal/workspace verification and per-lease state isolation.
 6. Crash-boundary failure injection, clock rollback, replay, signature tamper, caller spoof, executable replacement, cgroup mismatch, stale-generation, renewal-acknowledgement, concurrency, credential-search, pruning, and recovery tests.

@@ -34,6 +34,7 @@ const PUBLIC_KEY: &str = "3e7ac95170ac322c7cbd342e12e5e0af36f21375ed128c33372e73
 #[test]
 fn connection_level_linux_attestation_is_not_verifier_eligible() {
     assert!(!AuthenticationAssurance::LinuxConnectionAttested.permits_work_order_verification());
+    assert!(AuthenticationAssurance::LinuxMessageAuthenticated.permits_work_order_verification());
     assert!(AuthenticationAssurance::MacosDevelopmentUnqualified.permits_work_order_verification());
 }
 
@@ -734,23 +735,26 @@ fn verified_token_is_time_caller_and_configuration_bound() {
         DetachedSignature::parse(encode_signature(&signing_key.sign(&message).to_bytes()))
             .unwrap_or_else(|error| panic!("signed fixture: {error:?}"));
     let now = parsed("2026-08-21T10:00:00Z");
+    let authenticated_message = caller
+        .authenticate_development_message(&authority, b"request-one".to_vec().into_boxed_slice())
+        .unwrap_or_else(|error| panic!("authenticate message: {error:?}"));
     let proof = authority
-        .verify_work_order(&caller, &authorization, &now)
+        .verify_work_order(&authenticated_message, &authorization, &now)
         .unwrap_or_else(|error| panic!("verify: {error:?}"));
-    assert!(proof.matches(&authority, &caller, &authorization, &now));
+    assert!(proof.matches(&authority, &authenticated_message, &authorization, &now));
     assert!(!proof.matches(
         &authority,
-        &caller,
+        &authenticated_message,
         &authorization,
         &parsed("2026-08-21T14:00:00Z")
     ));
     let mut changed = authorization.clone();
     changed.tenant_id = parsed("tenant-other");
-    assert!(!proof.matches(&authority, &caller, &changed, &now));
+    assert!(!proof.matches(&authority, &authenticated_message, &changed, &now));
     assert_eq!(proof.authorization(), &authorization);
     assert_eq!(proof.caller_subject(), caller.subject());
     assert_eq!(proof.host_identity(), caller.host_identity());
-    assert_eq!(proof.assurance(), caller.assurance());
+    assert_eq!(proof.assurance(), authenticated_message.assurance());
     assert_eq!(proof.key_id(), &authorization.key_id);
     assert_eq!(
         proof.signed_message_digest(),
@@ -768,5 +772,15 @@ fn verified_token_is_time_caller_and_configuration_bound() {
     let changed_authority = changed_fixture
         .load()
         .unwrap_or_else(|error| panic!("changed load: {error:?}"));
-    assert!(!proof.matches(&changed_authority, &caller, &authorization, &now));
+    assert!(!proof.matches(
+        &changed_authority,
+        &authenticated_message,
+        &authorization,
+        &now
+    ));
+
+    let second_message = caller
+        .authenticate_development_message(&authority, b"request-two".to_vec().into_boxed_slice())
+        .unwrap_or_else(|error| panic!("authenticate second message: {error:?}"));
+    assert!(!proof.matches(&authority, &second_message, &authorization, &now));
 }

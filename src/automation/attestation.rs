@@ -18,7 +18,7 @@ mod unsupported;
 
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
-pub(crate) use linux::LinuxAttestor;
+pub(crate) use linux::{LinuxAttestor, LinuxAuthenticatedChannel};
 #[cfg(target_os = "macos")]
 #[allow(unused_imports)]
 pub(crate) use macos::MacosDevelopmentAttestor;
@@ -39,9 +39,9 @@ pub(crate) enum AttestationError {
 
 /// An attested connection-opening controller. Construction is platform-private.
 ///
-/// On Linux this value alone must never authorize an individual stream message:
-/// a future listener must also obtain per-message credentials and match them to
-/// the retained, revalidated process identity.
+/// On Linux this value alone must never authorize an individual message. Only
+/// the sealed record receiver may match per-message credentials to this
+/// retained, revalidated process identity and construct `AuthenticatedMessage`.
 pub(crate) struct AuthenticatedCaller {
     subject: CallerSubject,
     host_identity: HostIdentity,
@@ -50,6 +50,103 @@ pub(crate) struct AuthenticatedCaller {
     controller: PreparedController,
     #[cfg(target_os = "linux")]
     process_guard: linux::LinuxProcessGuard,
+}
+
+/// One bounded transport record authenticated as coming from the retained
+/// connection-opening process.
+///
+/// This value deliberately borrows the channel's caller guard, owns the exact
+/// received payload, and exposes neither raw kernel credentials nor a cloning
+/// or comparison surface. Holding it prevents the channel from receiving the
+/// next record while authority derived from this record is in use.
+pub(crate) struct AuthenticatedMessage<'channel> {
+    caller: &'channel AuthenticatedCaller,
+    payload: Box<[u8]>,
+    assurance: AuthenticationAssurance,
+    attestation_binding: Sha256Digest,
+}
+
+impl<'channel> AuthenticatedMessage<'channel> {
+    fn new(
+        caller: &'channel AuthenticatedCaller,
+        payload: Box<[u8]>,
+        assurance: AuthenticationAssurance,
+        authority: &PreparedAuthority,
+    ) -> Result<Self, AttestationError> {
+        caller.revalidate(authority)?;
+        if payload.is_empty()
+            || payload.len()
+                > usize::try_from(authority.service_limits().max_frame_bytes)
+                    .map_err(|_| AttestationError::CallerAuthenticationFailed)?
+        {
+            return Err(AttestationError::CallerAuthenticationFailed);
+        }
+        let attestation_binding = message_binding(caller.attestation_binding(), &payload)?;
+        Ok(Self {
+            caller,
+            payload,
+            assurance,
+            attestation_binding,
+        })
+    }
+
+    #[must_use]
+    pub(super) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    #[must_use]
+    pub(super) const fn subject(&self) -> &CallerSubject {
+        self.caller.subject()
+    }
+
+    #[must_use]
+    pub(super) const fn host_identity(&self) -> &HostIdentity {
+        self.caller.host_identity()
+    }
+
+    #[must_use]
+    pub(super) const fn assurance(&self) -> AuthenticationAssurance {
+        self.assurance
+    }
+
+    #[must_use]
+    pub(super) const fn attestation_binding(&self) -> Sha256Digest {
+        self.attestation_binding
+    }
+
+    #[must_use]
+    pub(super) const fn controller(&self) -> &PreparedController {
+        self.caller.controller()
+    }
+
+    pub(super) fn revalidate(&self, authority: &PreparedAuthority) -> Result<(), AttestationError> {
+        self.caller.revalidate(authority)?;
+        if self.payload.is_empty()
+            || self.payload.len()
+                > usize::try_from(authority.service_limits().max_frame_bytes)
+                    .map_err(|_| AttestationError::CallerAuthenticationFailed)?
+            || self.attestation_binding
+                != message_binding(self.caller.attestation_binding(), &self.payload)?
+        {
+            return Err(AttestationError::CallerAuthenticationFailed);
+        }
+        Ok(())
+    }
+}
+
+fn message_binding(
+    caller_binding: Sha256Digest,
+    payload: &[u8],
+) -> Result<Sha256Digest, AttestationError> {
+    let length =
+        u64::try_from(payload.len()).map_err(|_| AttestationError::CallerAuthenticationFailed)?;
+    let digest = Sha256Digest::hash(payload);
+    let mut material = b"ctxlane.authenticated-message/v1\0".to_vec();
+    material.extend_from_slice(caller_binding.as_bytes());
+    material.extend_from_slice(&length.to_be_bytes());
+    material.extend_from_slice(digest.as_bytes());
+    Ok(Sha256Digest::hash(material))
 }
 
 impl AuthenticatedCaller {
@@ -127,6 +224,23 @@ impl AuthenticatedCaller {
             attestation_binding,
             controller,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn authenticate_development_message<'channel>(
+        &'channel self,
+        authority: &PreparedAuthority,
+        payload: Box<[u8]>,
+    ) -> Result<AuthenticatedMessage<'channel>, AttestationError> {
+        if self.assurance != AuthenticationAssurance::MacosDevelopmentUnqualified {
+            return Err(AttestationError::CallerAuthenticationFailed);
+        }
+        AuthenticatedMessage::new(
+            self,
+            payload,
+            AuthenticationAssurance::MacosDevelopmentUnqualified,
+            authority,
+        )
     }
 }
 
